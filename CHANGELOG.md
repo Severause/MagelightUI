@@ -59,9 +59,11 @@ pages drawing behind upscalers and frame generation.
   keeps the game's UI apart from the scene and drops anything drawn at Present,
   so the pages opened (sound, paused game) but stayed invisible. Magelight can now
   draw the pages in the game's own UI pass: an invisible engine menu, open only
-  while a page is visible, draws them into the UI's render target. When that pass
-  does not run (loading screens, the console's `tm`), the pages are drawn at
-  Present again within two frames. `Magelight.json` `"composite"`: `auto`
+  while a page the player can click is visible, draws them into the UI's render
+  target. When that pass does not run (loading screens, the console's `tm`), the
+  pages are drawn at Present again within two frames. Click-through HUD pages
+  still draw at Present, so they stay hidden behind the HUD Fix: the menu would
+  keep Escape from opening the Journal for as long as one is up. `Magelight.json` `"composite"`: `auto`
   (default: the UI pass when Skyrim Upscaler is installed, never on VR),
   `present`, `ui`.
 - **Diagnostics.** The log names the plugin whose Present hook Magelight found,

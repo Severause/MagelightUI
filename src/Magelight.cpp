@@ -603,6 +603,16 @@ namespace Magelight {
         return false;
     }
 
+    // A visible view the player can click: the UI-pass carrier opens only for one of these (see
+    // MagelightOverlayMenu), so a HUD view that stays up never holds it open over gameplay.
+    static bool AnyInteractiveViewVisible()
+    {
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        for (const auto& v : s_views)
+            if (v->visible && !v->clickThrough) return true;
+        return false;
+    }
+
     static std::string JSStringToStd(JSStringRef s)
     {
         if (!s) return {};
@@ -1341,9 +1351,10 @@ namespace Magelight {
 
     static void UiPassComposite();   // fwd (frame section)
 
-    // The carrier: an invisible menu that exists for its PostDisplay, open only while a view is visible. In the
-    // menu stack it reads to the engine as an open menu, so Escape no longer opens the Journal while it is up:
-    // it must never stay open over plain gameplay. It takes no input; user events pass on.
+    // The carrier: an invisible menu that exists for its PostDisplay, open only while an interactive view is
+    // visible. In the menu stack it reads to the engine as an open menu, so Escape no longer opens the Journal
+    // while it is up: it must never stay open over plain gameplay, and a click-through HUD view draws at
+    // Present instead. It takes no input; user events pass on.
     class MagelightOverlayMenu final : public RE::IMenu
     {
     public:
@@ -4134,14 +4145,18 @@ float4 ps_straight(VSOut i) : SV_Target {
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
         // While the UI pass is live the composite records its quads for it instead of drawing them over the
         // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
-        SyncOverlayMenu(AnyViewVisible());
+        SyncOverlayMenu(AnyInteractiveViewVisible());
         s_compositeFrames.fetch_add(1);
         const bool defer = s_overlayMenuRegistered && UiPassActive();
+        // The first deferred frame also draws here: the UI pass already ran this frame with nothing queued.
+        static bool s_deferredLast = false;
+        const bool drawNow = !defer || !s_deferredLast;
+        s_deferredLast = defer;
         std::vector<QueuedQuad> queued;
         auto emit = [&](ID3D11ShaderResourceView* qsrv, float u0, float v0, float u1, float v1,
                         float x, float y, float w, float h, const float* cutUV) {
-            if (!defer) { DrawOverlay(sc, qsrv, u0, v0, u1, v1, x, y, w, h, cutUV); return; }
-            if (!qsrv) return;
+            if (drawNow) DrawOverlay(sc, qsrv, u0, v0, u1, v1, x, y, w, h, cutUV);
+            if (!defer || !qsrv) return;
             QueuedQuad q;
             q.srv = qsrv; qsrv->AddRef();
             q.u0 = u0; q.v0 = v0; q.u1 = u1; q.v1 = v1; q.x = x; q.y = y; q.w = w; q.h = h;
@@ -4511,7 +4526,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour)
     {
         if (t_composited || fromLateDetour != s_lateComposite.load()) return;
-        if (fromLateDetour && !OnOurDevice(sc)) return;
+        if (!OnOurDevice(sc)) return;
         t_composited = true;
         if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
     }
@@ -4525,6 +4540,11 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (!s_deadNotified.exchange(true)) {
                 VR::Shutdown();   // overlays must not outlive a dead overlay host
                 Emit(HostEvent::RenderDead, 0);
+                if (s_overlayMenuRegistered)
+                    GameTask::Post([]() {
+                        if (auto* q = RE::UIMessageQueue::GetSingleton())
+                            q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+                    });
             }
             if (s_focused.load()) GameTask::Post([]() { SetUIMode(false); });
         }
@@ -4541,7 +4561,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_lateMisses.store(0);
             } else if (s_lateMisses.fetch_add(1) + 1 >= 30) {
                 s_lateComposite.store(false);
-                SKSE::log::warn("Magelight: late composite never reached dxgi's Present in 30 frames - compositing in the vtable hook again");
+                SKSE::log::warn("Magelight: late composite did not draw in 30 frames (dxgi's Present not reached, or not on the game's device) - compositing in the vtable hook again");
             }
         }
         t_composited = false;
@@ -4564,13 +4584,16 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // Flip-model presenters (frame generation, some upscalers and overlays) can present through Present1,
     // which never passes through Present.
+    static std::atomic<bool> s_latePresent1Hooked{ false };   // dxgi's Present1 carries a late detour
+
     static HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
                                                   const DXGI_PRESENT_PARAMETERS* params)
     {
         GameTask::Scope pumpScope;
         ++t_presentDepth;
         StampPresent(sc, _ReturnAddress());
-        ComposeOnce(sc, false);
+        // Without a Present1 detour, late mode has nowhere later to draw a Present1 frame: draw it here.
+        ComposeOnce(sc, s_lateComposite.load() && !s_latePresent1Hooked.load());
         AfterCompose();
         const HRESULT hr = s_origPresent1(sc, sync, flags, params);
         EndPresent(true);
@@ -4631,7 +4654,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         f.seekg(dos.e_lfanew);
         if (!f.read(reinterpret_cast<char*>(&nt), sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE ||
             nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-            nt.OptionalHeader.SizeOfImage != liveNt->OptionalHeader.SizeOfImage)
+            nt.OptionalHeader.SizeOfImage != liveNt->OptionalHeader.SizeOfImage ||
+            nt.FileHeader.TimeDateStamp != liveNt->FileHeader.TimeDateStamp ||
+            nt.OptionalHeader.CheckSum != liveNt->OptionalHeader.CheckSum)
             return nullptr;
         f.seekg(dos.e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader);
         for (WORD i = 0; i < nt.FileHeader.NumberOfSections; ++i) {
@@ -4655,16 +4680,18 @@ float4 ps_straight(VSOut i) : SV_Target {
         return mod;
     }
 
-    static bool ModuleNamed(HMODULE mod, const wchar_t* name)
+    // `mod` is the system directory's `name`: a same-named proxy in the game folder (ReShade or a frame-gen
+    // layer installed as dxgi.dll) is not dxgi's own code.
+    static bool IsSystemModule(HMODULE mod, const wchar_t* name)
     {
-        wchar_t path[MAX_PATH] = {};
-        if (!mod || !GetModuleFileNameW(mod, path, MAX_PATH)) return false;
-        const wchar_t* file = std::wcsrchr(path, L'\\');
-        return _wcsicmp(file ? file + 1 : path, name) == 0;
+        wchar_t path[MAX_PATH] = {}, sys[MAX_PATH] = {};
+        if (!mod || !GetModuleFileNameW(mod, path, MAX_PATH) || !GetSystemDirectoryW(sys, MAX_PATH)) return false;
+        return _wcsicmp(path, (std::wstring(sys) + L"\\" + name).c_str()) == 0;
     }
 
     // dxgi's swapchain vtable when the game's swapchain is a proxy (ENB's d3d11.dll wraps it): a throwaway
-    // WARP device and swapchain made through the SYSTEM d3d11.dll, so no proxy in the game folder sees them.
+    // WARP device and swapchain made through the SYSTEM d3d11.dll, so a d3d11.dll proxy does not see them. A
+    // dxgi.dll proxy would (system d3d11 binds to the loaded dxgi.dll); the caller's IsSystemModule refuses it.
     // The vtable is shared by every dxgi swapchain; only its address is kept.
     static void* const* DxgiSwapChainVtable()
     {
@@ -4723,14 +4750,14 @@ float4 ps_straight(VSOut i) : SV_Target {
             return;
         }
         HMODULE dxgi = ModuleAt(vtbl);
-        if (!ModuleNamed(dxgi, L"dxgi.dll")) {
+        if (!IsSystemModule(dxgi, L"dxgi.dll")) {
             // A proxy's swapchain wraps a real dxgi one: detour dxgi's own functions, found through a throwaway
             // dxgi swapchain.
             SKSE::log::info("Magelight: the game swapchain is a proxy ({}); finding dxgi's own swapchain", ModuleOf(vtbl));
             vtbl = DxgiSwapChainVtable();
             vtbl1 = vtbl;
             dxgi = vtbl ? ModuleAt(vtbl) : nullptr;
-            if (!vtbl || !ModuleNamed(dxgi, L"dxgi.dll")) {
+            if (!vtbl || !IsSystemModule(dxgi, L"dxgi.dll")) {
                 SKSE::log::warn("Magelight: late composite unavailable - no dxgi swapchain vtable found");
                 return;
             }
@@ -4756,7 +4783,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (present1 && ModuleAt(present1) == dxgi) {
             MH_STATUS st1 = MH_CreateHook(present1, reinterpret_cast<void*>(&LatePresent1), reinterpret_cast<void**>(&s_latePresent1Next));
             if (st1 == MH_OK) st1 = MH_EnableHook(present1);
-            if (st1 != MH_OK)
+            if (st1 == MH_OK)
+                s_latePresent1Hooked.store(true);
+            else
                 SKSE::log::warn("Magelight: late composite: dxgi's Present1 at {} not hooked ({}) - Present1 frames composite in the vtable hook",
                     ModuleOf(present1), MH_StatusToString(st1));
         }
