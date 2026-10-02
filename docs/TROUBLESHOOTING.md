@@ -136,6 +136,7 @@ it read, or says that defaults are in effect.
 | `devMode` | `false` | Hot reload of page files and the on-page JS error banner |
 | `logLevel` | `"info"` | `trace`, `debug`, `info`, `warn` or `error` |
 | `forceCpu` | `false` | Skip the GPU driver and use Ultralight's CPU renderer |
+| `presentHook` | `"auto"` | Where pages are drawn onto the frame. `auto` draws inside dxgi's own Present only when another mod hooked Present first (an upscaler, for one) and could otherwise draw over the pages; never on VR. `late` always does, `vtable` never. Try `late` when a page opens (sound, paused game) but stays invisible |
 | `fontHinting`, `fontGamma` | `"normal"`, `1.8` | Text rendering: `smooth`, `normal`, `monochrome` or `none`; gamma 1.0-3.0 |
 | `cursorFile`, `cursorHeight` | `"cursor.png"`, `36` | Cursor art (relative to the runtime folder, or absolute) and its height in pixels at 1080p (8-256) |
 | `cursorHotspotX`, `cursorHotspotY` | `0.044`, `0.01` | The pointer pixel of the cursor art, 0-1 across and down |

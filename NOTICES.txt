@@ -62,6 +62,8 @@ Please see the accompanying NOTICES.txt for full text.
    - {fmt} (MIT)  https://github.com/fmtlib/fmt
    - spdlog (MIT)  https://github.com/gabime/spdlog
    - nlohmann/json (MIT)  https://github.com/nlohmann/json
+   - MinHook, with the Hacker Disassembler Engine (BSD 2-Clause)
+     https://github.com/TsudaKageyu/minhook
    - rapidcsv (BSD 3-Clause)  https://github.com/d99kris/rapidcsv
    - Xbyak (BSD 3-Clause)  https://github.com/herumi/xbyak
    - DirectXMath and DirectX Tool Kit's SimpleMath, Microsoft (MIT);

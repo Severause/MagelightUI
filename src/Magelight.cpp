@@ -16,9 +16,10 @@
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 #include <windows.h>
 #include <intrin.h>
+#include <MinHook.h>
 #include <imm.h>   // IME (0.27.0)
 #include <windowsx.h>
 #include <tlhelp32.h>
@@ -280,6 +281,9 @@ namespace Magelight {
     static std::atomic<int>  s_imeCaretX{ -1 }, s_imeCaretY{ -1 }, s_imeCaretH{ 0 };   // client px; x<0 = unknown
 
     static std::filesystem::path s_runtimeDir;  // Data/SKSE/Plugins/Magelight
+    // Magelight.json "presentHook": "auto" (late composite only behind an earlier Present hook, never on VR),
+    // "late" (always try it), "vtable" (never). See InstallLatePresent.
+    static std::string s_presentHookMode = "auto";
 
     // Read Magelight.json from the runtime dir (see the settings block at the
     // top of the file for the schema). Missing/corrupt file = defaults.
@@ -312,6 +316,8 @@ namespace Magelight {
                 s_toggleKey.store(it->get<std::uint32_t>());
             if (auto it = j.find("forceCpu"); it != j.end() && it->is_boolean())
                 s_forceCpu.store(it->get<bool>());
+            if (auto it = j.find("presentHook"); it != j.end() && it->is_string())
+                s_presentHookMode = HotkeyNames::Lower(it->get<std::string>());
             if (auto it = j.find("devMode"); it != j.end() && it->is_boolean())
                 s_devMode.store(it->get<bool>());
             if (auto it = j.find("fontHinting"); it != j.end() && it->is_string())
@@ -4227,40 +4233,280 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     }
 
-    static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+    // Where the frame is composited. The vtable hooks below are installed at kDataLoaded, so a plugin that
+    // hooked Present earlier (an upscaler, a proxy) runs AFTER our composite and can draw over it. Late
+    // composite moves the draw into a detour on dxgi's own Present, the last code before the frame is queued.
+    // One composite per present per thread: a wrapper's Present that calls Present1, or a vtable hook above
+    // the late detour, must not draw twice (t_presentDepth / t_composited).
+    static std::atomic<bool> s_lateComposite{ false };
+    static std::atomic<int>  s_lateMisses{ 0 };   // vtable presents whose chain never reached the late detour
+    static thread_local int  t_presentDepth = 0;
+    static thread_local bool t_composited = false;
+
+    static void StampPresent(IDXGISwapChain* sc, const void* caller)
     {
-        NotePresenter(sc, _ReturnAddress());
-        // Covers every callback made from here and the real Present; GuardedFrameWork catches its own faults.
-        GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
-        // Stall watchdog heartbeat: EVERY present counts, from whichever
-        // thread. 0.28.3 stamped it at the end of FrameWork, which loading
-        // screens and menus never reach (they present from a foreign thread
-        // and FrameWork returns at its top), so every load over the threshold
-        // read as a stall and spent the session's sample budget on nothing
-        // (field 2026-09-08: both of a tester's samples were a tavern exit).
+        NotePresenter(sc, caller);
+        // Stall watchdog heartbeat: EVERY present counts, from whichever thread (loading screens and menus
+        // present from a foreign thread and FrameWork returns at its top).
         s_lastPresentMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                                   std::chrono::steady_clock::now().time_since_epoch()).count());
         s_lastPresentTid.store(GetCurrentThreadId());
-        if (s_runtimeReady.load() && !s_renderDead.load()) {
-            GuardedFrameWork(sc);
-        }
-        // Render death is announced from HERE (outside the SEH guard, on
-        // whichever present thread notices), once — FrameWork itself is
-        // never entered again after the kill switch, so an emit inside it
-        // would only cover the init-failure path.
+    }
+
+    static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour)
+    {
+        if (t_composited || fromLateDetour != s_lateComposite.load()) return;
+        t_composited = true;
+        if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
+    }
+
+    static void AfterCompose()
+    {
+        // Render death is announced once, outside the SEH guard (FrameWork is never entered again after the
+        // kill switch), and a player is never left with suspended controls by a dead renderer.
         if (s_renderDead.load()) {
             static std::atomic<bool> s_deadNotified{ false };
             if (!s_deadNotified.exchange(true)) {
                 VR::Shutdown();   // overlays must not outlive a dead overlay host
                 Emit(HostEvent::RenderDead, 0);
             }
+            if (s_focused.load()) GameTask::Post([]() { SetUIMode(false); });
         }
-        // If anything tripped the kill switch while UI mode was up, drop the
-        // mode so the player is never stranded with suspended controls.
-        if (s_renderDead.load() && s_focused.load()) {
-            GameTask::Post([]() { SetUIMode(false); });
+    }
+
+    // The outermost present of a thread ends here; the next one may composite again. In late mode a vtable
+    // present whose chain never reached the detour (the plugin under us presented another way) is a miss, and
+    // 30 in a row fall back to compositing in the vtable hook, so the UI is never lost for good.
+    static void EndPresent(bool vtableHook)
+    {
+        if (--t_presentDepth > 0) return;
+        if (vtableHook && s_lateComposite.load()) {
+            if (t_composited) {
+                s_lateMisses.store(0);
+            } else if (s_lateMisses.fetch_add(1) + 1 >= 30) {
+                s_lateComposite.store(false);
+                SKSE::log::warn("Magelight: late composite never reached dxgi's Present in 30 frames - compositing in the vtable hook again");
+            }
         }
-        return s_origPresent(sc, sync, flags);
+        t_composited = false;
+    }
+
+    static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+    {
+        GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
+        ++t_presentDepth;
+        StampPresent(sc, _ReturnAddress());
+        ComposeOnce(sc, false);
+        AfterCompose();
+        const HRESULT hr = s_origPresent(sc, sync, flags);
+        EndPresent(true);
+        return hr;
+    }
+
+    using Present1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+    static Present1Fn s_origPresent1 = nullptr;
+
+    // Flip-model presenters (frame generation, some upscalers and overlays) can present through Present1,
+    // which never passes through Present.
+    static HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
+                                                  const DXGI_PRESENT_PARAMETERS* params)
+    {
+        GameTask::Scope pumpScope;
+        ++t_presentDepth;
+        StampPresent(sc, _ReturnAddress());
+        ComposeOnce(sc, false);
+        AfterCompose();
+        const HRESULT hr = s_origPresent1(sc, sync, flags, params);
+        EndPresent(true);
+        return hr;
+    }
+
+    static PresentFn  s_latePresentNext = nullptr;    // MinHook trampolines into dxgi's own code
+    static Present1Fn s_latePresent1Next = nullptr;
+
+    static HRESULT STDMETHODCALLTYPE LatePresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+    {
+        GameTask::Scope pumpScope;
+        ++t_presentDepth;
+        ComposeOnce(sc, true);
+        AfterCompose();
+        const HRESULT hr = s_latePresentNext(sc, sync, flags);
+        EndPresent(false);
+        return hr;
+    }
+
+    static HRESULT STDMETHODCALLTYPE LatePresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
+                                                  const DXGI_PRESENT_PARAMETERS* params)
+    {
+        GameTask::Scope pumpScope;
+        ++t_presentDepth;
+        ComposeOnce(sc, true);
+        AfterCompose();
+        const HRESULT hr = s_latePresent1Next(sc, sync, flags, params);
+        EndPresent(false);
+        return hr;
+    }
+
+    static const IMAGE_NT_HEADERS* NtHeaders(const void* base)
+    {
+        const auto* b = static_cast<const std::uint8_t*>(base);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(b + dos->e_lfanew);
+        return nt->Signature == IMAGE_NT_SIGNATURE ? nt : nullptr;
+    }
+
+    // dxgi's own function for a vtable slot, whatever was patched into the slot since. The slot's bytes are
+    // read from the dxgi.dll FILE: an image mapping shares the live module's (relocated, patched) pages. The
+    // file holds preferred base + RVA, unrelocated.
+    static void* OriginalVtableSlot(HMODULE mod, void* const* vtbl, int slot)
+    {
+        wchar_t path[MAX_PATH] = {};
+        if (!GetModuleFileNameW(mod, path, MAX_PATH)) return nullptr;
+        const auto* liveNt = NtHeaders(mod);
+        if (!liveNt) return nullptr;
+        const std::uint64_t rva = static_cast<std::uint64_t>(
+            reinterpret_cast<const std::uint8_t*>(&vtbl[slot]) - reinterpret_cast<const std::uint8_t*>(mod));
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return nullptr;
+        IMAGE_DOS_HEADER dos{};
+        IMAGE_NT_HEADERS64 nt{};
+        if (!f.read(reinterpret_cast<char*>(&dos), sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+        f.seekg(dos.e_lfanew);
+        if (!f.read(reinterpret_cast<char*>(&nt), sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE ||
+            nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+            nt.OptionalHeader.SizeOfImage != liveNt->OptionalHeader.SizeOfImage)
+            return nullptr;
+        f.seekg(dos.e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader);
+        for (WORD i = 0; i < nt.FileHeader.NumberOfSections; ++i) {
+            IMAGE_SECTION_HEADER sh{};
+            if (!f.read(reinterpret_cast<char*>(&sh), sizeof(sh))) return nullptr;
+            if (rva < sh.VirtualAddress || rva + sizeof(std::uint64_t) > std::uint64_t{ sh.VirtualAddress } + sh.SizeOfRawData) continue;
+            std::uint64_t onDisk = 0;
+            f.seekg(sh.PointerToRawData + (rva - sh.VirtualAddress));
+            if (!f.read(reinterpret_cast<char*>(&onDisk), sizeof(onDisk))) return nullptr;
+            const std::uint64_t fnRva = onDisk - nt.OptionalHeader.ImageBase;
+            return fnRva < nt.OptionalHeader.SizeOfImage ? reinterpret_cast<std::uint8_t*>(mod) + fnRva : nullptr;
+        }
+        return nullptr;
+    }
+
+    static HMODULE ModuleAt(const void* p)
+    {
+        HMODULE mod = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(p), &mod);
+        return mod;
+    }
+
+    static bool ModuleNamed(HMODULE mod, const wchar_t* name)
+    {
+        wchar_t path[MAX_PATH] = {};
+        if (!mod || !GetModuleFileNameW(mod, path, MAX_PATH)) return false;
+        const wchar_t* file = std::wcsrchr(path, L'\\');
+        return _wcsicmp(file ? file + 1 : path, name) == 0;
+    }
+
+    // dxgi's swapchain vtable when the game's swapchain is a proxy (ENB's d3d11.dll wraps it): a throwaway
+    // WARP device and swapchain made through the SYSTEM d3d11.dll, so no proxy in the game folder sees them.
+    // The vtable is shared by every dxgi swapchain; only its address is kept.
+    static void* const* DxgiSwapChainVtable()
+    {
+        wchar_t sys[MAX_PATH] = {};
+        if (!GetSystemDirectoryW(sys, MAX_PATH)) return nullptr;
+        HMODULE d3d = LoadLibraryW((std::wstring(sys) + L"\\d3d11.dll").c_str());
+        if (!d3d) return nullptr;
+        void* const* out = nullptr;
+        auto create = reinterpret_cast<PFN_D3D11_CREATE_DEVICE>(GetProcAddress(d3d, "D3D11CreateDevice"));
+        HWND wnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 8, 8, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        ID3D11Device* dev = nullptr;
+        if (create && wnd && SUCCEEDED(create(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &dev, nullptr, nullptr))) {
+            IDXGIDevice* dxgiDev = nullptr;
+            IDXGIAdapter* adapter = nullptr;
+            IDXGIFactory* factory = nullptr;
+            if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev))) &&
+                SUCCEEDED(dxgiDev->GetAdapter(&adapter)) &&
+                SUCCEEDED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&factory)))) {
+                DXGI_SWAP_CHAIN_DESC d{};
+                d.BufferCount = 1;
+                d.BufferDesc.Width = 8;
+                d.BufferDesc.Height = 8;
+                d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                d.OutputWindow = wnd;
+                d.SampleDesc.Count = 1;
+                d.Windowed = TRUE;
+                IDXGISwapChain* sc = nullptr;
+                if (SUCCEEDED(factory->CreateSwapChain(dev, &d, &sc)) && sc) {
+                    out = *reinterpret_cast<void***>(sc);
+                    sc->Release();
+                }
+            }
+            if (factory) factory->Release();
+            if (adapter) adapter->Release();
+            if (dxgiDev) dxgiDev->Release();
+            dev->Release();
+        }
+        if (wnd) DestroyWindow(wnd);
+        return out;
+    }
+
+    // "auto" turns it on only behind an earlier Present hook: the slot we patched did not hold its own
+    // vtable's code (a plain dxgi swapchain's, or a proxy's such as ENB's). Never on VR.
+    static void InstallLatePresent(void* const* vtbl, void* const* vtbl1)
+    {
+        const std::string& mode = s_presentHookMode;
+        if (mode == "vtable") {
+            SKSE::log::info("Magelight: presentHook 'vtable' - compositing in the vtable hook");
+            return;
+        }
+        const bool earlierHook = ModuleAt(reinterpret_cast<const void*>(s_origPresent)) != ModuleAt(vtbl);
+        if (mode != "late" && (!earlierHook || REL::Module::IsVR())) {
+            SKSE::log::info("Magelight: presentHook 'auto' - {}, compositing in the vtable hook",
+                REL::Module::IsVR() ? "VR" : "no earlier Present hook");
+            return;
+        }
+        HMODULE dxgi = ModuleAt(vtbl);
+        if (!ModuleNamed(dxgi, L"dxgi.dll")) {
+            // A proxy's swapchain wraps a real dxgi one: detour dxgi's own functions, found through a throwaway
+            // dxgi swapchain.
+            SKSE::log::info("Magelight: the game swapchain is a proxy ({}); finding dxgi's own swapchain", ModuleOf(vtbl));
+            vtbl = DxgiSwapChainVtable();
+            vtbl1 = vtbl;
+            dxgi = vtbl ? ModuleAt(vtbl) : nullptr;
+            if (!vtbl || !ModuleNamed(dxgi, L"dxgi.dll")) {
+                SKSE::log::warn("Magelight: late composite unavailable - no dxgi swapchain vtable found");
+                return;
+            }
+        }
+        void* present = OriginalVtableSlot(dxgi, vtbl, 8);
+        void* present1 = (vtbl1 && ModuleAt(vtbl1) == dxgi) ? OriginalVtableSlot(dxgi, vtbl1, 22) : nullptr;
+        if (!present || ModuleAt(present) != dxgi) {
+            SKSE::log::warn("Magelight: late composite unavailable - dxgi's own Present not found");
+            return;
+        }
+        const MH_STATUS init = MH_Initialize();
+        if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
+            SKSE::log::warn("Magelight: late composite unavailable - MinHook init: {}", MH_StatusToString(init));
+            return;
+        }
+        MH_STATUS st = MH_CreateHook(present, reinterpret_cast<void*>(&LatePresent), reinterpret_cast<void**>(&s_latePresentNext));
+        if (st == MH_OK) st = MH_EnableHook(present);
+        if (st != MH_OK) {
+            SKSE::log::warn("Magelight: late composite unavailable - hooking dxgi's Present at {} failed: {}",
+                ModuleOf(present), MH_StatusToString(st));
+            return;
+        }
+        if (present1 && ModuleAt(present1) == dxgi) {
+            MH_STATUS st1 = MH_CreateHook(present1, reinterpret_cast<void*>(&LatePresent1), reinterpret_cast<void**>(&s_latePresent1Next));
+            if (st1 == MH_OK) st1 = MH_EnableHook(present1);
+            if (st1 != MH_OK)
+                SKSE::log::warn("Magelight: late composite: dxgi's Present1 at {} not hooked ({}) - Present1 frames composite in the vtable hook",
+                    ModuleOf(present1), MH_StatusToString(st1));
+        }
+        s_lateComposite.store(true);
+        SKSE::log::info("Magelight: late composite ON ('{}') - drawing inside dxgi's Present at {}, after {}",
+            mode, ModuleOf(present), ModuleOf(reinterpret_cast<const void*>(s_origPresent)));
     }
 
     // ── Hook install (game thread, kDataLoaded) ─────────────────────────────
@@ -4297,6 +4543,18 @@ float4 ps_straight(VSOut i) : SV_Target {
         // proxy) wraps it, and what it presents is not necessarily the buffer we draw into.
         SKSE::log::info("Magelight: hooked Present was {} (vtable in {}); game swapchain {}",
             ModuleOf(reinterpret_cast<const void*>(s_origPresent)), ModuleOf(vtbl), DescribeSwapChain(sc));
+        void** vtbl1 = nullptr;
+        IDXGISwapChain1* sc1 = nullptr;
+        if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain1), reinterpret_cast<void**>(&sc1))) && sc1) {
+            vtbl1 = *reinterpret_cast<void***>(sc1);
+            constexpr int kPresent1Slot = 22;
+            if (VirtualProtect(&vtbl1[kPresent1Slot], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
+                s_origPresent1 = reinterpret_cast<Present1Fn>(vtbl1[kPresent1Slot]);
+                vtbl1[kPresent1Slot] = reinterpret_cast<void*>(&HookPresent1);
+                VirtualProtect(&vtbl1[kPresent1Slot], sizeof(void*), oldProt, &oldProt);
+            }
+            sc1->Release();
+        }
         constexpr int kResizeBuffersSlot = 13;
         if (VirtualProtect(&vtbl[kResizeBuffersSlot], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
             s_origResizeBuffers = reinterpret_cast<ResizeBuffersFn>(vtbl[kResizeBuffersSlot]);
@@ -4343,6 +4601,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // Host settings (toggle key, demo views) — s_runtimeDir is set by
         // PreloadRuntime, well before kDataLoaded lands here.
         LoadHostSettings();
+        InstallLatePresent(vtbl, vtbl1);
         RegisterFocusMenu();
         // Manifest mods (Data/Magelight/<ModId>/manifest.json): folders that
         // are mods. Registered through the v4 path like any DLL consumer.
