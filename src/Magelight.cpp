@@ -284,6 +284,11 @@ namespace Magelight {
     // Magelight.json "presentHook": "auto" (late composite only behind an earlier Present hook, never on VR),
     // "late" (always try it), "vtable" (never). See InstallLatePresent.
     static std::string s_presentHookMode = "auto";
+    // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
+    // at Present; "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
+    // the game's UI apart from the scene (Skyrim Upscaler's HUD Fix) keeps ours with it. "auto" picks "ui" when
+    // Skyrim Upscaler is loaded, never on VR. See UiPassActive.
+    static std::string s_compositeMode = "auto";
 
     // Read Magelight.json from the runtime dir (see the settings block at the
     // top of the file for the schema). Missing/corrupt file = defaults.
@@ -318,6 +323,8 @@ namespace Magelight {
                 s_forceCpu.store(it->get<bool>());
             if (auto it = j.find("presentHook"); it != j.end() && it->is_string())
                 s_presentHookMode = HotkeyNames::Lower(it->get<std::string>());
+            if (auto it = j.find("composite"); it != j.end() && it->is_string())
+                s_compositeMode = HotkeyNames::Lower(it->get<std::string>());
             if (auto it = j.find("devMode"); it != j.end() && it->is_boolean())
                 s_devMode.store(it->get<bool>());
             if (auto it = j.find("fontHinting"); it != j.end() && it->is_string())
@@ -1296,6 +1303,120 @@ namespace Magelight {
     }
 
     static LONG LogSehAndDisable(const char* where, unsigned long code, void* addr);  // fwd (frame section)
+
+    // ── UI-pass composite ──────────────────────────────────────────────────
+    // With the composite in the game's UI pass, Present still updates and renders the views (into their own
+    // textures) and records the quads it would have drawn; the carrier menu's PostDisplay, which the engine
+    // calls inside its UI render with the UI's render target bound, draws them there one frame later.
+    struct QueuedQuad {
+        ID3D11ShaderResourceView* srv = nullptr;   // owned ref
+        float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+        float x = 0, y = 0, w = 0, h = 0;
+        bool  hasCut = false;
+        float cut[4] = { 0, 0, 0, 0 };
+    };
+    static std::mutex              s_uiPassMutex;
+    static std::vector<QueuedQuad> s_uiPassQuads;            // the last published frame
+    static float                   s_uiPassBackW = 0, s_uiPassBackH = 0;   // the back buffer they were laid out for
+    static std::chrono::steady_clock::time_point s_uiPassPublished{};   // a set older than 250 ms is not drawn
+    static std::atomic<std::uint64_t> s_compositeFrames{ 0 };          // FrameWork composites, deferred or not
+    static std::atomic<std::uint64_t> s_lastUiPassFrame{ 0 };          // s_compositeFrames at the last PostDisplay
+    static std::atomic<bool>          s_uiPassSeen{ false };
+    static bool                       s_overlayMenuRegistered = false;
+
+    static void ReleaseQuads(std::vector<QueuedQuad>& qs)
+    {
+        for (auto& q : qs) if (q.srv) q.srv->Release();
+        qs.clear();
+    }
+
+    // Present defers to the UI pass only while the carrier menu is actually drawing: its PostDisplay ran within
+    // the last two composites. Menus hidden (the console's tm, a photo mode, loading screens) fall back to
+    // Present at once, so the views never vanish with them.
+    static bool UiPassActive()
+    {
+        if (!s_uiPassSeen.load()) return false;
+        return s_compositeFrames.load() - s_lastUiPassFrame.load() <= 2;
+    }
+
+    static void UiPassComposite();   // fwd (frame section)
+
+    // The carrier: an invisible, always-open menu that exists for its PostDisplay. It takes no input: user
+    // events pass through to the menus beneath (the focus menu's Cancel).
+    class MagelightOverlayMenu final : public RE::IMenu
+    {
+    public:
+        static constexpr const char* MENU_NAME = "MagelightOverlay";
+
+        MagelightOverlayMenu()
+        {
+            using F = RE::UI_MENU_FLAGS;
+            depthPriority = 11;  // over the game's menus and the focus menu (10); the Present composite drew over all
+            menuFlags.set(F::kAlwaysOpen, F::kCustomRendering, F::kRendersUnderPauseMenu,
+                          F::kAdvancesUnderPauseMenu, F::kAllowSaving, F::kDontHideCursorWhenTopmost);
+            if (auto* sm = RE::BSScaleformManager::GetSingleton()) {
+                sm->LoadMovie(this, uiMovie, "magelightfocus");
+            }
+        }
+
+        static RE::IMenu* Create() { return new MagelightOverlayMenu(); }
+
+        RE::UI_MESSAGE_RESULTS ProcessMessage(RE::UIMessage& msg) override
+        {
+            if (msg.type == RE::UI_MESSAGE_TYPE::kUserEvent) return RE::UI_MESSAGE_RESULTS::kPassOn;
+            return RE::IMenu::ProcessMessage(msg);
+        }
+
+        void PostDisplay() override { UiPassComposite(); }
+
+        // VR object layout: see MagelightFocusMenu.
+        REX::EnumSet<RE::UI_MENU_Unk09, std::uint32_t> vrUnk30{ RE::UI_MENU_Unk09::kNone };   // 30
+        std::byte                                      vrUnk34{ 1 };                          // 34
+        RE::BSFixedString                              vrMenuName{ MENU_NAME };               // 38
+    };
+    static_assert(sizeof(MagelightOverlayMenu) == 0x40, "MagelightOverlayMenu must match the VR IMenu size (0x40)");
+
+    static bool UiCompositeWanted()
+    {
+        if (REL::Module::IsVR()) return false;
+        if (s_compositeMode == "ui") return true;
+        if (s_compositeMode == "present") return false;
+        return GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
+    }
+
+    static void RegisterOverlayMenu()
+    {
+        if (!UiCompositeWanted()) {
+            SKSE::log::info("Magelight: composite '{}' - views draw at Present", s_compositeMode);
+            return;
+        }
+        std::error_code ec;
+        if (!std::filesystem::exists(GameRoot() / L"Data" / L"Interface" / L"magelightfocus.swf", ec)) {
+            SKSE::log::warn("Magelight: magelightfocus.swf missing - views draw at Present");
+            return;
+        }
+        if (auto* ui = RE::UI::GetSingleton()) {
+            ui->Register(MagelightOverlayMenu::MENU_NAME, MagelightOverlayMenu::Create);
+            s_overlayMenuRegistered = true;
+            SKSE::log::info("Magelight: composite '{}' - views draw in the game's UI pass ('{}')", s_compositeMode,
+                MagelightOverlayMenu::MENU_NAME);
+        }
+    }
+
+    // Keeps the carrier open: called from FrameWork on the main thread. A load or a menu reset can close even an
+    // always-open menu; the show is re-queued at most every two seconds while it is not open.
+    static void EnsureOverlayMenuOpen()
+    {
+        if (!s_overlayMenuRegistered) return;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || ui->IsMenuOpen(MagelightOverlayMenu::MENU_NAME)) return;
+        static auto s_next = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now < s_next) return;
+        s_next = now + std::chrono::seconds(2);
+        if (auto* q = RE::UIMessageQueue::GetSingleton())
+            q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+    }
 
     static void QueueInput(UINT msg, WPARAM w, LPARAM l)
     {
@@ -3418,6 +3539,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     // pixels — the CPU path's uploaded texture (uv 0..1) or the GPU path's
     // render-target texture (uv from RenderTarget::uv_coords, since the target
     // may be padded). Pipeline state save/restore is the CALLER's job.
+    static void DrawQuadTo(ID3D11RenderTargetView* rtv, float bw, float bh, ID3D11ShaderResourceView* srv,
+                           float u0, float v0, float u1, float v1,
+                           float dx, float dy, float dw, float dh,
+                           const float* cutUV);
+
     static void DrawOverlay(IDXGISwapChain* sc, ID3D11ShaderResourceView* srv,
                             float u0, float v0, float u1, float v1,
                             float dx, float dy, float dw, float dh,
@@ -3428,6 +3554,24 @@ float4 ps_straight(VSOut i) : SV_Target {
         const float bw = static_cast<float>(scd.BufferDesc.Width);
         const float bh = static_cast<float>(scd.BufferDesc.Height);
         if (bw <= 0.0f || bh <= 0.0f || !srv) return;
+        ID3D11Texture2D* back = nullptr;
+        if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))))
+            return;
+        ID3D11RenderTargetView* rtv = nullptr;
+        const HRESULT rtvHr = s_device->CreateRenderTargetView(back, nullptr, &rtv);
+        back->Release();
+        if (FAILED(rtvHr)) return;
+        DrawQuadTo(rtv, bw, bh, srv, u0, v0, u1, v1, dx, dy, dw, dh, cutUV);
+        rtv->Release();
+    }
+
+    // One textured quad into `rtv`, a bw x bh target. Pipeline state save/restore is the CALLER's job.
+    static void DrawQuadTo(ID3D11RenderTargetView* rtv, float bw, float bh, ID3D11ShaderResourceView* srv,
+                           float u0, float v0, float u1, float v1,
+                           float dx, float dy, float dw, float dh,
+                           const float* cutUV)
+    {
+        if (!rtv || bw <= 0.0f || bh <= 0.0f || !srv) return;
 
         // Quad in NDC at (dx, dy), dw x dh pixels.
         const float x0 = -1.0f + 2.0f * (dx / bw);
@@ -3444,14 +3588,6 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (FAILED(s_context->Map(s_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
         std::memcpy(mapped.pData, quad, sizeof(quad));
         s_context->Unmap(s_vb, 0);
-
-        ID3D11Texture2D* back = nullptr;
-        if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))))
-            return;
-        ID3D11RenderTargetView* rtv = nullptr;
-        const HRESULT rtvHr = s_device->CreateRenderTargetView(back, nullptr, &rtv);
-        back->Release();
-        if (FAILED(rtvHr)) return;
 
         const UINT stride = sizeof(Vertex), offset = 0;
         const FLOAT bf[4] = { 0, 0, 0, 0 };
@@ -3481,8 +3617,6 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_context->PSSetConstantBuffers(0, 1, &s_cb);
         }
         s_context->Draw(4, 0);
-
-        rtv->Release();
     }
 
     // VR copy pass (docs/VR_PRESENTER.md §2): draw one presented view into a
@@ -3986,6 +4120,22 @@ float4 ps_straight(VSOut i) : SV_Target {
         const auto stageAfterUpdate = ClockT::now();
         double frameUlRender = 0.0;   // THIS frame's render, for the composite subtraction
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
+        // While the UI pass is live the composite records its quads for it instead of drawing them over the
+        // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
+        EnsureOverlayMenuOpen();
+        s_compositeFrames.fetch_add(1);
+        const bool defer = s_overlayMenuRegistered && UiPassActive();
+        std::vector<QueuedQuad> queued;
+        auto emit = [&](ID3D11ShaderResourceView* qsrv, float u0, float v0, float u1, float v1,
+                        float x, float y, float w, float h, const float* cutUV) {
+            if (!defer) { DrawOverlay(sc, qsrv, u0, v0, u1, v1, x, y, w, h, cutUV); return; }
+            if (!qsrv) return;
+            QueuedQuad q;
+            q.srv = qsrv; qsrv->AddRef();
+            q.u0 = u0; q.v0 = v0; q.u1 = u1; q.v1 = v1; q.x = x; q.y = y; q.w = w; q.h = h;
+            if (cutUV) { q.hasCut = true; std::memcpy(q.cut, cutUV, sizeof(q.cut)); }
+            queued.push_back(q);
+        };
         if (AnyViewVisible()) {
             // RenderOnly(visible), not Render(): Render() paints EVERY view
             // whose page marked itself dirty, hidden ones included — a closed
@@ -4063,9 +4213,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                             s_gpuSrv(s_gpu, rt.texture_id));
                         if (cutPtr) mapCut(rt.uv_coords.left, rt.uv_coords.top, rt.uv_coords.right, rt.uv_coords.bottom);
                         if (VR::MirrorEnabled())
-                            DrawOverlay(sc, srv, rt.uv_coords.left, rt.uv_coords.top,
-                                        rt.uv_coords.right, rt.uv_coords.bottom,
-                                        mx, my, mw, mh, cutPtr);
+                            emit(srv, rt.uv_coords.left, rt.uv_coords.top,
+                                 rt.uv_coords.right, rt.uv_coords.bottom,
+                                 mx, my, mw, mh, cutPtr);
                         pv.srv = srv;
                         pv.u0 = rt.uv_coords.left; pv.v0 = rt.uv_coords.top;
                         pv.u1 = rt.uv_coords.right; pv.v1 = rt.uv_coords.bottom;
@@ -4073,8 +4223,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                         UploadSurfaceIfDirty(v);
                         if (cutPtr) mapCut(0.0f, 0.0f, 1.0f, 1.0f);
                         if (VR::MirrorEnabled())
-                            DrawOverlay(sc, v.srv, 0.0f, 0.0f, 1.0f, 1.0f,
-                                        mx, my, mw, mh, cutPtr);
+                            emit(v.srv, 0.0f, 0.0f, 1.0f, 1.0f, mx, my, mw, mh, cutPtr);
                         pv.srv = v.srv;
                     }
                     if (cutPtr) { pv.hasCutout = true; std::memcpy(pv.cutUV, cut, sizeof(cut)); }
@@ -4095,15 +4244,25 @@ float4 ps_straight(VSOut i) : SV_Target {
                     // pixel sits exactly on the cursor position.
                     const float h = s_cursorHeight * (bh / 1080.0f);
                     const float w = h * (static_cast<float>(s_cursorImgW) / s_cursorImgH);
-                    DrawOverlay(sc, s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
-                                px - s_cursorHotX * w, py - s_cursorHotY * h, w, h);
+                    emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
+                         px - s_cursorHotX * w, py - s_cursorHotY * h, w, h, nullptr);
                 } else {
                     const float scale = bh / 720.0f;
-                    DrawOverlay(sc, s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
-                                px, py, kCursorW * scale, kCursorH * scale);
+                    emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
+                         px, py, kCursorW * scale, kCursorH * scale, nullptr);
                 }
             }
             backup.Restore(s_context);
+        }
+        {
+            std::lock_guard<std::mutex> lk(s_uiPassMutex);
+            ReleaseQuads(s_uiPassQuads);
+            if (defer) {
+                s_uiPassQuads = std::move(queued);
+                s_uiPassBackW = bw;
+                s_uiPassBackH = bh;
+                s_uiPassPublished = std::chrono::steady_clock::now();
+            }
         }
         // VR presenter: runs every frame (an empty frame HIDES stale overlays);
         // no-op unless the runtime is live. Same thread as everything above.
@@ -4133,6 +4292,75 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_acc.worst, s_focused.load(), frame.size());
             s_acc = StageAcc{};
             s_acc.lastReport = stageEnd;
+        }
+    }
+
+    // The carrier's PostDisplay: draw the published quads into the render target the game's UI pass has bound,
+    // scaled from the back buffer they were laid out for. Main thread, inside the engine's UI render.
+    static void UiPassCompositeImpl()
+    {
+        s_lastUiPassFrame.store(s_compositeFrames.load());
+        s_uiPassSeen.store(true);
+        if (!s_context || !s_device || s_renderDead.load()) return;
+        std::vector<QueuedQuad> quads;
+        float backW = 0, backH = 0;
+        {
+            std::lock_guard<std::mutex> lk(s_uiPassMutex);
+            // Present stopped composing (a load, a stalled hook): draw nothing rather than a frozen frame.
+            if (s_uiPassQuads.empty() ||
+                std::chrono::steady_clock::now() - s_uiPassPublished > std::chrono::milliseconds(250)) return;
+            quads = s_uiPassQuads;
+            for (auto& q : quads) q.srv->AddRef();
+            backW = s_uiPassBackW;
+            backH = s_uiPassBackH;
+        }
+        StateBackup backup;
+        backup.Capture(s_context);
+        ID3D11RenderTargetView* target = backup.rtvs[0];
+        float tw = 0, th = 0;
+        if (target) {
+            ID3D11Resource* res = nullptr;
+            target->GetResource(&res);
+            ID3D11Texture2D* tex = nullptr;
+            if (res && SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+                D3D11_TEXTURE2D_DESC td{};
+                tex->GetDesc(&td);
+                tw = static_cast<float>(td.Width);
+                th = static_cast<float>(td.Height);
+                tex->Release();
+                // Which target the UI pass draws into is the whole question on an unfamiliar setup: log each change.
+                static void* s_lastTarget = nullptr;
+                static int   s_targetLogs = 0;
+                if (res != s_lastTarget && s_targetLogs < 10) {
+                    s_lastTarget = res;
+                    ++s_targetLogs;
+                    SKSE::log::info("Magelight: UI pass draws into a {}x{} target, format {} (back buffer {}x{})",
+                        td.Width, td.Height, static_cast<int>(td.Format), backW, backH);
+                }
+            }
+            if (res) res->Release();
+        }
+        if (target && tw > 0 && th > 0 && backW > 0 && backH > 0) {
+            StateBackup::Neutralize(s_context);
+            const float sx = tw / backW, sy = th / backH;
+            for (const auto& q : quads)
+                DrawQuadTo(target, tw, th, q.srv, q.u0, q.v0, q.u1, q.v1,
+                           q.x * sx, q.y * sy, q.w * sx, q.h * sy, q.hasCut ? q.cut : nullptr);
+        } else {
+            static std::atomic<int> s_noTargetLogs{ 0 };
+            if (s_noTargetLogs.fetch_add(1) < 3)
+                SKSE::log::warn("Magelight: UI pass had no usable render target bound - nothing drawn this frame");
+        }
+        backup.Restore(s_context);
+        ReleaseQuads(quads);
+    }
+
+    static void UiPassComposite()
+    {
+        __try {
+            UiPassCompositeImpl();
+        } __except (LogSehAndDisable("UI pass", GetExceptionCode(),
+                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
         }
     }
 
@@ -4619,6 +4847,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // PreloadRuntime, well before kDataLoaded lands here.
         LoadHostSettings();
         InstallLatePresent(vtbl, vtbl1);
+        RegisterOverlayMenu();
         RegisterFocusMenu();
         // Manifest mods (Data/Magelight/<ModId>/manifest.json): folders that
         // are mods. Registered through the v4 path like any DLL consumer.
