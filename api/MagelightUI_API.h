@@ -297,7 +297,8 @@ namespace MAGELIGHT_API {
         float uiScale;                   // Ultralight DEVICE scale (0 = 1.0): the page lays out and
                                          // rasterizes at this scale — real DPI, sharp — instead of a
                                          // CSS transform that resamples a 1x raster. Change at runtime
-                                         // with SetViewScale (0.26.9). window.devicePixelRatio mirrors it
+                                         // with SetViewScale (0.26.9). window.devicePixelRatio mirrors it.
+                                         // Clamped 1.0..3.0 since 0.30.3: to shrink a page, use a CSS transform
         DomReadyFn onDomReady;           // optional; the ViewDomReady event carries the same
     };
 
@@ -502,7 +503,8 @@ namespace MAGELIGHT_API {
         // ── appended in 0.26.9 — gate on hostVersionNumber >= 2609 ──
         // Set the view's Ultralight device scale at runtime (see ViewDesc::uiScale).
         // The page re-lays out; its devicePixelRatio becomes `scale`. Cutout and
-        // image rects are in VIEW PIXELS = CSS px * scale. Clamped 0.5..3.0.
+        // image rects are in VIEW PIXELS = CSS px * scale. Clamped 1.0..3.0 (0.5..3.0 before
+        // 0.30.3; below 1 Ultralight clipped the page): shrink a page with a CSS transform.
         Result (*SetViewScale)(ViewId view, float scale);
         // ── 0.27.0 (no new fields): native IME. Text fields in the UI-mode view take
         //    CJK composition: the window's IME context attaches on field focus (the

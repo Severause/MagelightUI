@@ -238,7 +238,7 @@ namespace Magelight {
     static bool                           s_renderInit = false;
     static std::atomic<bool>              s_rendererUp{ false };   // EnsureRenderInit succeeded (any-thread read)
     static ultralight::RefPtr<ultralight::Renderer> s_ulRenderer;
-    static ID3D11Device*                  s_device = nullptr;   // owned ref
+    static ID3D11Device*                  s_device = nullptr;   // from the swapchain's GetDevice; never Release (a wrapper may not AddRef)
     static ID3D11DeviceContext*           s_context = nullptr;  // owned ref
     static ID3D11VertexShader*            s_vs = nullptr;
     static ID3D11PixelShader*             s_ps = nullptr;
@@ -281,8 +281,9 @@ namespace Magelight {
     static std::atomic<int>  s_imeCaretX{ -1 }, s_imeCaretY{ -1 }, s_imeCaretH{ 0 };   // client px; x<0 = unknown
 
     static std::filesystem::path s_runtimeDir;  // Data/SKSE/Plugins/Magelight
-    // Magelight.json "presentHook": "auto" (late composite only behind an earlier Present hook, never on VR),
-    // "late" (always try it), "vtable" (never). See InstallLatePresent.
+    // Magelight.json "presentHook": "auto" (late composite only behind an earlier Present hook on a plain dxgi
+    // swapchain; never behind a proxy, never on VR), "late" (always try it), "vtable" (never). See
+    // InstallLatePresent.
     static std::string s_presentHookMode = "auto";
     // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
     // at Present; "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
@@ -4510,8 +4511,10 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // A swapchain on another device (a frame-generation backend's own D3D11 or D3D12 swapchain) must never be
     // drawn into with our device's resources. Skipping without marking the present composited lets the late
-    // fallback count it as a miss.
-    static ID3D11Device* s_gameDevice = nullptr;   // the game swapchain's device, read at hook install (owned ref)
+    // fallback count it as a miss. Asked only of dxgi's own swapchains, inside the detours: a wrapper's
+    // GetDevice (Community Shaders') can hand out the device without a reference, and our Release then
+    // freed the game's device within a second.
+    static ID3D11Device* s_gameDevice = nullptr;   // the game swapchain's device, read at hook install; never Release (a wrapper may not AddRef)
 
     static bool OnOurDevice(IDXGISwapChain* sc)
     {
@@ -4523,10 +4526,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         return same;
     }
 
-    static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour)
+    // `inDetour`: called from a dxgi detour, where `sc` is dxgi's own swapchain; from a vtable hook it is the
+    // game's object, which may be a wrapper, so it is compared, never asked.
+    static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour, bool inDetour)
     {
         if (t_composited || fromLateDetour != s_lateComposite.load()) return;
-        if (!OnOurDevice(sc)) return;
+        if (inDetour ? !OnOurDevice(sc) : sc != s_gameSwapChain) return;
         t_composited = true;
         if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
     }
@@ -4572,7 +4577,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
         ++t_presentDepth;
         StampPresent(sc, _ReturnAddress());
-        ComposeOnce(sc, false);
+        ComposeOnce(sc, false, false);
         AfterCompose();
         const HRESULT hr = s_origPresent(sc, sync, flags);
         EndPresent(true);
@@ -4593,7 +4598,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         ++t_presentDepth;
         StampPresent(sc, _ReturnAddress());
         // Without a Present1 detour, late mode has nowhere later to draw a Present1 frame: draw it here.
-        ComposeOnce(sc, s_lateComposite.load() && !s_latePresent1Hooked.load());
+        ComposeOnce(sc, s_lateComposite.load() && !s_latePresent1Hooked.load(), false);
         AfterCompose();
         const HRESULT hr = s_origPresent1(sc, sync, flags, params);
         EndPresent(true);
@@ -4607,7 +4612,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         GameTask::Scope pumpScope;
         ++t_presentDepth;
-        ComposeOnce(sc, true);
+        ComposeOnce(sc, true, true);
         AfterCompose();
         const HRESULT hr = s_latePresentNext(sc, sync, flags);
         EndPresent(false);
@@ -4619,7 +4624,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         GameTask::Scope pumpScope;
         ++t_presentDepth;
-        ComposeOnce(sc, true);
+        ComposeOnce(sc, true, true);
         AfterCompose();
         const HRESULT hr = s_latePresent1Next(sc, sync, flags, params);
         EndPresent(false);
@@ -4734,8 +4739,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         return out;
     }
 
-    // "auto" turns it on only behind an earlier Present hook: the slot we patched did not hold its own
-    // vtable's code (a plain dxgi swapchain's, or a proxy's such as ENB's). Never on VR.
+    // "auto" turns it on only behind an earlier Present hook on a plain dxgi swapchain, never on VR. Behind a
+    // proxy (ENB's or ReShade's d3d11.dll, Skyrim Upscaler) only "late" looks for dxgi's own Present: the
+    // throwaway device it takes for that killed the game at start behind ENB.
     static void InstallLatePresent(void* const* vtbl, void* const* vtbl1)
     {
         const std::string& mode = s_presentHookMode;
@@ -4751,6 +4757,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         HMODULE dxgi = ModuleAt(vtbl);
         if (!IsSystemModule(dxgi, L"dxgi.dll")) {
+            if (mode != "late") {
+                SKSE::log::info("Magelight: presentHook 'auto' - the game swapchain is a proxy ({}), compositing in "
+                                "the vtable hook", ModuleOf(vtbl));
+                return;
+            }
             // A proxy's swapchain wraps a real dxgi one: detour dxgi's own functions, found through a throwaway
             // dxgi swapchain.
             SKSE::log::info("Magelight: the game swapchain is a proxy ({}); finding dxgi's own swapchain", ModuleOf(vtbl));
@@ -5575,7 +5586,11 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void SetViewScale(ViewId view, float scale)
     {
-        scale = std::clamp(scale, 0.5f, 3.0f);
+        // Below 1 Ultralight clips the page to scale squared of the view (a 0.8 scale draws only the top-left
+        // 64%), so a smaller page takes a CSS transform instead.
+        if (scale < 1.0f)
+            SKSE::log::info("Magelight: view {} device scale {:.3f} raised to 1.000 (below 1 clips the page)", view, scale);
+        scale = std::clamp(scale, 1.0f, 3.0f);
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return;
