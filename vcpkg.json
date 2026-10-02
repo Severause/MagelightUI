@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "magelight",
+  "version-string": "0.1.0",
+  "description": "Magelight UI - GPU-rendered web UI host for Skyrim SE/AE (SKSE + Ultralight)",
+  "dependencies": [
+    "commonlibsse-ng",
+    "directxmath",
+    "directxtex",
+    "directxtk",
+    "fmt",
+    "nlohmann-json",
+    "rapidcsv",
+    "spdlog",
+    "xbyak"
+  ]
+}

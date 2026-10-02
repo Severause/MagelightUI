@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Magelight multi-view demo: an always-on, click-through HUD badge anchored
+  to the top-right. Proves independent z-ordered views that stay live
+  outside menu mode.
+-->
+<style>
+  html, body { margin: 0; background: transparent; overflow: hidden;
+               font-family: Georgia, serif; }
+  #badge {
+    box-sizing: border-box; width: 216px; height: 44px;
+    background: rgba(20, 16, 8, 0.55);
+    border: 1px solid rgba(180, 150, 90, 0.6); border-radius: 8px;
+    color: #e8dcc0; font-size: 13px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  }
+  #clock { font-variant-numeric: tabular-nums; color: #c9b98a; }
+</style>
+</head>
+<body>
+<div id="badge">
+  <span>&#10022; Magelight</span>
+  <span id="clock"></span>
+</div>
+<script>
+  function tick() {
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>

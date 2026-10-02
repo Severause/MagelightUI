@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Magelight version gate</title>
+<style>
+  html, body { margin: 0; background: transparent; }
+  .gate {
+    box-sizing: border-box; width: 640px; padding: 14px 18px 12px;
+    background: #1e1913; border: 1px solid #a3472b; border-radius: 6px;
+    color: #e8dcc4; font: 14px Georgia, serif;
+  }
+  h1 { margin: 0 0 6px; font-size: 16px; color: #e0925a; font-weight: normal; }
+  ul { margin: 6px 0 8px 18px; padding: 0; }
+  li { margin: 2px 0; }
+  .sub { color: #8a7a5a; font-size: 12px; }
+  b { color: #cba560; font-weight: normal; }
+</style></head>
+<body>
+  <div class="gate">
+    <h1>Magelight UI needs updating</h1>
+    <div id="msg">Some installed mods need a newer Magelight UI than <b id="host"></b>:</div>
+    <ul id="list"></ul>
+    <div class="sub">Their pages stay off until Magelight UI is updated. This notice hides itself in 30 seconds.</div>
+  </div>
+  <script>
+    // Host calls setGate('{"host":"0.13.0","mods":[{"modId":"X","needs":"0.14.0"}]}').
+    function fmt(v) { v = Number(v) || 0; return Math.floor(v / 10000) + '.' + Math.floor(v / 100) % 100 + '.' + v % 100; }
+    window.setGate = function (json) {
+      try {
+        var d = JSON.parse(json || '{}');
+        document.getElementById('host').textContent = d.host || '?';
+        var ul = document.getElementById('list'); ul.innerHTML = '';
+        (d.mods || []).forEach(function (m) {
+          var li = document.createElement('li');
+          li.innerHTML = '<b></b> needs ' + fmt(m.needs);
+          li.querySelector('b').textContent = m.modId;
+          ul.appendChild(li);
+        });
+      } catch (e) { document.getElementById('msg').textContent = 'Version gate: ' + e; }
+      setTimeout(function () { if (window.gateDismiss) window.gateDismiss(''); }, 30000);
+    };
+  </script>
+</body></html>

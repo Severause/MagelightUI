@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Blank page? Start here
+    url: https://github.com/Severause/MagelightUI/blob/main/docs/TROUBLESHOOTING.md
+    about: The six-step list covers most "nothing renders" reports — please run through it first.
+  - name: Documentation index
+    url: https://github.com/Severause/MagelightUI#readme
+    about: Manifest, Papyrus, C++ and SDK docs are linked from the README's Documentation section.

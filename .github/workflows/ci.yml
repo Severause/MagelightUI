@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      sdk_url:
+        description: 'Seeds the SDK cache when the dev CDN has moved past the pin: URL of a .7z of a verified 1.4.0b.081c48b SDK (RELEASING.md section 2)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only PR runs supersede each other. A push to main must NOT cancel the previous
+  # main run: that run is the one that seeds the shared vcpkg/SDK caches (~45 min
+  # uncached).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  abi:
+    name: ABI order check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/check_abi.py
+
+  sdk:
+    name: SDK packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: pack smoke (each tarball must build + contain dist)
+        run: |
+          for p in sdk react vite-plugin create-magelight-view; do
+            echo "== $p =="
+            (cd "packages/$p" && npm pack --dry-run > /dev/null) || exit 1
+          done
+
+  host:
+    name: Host build + stage lint
+    # windows-latest (VS 18 / MSVC 14.51) on purpose: that is the toolset the
+    # maintainer machine updates to. fmt 9.1.0 could not compile there (its STL
+    # dropped stdext::checked_array_iterator); the 2025-12 vcpkg baseline pins
+    # fmt 12, which can.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Ultralight SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: extern/ultralight
+          # Bump deliberately when moving to a new SDK build — the dev CDN
+          # tracks master, so downloading every run would drift (extern/README.md).
+          key: ultralight-sdk-1.4.0b.081c48b
+
+      - name: Fetch Ultralight SDK (1.4.0b, dev CDN or the dispatch's sdk_url)
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          SDK_URL: ${{ inputs.sdk_url }}
+        run: |
+          # The dev CDN serves only its latest build; sdk_url stands in once that has moved past the pin.
+          $url = if ($env:SDK_URL) { $env:SDK_URL } else { 'https://ultralight-sdk-dev.sfo2.cdn.digitaloceanspaces.com/ultralight-sdk-latest-win-x64.7z' }
+          curl -fL -o ultralight-sdk.7z $url
+          if ($LASTEXITCODE -ne 0) { throw ('SDK download failed (' + $(if ($env:SDK_URL) { 'sdk_url' } else { 'dev CDN' }) + ')') }
+          New-Item -ItemType Directory -Path extern/ultralight -Force | Out-Null
+          # 7-Zip, not the built-in tar: bsdtar on the windows-2022 image has no LZMA
+          # codec (7z archives fail with 'LZMA codec is unsupported'); 7z is preinstalled
+          # on every GitHub Windows runner. Same command extern/README.md gives.
+          7z x -oextern/ultralight ultralight-sdk.7z | Out-Null
+          if (-not (Test-Path extern/ultralight/include)) { throw 'SDK extract produced no include/ folder' }
+          # Never cache a newer 'latest' under the pinned key (build.ps1 checks the same pin).
+          $vf = 'extern/ultralight/VERSION.txt'
+          $v = if (Test-Path $vf) { "$(Get-Content $vf -Raw)".Trim() } else { '' }
+          if ($v -ne '1.4.0b.081c48b') {
+            throw ("The downloaded SDK is Ultralight '$v', not the pinned 1.4.0b.081c48b, so this job fails and caches nothing. " +
+                   "The dev CDN serves only its latest build: to re-seed the cache, a maintainer runs this workflow on main " +
+                   "(Actions > CI > Run workflow) with sdk_url set to a .7z of a verified 1.4.0b.081c48b SDK, or moves the pin " +
+                   "on purpose (RELEASING.md section 2).")
+          }
+          Remove-Item ultralight-sdk.7z
+
+      - name: Cache vcpkg dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\b\mgl\vcpkg_installed
+            ~\AppData\Local\vcpkg\archives
+          key: vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
+
+      - name: Build + stage (build.ps1 → C:\b\mgl)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File build.ps1
+
+      - name: Stage lint
+        shell: pwsh
+        # -NoPex: runners have no Papyrus compiler (it ships with the game);
+        # release zips must still pass tools/check_stage.ps1 WITHOUT the switch.
+        run: powershell -ExecutionPolicy Bypass -File tools/check_stage.ps1 -NoPex

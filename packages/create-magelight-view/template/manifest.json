@@ -1,0 +1,15 @@
+{
+  "modId": "__MODID__",
+  "name": "__MODID__",
+  "version": "0.1.0",
+  "minHost": "0.16.0",
+  "views": {
+    "config": {
+      "path": "views/config/index.html",
+      "layer": "panel",
+      "anchor": "top-left",
+      "x": 120, "y": 120, "w": 560, "h": 380,
+      "hotkey": "F10"
+    }
+  }
+}

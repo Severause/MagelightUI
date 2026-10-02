@@ -1,0 +1,84 @@
+Magelight UI - third-party notices
+==================================
+
+Magelight UI itself (the host plugin Magelight.dll, the public API header,
+the Papyrus script, the SDK packages, the example mods and the docs) is
+licensed under the MIT License - see LICENSE.txt. The components below ship
+inside the installer or are compiled into it and carry their own terms.
+Their license texts are installed in SKSE/Plugins/Magelight/license/,
+next to a copy of this file; THIRD_PARTY_LICENSES.txt is also at the root
+of the download.
+
+Ultralight (c) 2024 Ultralight, Inc. All rights reserved. Ultralight is a
+trademark of Ultralight, Inc.
+Please see the accompanying NOTICES.txt for full text.
+
+1. Ultralight  https://ultralig.ht
+   Files: SKSE/Plugins/Magelight/Magelight1.dll, Magelight1Core.dll,
+          MgWCore.dll, MgACore.dll, resources/ (icudt67l.dat, cacert.pem)
+   License: the Ultralight runtime reaches you under the Ultralight End
+   User License Agreement (EULA.txt). Magelight's author uses it under the
+   Ultralight Free License Agreement v1 (Ultralight-LICENSE.txt).
+   Ultralight's notices for the libraries it bundles are in
+   Ultralight-NOTICES.md (WebKit LGPL 2.1/BSD, ICU, FreeType, HarfBuzz,
+   skia, SQLite, libpng, libjpeg-turbo, zlib and others).
+   The four DLLs are Ultralight 1.4.0b's, renamed, with the module-name
+   strings inside them rewritten in place (same length) so they import
+   each other under the new names, with the written permission of
+   Ultralight, Inc.; no code is changed. The private names keep another
+   plugin's copy of Ultralight from being loaded in their place. That
+   permission is Magelight's author's: a mod that bundles Magelight ships
+   these files as they are and does not rename or patch Ultralight's DLLs
+   itself.
+   Ultralight's modifications to WebKit are published under LGPL 2.1 at
+   https://github.com/ultralight-ux/WebCore
+
+2. Ultralight AppCore (GPU driver)  (c) Ultralight, Inc.
+   File: SKSE/Plugins/Magelight/MagelightGPU.dll
+   License: GNU Lesser General Public License v2.1 (LGPL-2.1.txt).
+   MagelightGPU.dll is derived from AppCore's Direct3D 11 GPUDriver and
+   GPUContext (https://github.com/ultralight-ux/AppCore) and is kept in
+   its own DLL behind a C ABI so the LGPL applies to that library alone.
+   Corresponding source: the gpu/ folder of the Magelight UI repository at
+   the tag of this release, built by CMakeLists.txt and build.ps1 in the
+   same tree. For Magelight UI 0.30.1 that is tag v0.30.1:
+   https://github.com/Severause/MagelightUI/tree/v0.30.1/gpu
+   You may replace MagelightGPU.dll with your own build. A replacement must
+   import Magelight1.dll and Magelight1Core.dll rather than Ultralight.dll
+   and UltralightCore.dll; build.ps1 makes that rename for its own build.
+
+3. WebKit Web Inspector (the optional DevTools download)
+   Files: SKSE/Plugins/Magelight/inspector/
+   License: BSD 2-Clause, Copyright (C) 2007-2021 Apple Inc. and the
+   WebKit contributors; portions under the licenses named in each file.
+   Shipped unmodified from the Ultralight 1.4.0b SDK.
+
+4. Libraries compiled into Magelight.dll and MagelightGPU.dll. Their
+   copyright lines and full license texts are in THIRD_PARTY_LICENSES.txt.
+   - CommonLibVR 4.39.5 (MIT), the MinLL/CommonLibVR continuation of
+     CommonLibSSE-NG  https://github.com/MinLL/CommonLibVR
+   - OpenVR SDK headers, Valve (BSD 3-Clause)
+     https://github.com/ValveSoftware/openvr
+   - {fmt} (MIT)  https://github.com/fmtlib/fmt
+   - spdlog (MIT)  https://github.com/gabime/spdlog
+   - nlohmann/json (MIT)  https://github.com/nlohmann/json
+   - rapidcsv (BSD 3-Clause)  https://github.com/d99kris/rapidcsv
+   - Xbyak (BSD 3-Clause)  https://github.com/herumi/xbyak
+   - DirectXMath and DirectX Tool Kit's SimpleMath, Microsoft (MIT);
+     DirectXMath is also compiled into MagelightGPU.dll
+
+5. JavaScript in the built pages that ship with Magelight (the
+   Magelight.ReactConfig example and the views/app demo page). Their
+   license texts are in THIRD_PARTY_LICENSES.txt.
+   - React, React DOM and Scheduler, Meta Platforms, Inc. and affiliates
+     (MIT)  https://github.com/facebook/react
+   - Vite's module preload helper (MIT)  https://github.com/vitejs/vite
+
+6. SKSE (Skyrim Script Extender)  https://skse.silverlock.org
+   Not shipped; required at runtime. Its own terms apply.
+
+The SDK packages (@magelight/sdk, @magelight/react, @magelight/vite-plugin,
+create-magelight-view) are Magelight's own code under the MIT License. A page
+built with them carries React (and Vite's preload helper) in its JavaScript,
+so a mod that ships such a page ships React's MIT notice with it. TypeScript
+(Apache License 2.0) and the rest of the build tooling stay at build time.

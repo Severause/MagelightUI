@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Magelight ImageSource probe</title>
+<style>
+  html, body { margin:0; background:transparent; font-family:Georgia,serif; color:#3a2d17; }
+  .card { box-sizing:border-box; width:100%; height:100%; padding:14px 18px;
+          background:linear-gradient(160deg,#efe3c8,#e2d2ae); border:2px solid #8a6d3b;
+          border-radius:10px; overflow:hidden; }
+  h1 { margin:0 0 4px; font-size:20px; }
+  .sub { font-style:italic; color:#6b5527; font-size:12px; margin-bottom:8px; }
+  .grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; }
+  .cell { border:1px solid #b39a67; border-radius:6px; background:rgba(255,250,235,.55);
+          padding:6px; font-size:11px; }
+  .cell b { display:block; font-size:12px; margin-bottom:4px; }
+  .box { width:220px; height:220px; margin:0 auto; background:#c9b184; position:relative; }
+  .box img, .box canvas { display:block; width:220px; height:220px; }
+  .st { margin-top:4px; color:#6b5527; }
+  .ok { color:#3f6d2a; font-weight:bold; }
+  .bad { color:#b33a2f; font-weight:bold; }
+  .foot { display:flex; justify-content:space-between; margin-top:10px; font-size:12px; color:#6b5527; }
+</style></head>
+<body><div class="card">
+  <h1>&#10022; ImageSource probe</h1>
+  <div class="sub">The host repaints a 512&times;512 texture every frame (moving stripes + a red disc) and invalidates image
+    <code>probe</code>. Each cell places the same <code>.imgsrc</code> differently. A cell that stays flat tan (no stripes) FAILED.</div>
+  <div class="grid">
+    <div class="cell"><b>1 &middot; plain &lt;img&gt;</b>
+      <div class="box"><img id="i1" src="../../images/probe.imgsrc"></div><div class="st" id="s1">loading&hellip;</div></div>
+    <div class="cell"><b>2 &middot; overflow:auto scroll box (scroll me)</b>
+      <div class="box" style="overflow:auto"><img src="../../images/probe.imgsrc" style="width:440px;height:440px"></div><div class="st">expect: stripes, scrollable</div></div>
+    <div class="cell"><b>3 &middot; overflow:hidden + border-radius 50%</b>
+      <div class="box" style="overflow:hidden;border-radius:50%"><img src="../../images/probe.imgsrc"></div><div class="st">expect: a moving disc-in-circle</div></div>
+    <div class="cell"><b>4 &middot; transform rotate(15deg) scale(.8)</b>
+      <div class="box"><img src="../../images/probe.imgsrc" style="transform:rotate(15deg) scale(.8)"></div><div class="st">expect: tilted, animating</div></div>
+    <div class="cell"><b>5 &middot; opacity .5 over red</b>
+      <div class="box" style="background:#b33a2f"><img src="../../images/probe.imgsrc" style="opacity:.5"></div><div class="st">expect: pinkish stripes</div></div>
+    <div class="cell"><b>6 &middot; filter: grayscale(1)</b>
+      <div class="box"><img src="../../images/probe.imgsrc" style="filter:grayscale(1)"></div><div class="st">expect: gray stripes (blank = filter fallback needs a bitmap)</div></div>
+    <div class="cell"><b>7 &middot; canvas drawImage each frame</b>
+      <div class="box"><canvas id="cv" width="220" height="220"></canvas></div><div class="st" id="s7">&hellip;</div></div>
+    <div class="cell"><b>8 &middot; CSS background-image</b>
+      <div class="box" style="background:url('../../images/probe.imgsrc') center/cover"></div><div class="st">expect: stripes</div></div>
+  </div>
+  <h1 style="margin-top:12px">&#10022; Border probe</h1>
+  <div class="sub">Rounded boxes whose sides differ are path-tessellated. In the 0.9.1 field build they drew as huge wedge
+    triangles (Stats tab, Companions rows). Every cell below should show a thin outline only.</div>
+  <style>
+    .bp { display:grid; grid-template-columns:repeat(6, 1fr); gap:10px; }
+    .bp div { height:54px; background:#26211a; color:#e8dcc4; font:11px Arial,sans-serif; padding:6px; box-sizing:border-box; position:relative; }
+    .bA{border:1px solid #3a342a;border-radius:4px}
+    .bB{border:1px solid #3a342a;border-left:3px solid #cba560;border-radius:4px}
+    .bC{border:1px solid #3a342a;border-top:2px solid #c46a5a;border-radius:4px}
+    .bD{border-top:1px solid rgba(48,54,61,.6);border-radius:2px}
+    .bE{border:1px solid #3a342a;border-left:3px solid #cba560}
+    .bG{border:1px solid #3a342a;border-radius:4px;overflow:hidden}
+    .bG::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#cba560}
+  </style>
+  <div class="bp">
+    <div class="bA">A uniform + radius</div>
+    <div class="bB">B left 3px accent + radius</div>
+    <div class="bC">C top 2px colour + radius</div>
+    <div class="bD">D top-only + radius 2</div>
+    <div class="bE">E left 3px, no radius</div>
+    <div class="bG">G pseudo stripe</div>
+  </div>
+  <div class="foot">
+    <span>rAF: <span class="ok" id="raf">0</span> &middot; host: <span id="host">?</span></span>
+    <span>Page Up / Esc closes</span>
+  </div>
+</div>
+<script>
+  var i1 = document.getElementById('i1'), s1 = document.getElementById('s1');
+  i1.addEventListener('load', function(){ s1.innerHTML = '<span class="ok">decoded ' + i1.naturalWidth + 'x' + i1.naturalHeight + '</span>'; });
+  i1.addEventListener('error', function(){ s1.innerHTML = '<span class="bad">ERROR: image failed to load</span>'; });
+  document.getElementById('host').textContent = window.__MAGELIGHT__ ? ('Magelight ' + window.__MAGELIGHT__.version) : 'none';
+  var cv = document.getElementById('cv'), ctx = cv.getContext('2d'), s7 = document.getElementById('s7');
+  var n = 0, drew = false;
+  function tick() {
+    n++;
+    document.getElementById('raf').textContent = n;
+    if (i1.complete && i1.naturalWidth > 0) {
+      try { ctx.drawImage(i1, 0, 0, 220, 220); drew = true; } catch (e) { s7.innerHTML = '<span class="bad">drawImage threw: ' + e + '</span>'; }
+      if (drew && (n % 30) === 0) {
+        try {
+          var d = ctx.getImageData(110, 110, 1, 1).data;
+          s7.innerHTML = 'pixel@center rgba(' + d[0] + ',' + d[1] + ',' + d[2] + ',' + d[3] + ') ' +
+            ((d[3] === 0) ? '<span class="bad">(transparent = bitmap fallback drew nothing)</span>' : '<span class="ok">(has pixels)</span>');
+        } catch (e) { s7.innerHTML = '<span class="bad">getImageData threw: ' + e + '</span>'; }
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+</script>
+</body></html>

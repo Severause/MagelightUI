@@ -1,0 +1,19 @@
+﻿<!doctype html><html><head><meta charset="utf-8"><title>wrapper probe</title>
+<style>
+ html,body{margin:0;background:#1a1712;color:#e8dcc4;font:12px Arial,sans-serif}
+ .t{background:rgba(31,25,19,0.92);border:1px solid rgba(201,164,92,0.14);border-top:2px solid #c46a5a;border-radius:4px;padding:3px 5px;box-sizing:border-box}
+ .set{display:flex;gap:6px;align-items:flex-start;padding:6px}
+ .wrap{width:900px;height:290px;overflow:hidden;position:relative;margin-bottom:4px}
+ .lbl{position:absolute;right:8px;top:4px;color:#8a7a5a}
+ .wB{transform:scale(1.35);transform-origin:0 0;width:666px;height:214px}
+ .wC{will-change:transform}
+ .wD{transform:translateZ(0);isolation:isolate}
+ .wE{transform:scale(1.35);transform-origin:0 0;width:666px;height:214px}
+ .wE .set{transform:translateZ(0);isolation:isolate;will-change:transform}
+</style></head><body>
+ <div class="wrap wA"><span class="lbl">A: no wrapper</span><div class="set"><div class="t" style="width:60px;height:260px">w60</div><div class="t" style="width:500px;height:260px">w500 h260</div><div class="t" style="width:120px;height:260px">w120 (fine before)</div></div></div>
+ <div class="wrap wB"><span class="lbl">B: scale 1.35 only</span><div class="set"><div class="t" style="width:60px;height:190px">w60</div><div class="t" style="width:500px;height:190px">w500</div><div class="t" style="width:120px;height:190px">w120</div></div></div>
+ <div class="wrap wC"><span class="lbl">C: will-change only</span><div class="set"><div class="t" style="width:60px;height:260px">w60</div><div class="t" style="width:500px;height:260px">w500</div><div class="t" style="width:120px;height:260px">w120</div></div></div>
+ <div class="wrap wD"><span class="lbl">D: translateZ+isolate</span><div class="set"><div class="t" style="width:60px;height:260px">w60</div><div class="t" style="width:500px;height:260px">w500</div><div class="t" style="width:120px;height:260px">w120</div></div></div>
+ <div class="wrap wE"><span class="lbl">E: full shell</span><div class="set"><div class="t" style="width:60px;height:190px">w60</div><div class="t" style="width:500px;height:190px">w500</div><div class="t" style="width:120px;height:190px">w120</div></div></div>
+</body></html>

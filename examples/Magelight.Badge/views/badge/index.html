@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Magelight badge</title>
+<style>
+  html, body { margin: 0; background: transparent; }
+  .badge {
+    box-sizing: border-box; width: 216px; height: 44px;
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    background: #1e1913; border: 1px solid #5a4a2e; border-radius: 6px;
+    color: #e8dcc4; font: 13px Georgia, serif;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #cba560; }
+  .sub { color: #8a7a5a; font-size: 11px; }
+</style></head>
+<body>
+  <div class="badge">
+    <div class="dot"></div>
+    <div>manifest mod <span class="sub" id="t"></span></div>
+  </div>
+  <script>
+    // Zero-code mod: this page is created from manifest.json alone. It
+    // proves the isolated session too — the counter survives restarts and
+    // lives in this mod's own jar, not the shared one.
+    try {
+      var n = parseInt(localStorage.getItem('launches') || '0', 10) + 1;
+      localStorage.setItem('launches', String(n));
+      document.getElementById('t').textContent = '· launch ' + n +
+        (window.__MAGELIGHT__ ? ' · host ' + window.__MAGELIGHT__.version : '');
+    } catch (e) {
+      document.getElementById('t').textContent = '· (no storage)';
+    }
+  </script>
+</body></html>

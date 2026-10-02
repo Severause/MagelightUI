@@ -1,0 +1,28 @@
+# Build output
+build/
+out/
+
+# Vendored Ultralight SDK binaries land via setup script, not history
+# (extern/ultralight/ tracked selectively once vendoring strategy is decided)
+
+# IDE / local
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+
+# Ultralight SDK — fetched, not committed (90MB of third-party binaries)
+extern/ultralight/
+extern/*.7z
+frontend/node_modules/
+
+# npm workspaces (packages/, examples/)
+node_modules/
+packages/*/dist/
+examples/*/dist/
+# tools/package_fomod.ps1 writes its zips here by default (-Out).
+/dist/
+examples/Magelight.ReactConfig/views/
+
+# Any sibling SDK drop is the same third-party binaries — never commit one.
+extern/ultralight-1.3-old/

@@ -1,0 +1,45 @@
+{
+  "modId": "Magelight.Badge",
+  "name": "Magelight badge (manifest example)",
+  "version": "0.1.0",
+  "minHost": "0.18.0",
+  "session": "isolated",
+  "views": {
+    "badge": {
+      "path": "views/badge/index.html",
+      "layer": "hud",
+      "anchor": "top-right",
+      "x": 12,
+      "y": 60,
+      "w": 216,
+      "h": 44,
+      "clickThrough": true,
+      "startVisible": false,
+      "hotkey": "F6",
+      "vr": {
+        "mode": "head"
+      }
+    },
+    "panel": {
+      "path": "views/panel/index.html",
+      "layer": "panel",
+      "anchor": "top-left",
+      "x": 80,
+      "y": 80,
+      "w": 420,
+      "h": 240,
+      "hotkey": "F7",
+      "hotkeyPause": false,
+      "vrHotkey": {
+        "button": "a",
+        "modifier": "grip",
+        "hand": "either"
+      },
+      "vr": {
+        "mode": "lazy",
+        "distance": 1.6,
+        "width": 1.4
+      }
+    }
+  }
+}

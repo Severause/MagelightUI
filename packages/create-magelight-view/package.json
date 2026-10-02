@@ -1,0 +1,11 @@
+{
+  "name": "create-magelight-view",
+  "version": "0.30.0",
+  "description": "Scaffold a Magelight UI mod: manifest.json + a React config page wired to @magelight/react.",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/Severause/MagelightUI.git", "directory": "packages/create-magelight-view" },
+  "type": "module",
+  "bin": { "create-magelight-view": "index.js" },
+  "files": ["index.js", "template", "README.md"],
+  "engines": { "node": ">=20" }
+}

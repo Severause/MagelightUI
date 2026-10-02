@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Magelight keyboard</title>
+<style>
+  html, body { margin: 0; background: transparent; -webkit-user-select: none; user-select: none; }
+  .kb {
+    box-sizing: border-box; width: 980px; padding: 12px 14px 14px;
+    background: #1e1913; border: 1px solid #5a4a2e; border-radius: 6px;
+    color: #e8dcc4; font: 14px Georgia, serif;
+  }
+  .bar {
+    display: flex; align-items: center; gap: 10px; margin: -4px -6px 8px; padding: 6px 8px;
+    border: 1px solid transparent; border-radius: 4px; cursor: move;
+  }
+  .bar:hover { background: #251d14; border-color: #3b3221; }
+  .bar.drag { background: #4a3a24; border-color: #cba560; }
+  .bar h1 { margin: 0; font-size: 14px; color: #cba560; font-weight: normal; letter-spacing: .02em; }
+  .bar .grip { color: #5a4a2e; font-size: 15px; letter-spacing: 2px; }
+  .bar .sub { color: #8a7a5a; font-size: 12px; }
+  .bar .spacer { flex: 1; }
+  .row { display: flex; gap: 6px; margin-bottom: 6px; }
+  .row:last-child { margin-bottom: 0; }
+  .k {
+    flex: 1 1 0; min-width: 0; height: 46px; display: flex; align-items: center; justify-content: center;
+    background: #292118; border: 1px solid #3b3221; border-radius: 4px;
+    color: #e8dcc4; font: 15px Georgia, serif; cursor: pointer;
+    transition: background .06s linear, border-color .06s linear;
+  }
+  .k:hover { background: #35291c; border-color: #5a4a2e; }
+  .k:active, .k.down { background: #4a3a24; border-color: #cba560; color: #fff3d8; }
+  .k.wide  { flex-grow: 1.6; }
+  .k.wider { flex-grow: 2.1; }
+  .k.space { flex-grow: 7; }
+  .k.mod   { color: #cba560; font-size: 13px; }
+  .k.mod.on { background: #4a3a24; border-color: #cba560; color: #fff3d8; }
+  .k.act   { color: #e0925a; font-size: 13px; }
+  .k.close { color: #a3472b; font-size: 13px; }
+</style></head>
+<body>
+  <div class="kb">
+    <div class="bar" id="bar">
+      <span class="grip">::::</span>
+      <h1>Keyboard</h1>
+      <span class="sub" id="hint">drag this bar to move me</span>
+      <span class="spacer"></span>
+      <span class="sub">Magelight</span>
+    </div>
+    <div id="rows"></div>
+  </div>
+<script>
+(function () {
+  // [lower, upper, kind, vk, grow]. kind: '' normal, 'mod', 'act', 'close'.
+  var R = [
+    [['`','~'],['1','!'],['2','@'],['3','#'],['4','$'],['5','%'],['6','^'],['7','&'],['8','*'],
+     ['9','('],['0',')'],['-','_'],['=','+'],['Bksp','Bksp','act',8,'wide']],
+    [['Tab','Tab','act',9,'wide'],['q','Q'],['w','W'],['e','E'],['r','R'],['t','T'],['y','Y'],['u','U'],
+     ['i','I'],['o','O'],['p','P'],['[','{'],[']','}'],['\\','|']],
+    [['Caps','Caps','mod',0,'wide'],['a','A'],['s','S'],['d','D'],['f','F'],['g','G'],['h','H'],
+     ['j','J'],['k','K'],['l','L'],[';',':'],["'",'"'],['Enter','Enter','act',13,'wider']],
+    [['Shift','Shift','mod',0,'wider'],['z','Z'],['x','X'],['c','C'],['v','V'],['b','B'],['n','N'],
+     ['m','M'],[',','<'],['.','>'],['/','?'],['Shift','Shift','mod',0,'wider']],
+    [['Esc','Esc','act',27,'wide'],['Space','Space','',32,'space'],
+     ['←','←','act',37],['→','→','act',39],
+     ['↑','↑','act',38],['↓','↓','act',40],
+     ['Close','Close','close',0,'wide']]
+  ];
+  // Keys that auto-repeat while held: erase and navigate, the two you never
+  // want to click twenty times with a laser pointer.
+  var REPEAT = { 8: 1, 37: 1, 38: 1, 39: 1, 40: 1 };
+  var REPEAT_DELAY = 400, REPEAT_RATE = 55;
+
+  var shift = false, caps = false;
+  var rows = document.getElementById('rows');
+  var letterEls = [];
+  var timers = null;
+
+  function send(o) { try { window.magelight.send('__key', JSON.stringify(o)); } catch (e) {} }
+
+  function stopRepeat() {
+    if (!timers) return;
+    clearTimeout(timers.t); clearInterval(timers.i);
+    timers = null;
+  }
+
+  function relabel() {
+    letterEls.forEach(function (o) {
+      var isAlpha = /^[a-z]$/.test(o.lo);
+      var up = isAlpha ? (shift !== caps) : shift;
+      o.el.textContent = up ? o.hi : o.lo;
+    });
+    var mods = document.querySelectorAll('.k.mod');
+    for (var i = 0; i < mods.length; i++) {
+      var t = mods[i].getAttribute('data-mod');
+      var on = (t === 'Shift' && shift) || (t === 'Caps' && caps);
+      if (on) mods[i].classList.add('on'); else mods[i].classList.remove('on');
+    }
+  }
+
+  R.forEach(function (row) {
+    var d = document.createElement('div');
+    d.className = 'row';
+    row.forEach(function (k) {
+      var lo = k[0], hi = k[1], kind = k[2] || '', vk = k[3] || 0, grow = k[4] || '';
+      var el = document.createElement('div');
+      el.className = 'k' + (kind ? ' ' + kind : '') + (grow ? ' ' + grow : '');
+      el.textContent = lo;
+      if (kind === 'mod') el.setAttribute('data-mod', lo);
+      if (!kind) letterEls.push({ el: el, lo: lo, hi: hi });
+
+      function fire() {
+        if (lo === 'Space') { send({ c: ' ' }); return; }
+        if (vk) { send({ vk: vk }); return; }
+        var isAlpha = /^[a-z]$/.test(lo);
+        var up = isAlpha ? (shift !== caps) : shift;
+        send({ c: up ? hi : lo });
+      }
+
+      el.addEventListener('mousedown', function (ev) {
+        ev.preventDefault();
+        el.classList.add('down');
+        if (kind === 'mod') {
+          if (lo === 'Shift') shift = !shift; else caps = !caps;
+          relabel();
+          return;
+        }
+        if (kind === 'close') { send({ close: true }); return; }
+        fire();
+        if (shift) { shift = false; relabel(); }   // shift is one-shot
+        if (REPEAT[vk]) {                          // hold to repeat
+          stopRepeat();
+          timers = {};
+          timers.t = setTimeout(function () {
+            timers.i = setInterval(fire, REPEAT_RATE);
+          }, REPEAT_DELAY);
+        }
+      });
+      el.addEventListener('mouseup', function () { el.classList.remove('down'); stopRepeat(); });
+      el.addEventListener('mouseleave', function () { el.classList.remove('down'); stopRepeat(); });
+      d.appendChild(el);
+    });
+    rows.appendChild(d);
+  });
+  relabel();
+
+  // ── Drag the bar to move the keyboard ────────────────────────────────
+  // The host does the moving: in VR it re-places the overlay along the ray
+  // that is holding it, on flat it slides the view. We only report the grab.
+  var bar = document.getElementById('bar');
+  var dragging = false;
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    bar.classList.remove('drag');
+    send({ drag: 'end' });
+  }
+  bar.addEventListener('mousedown', function (ev) {
+    ev.preventDefault();
+    dragging = true;
+    bar.classList.add('drag');
+    send({ drag: 'start' });
+  });
+  bar.addEventListener('mouseup', endDrag);
+  window.addEventListener('mouseup', endDrag);
+  window.addEventListener('blur', function () { endDrag(); stopRepeat(); });
+})();
+</script>
+</body></html>

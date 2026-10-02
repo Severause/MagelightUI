@@ -1,0 +1,36 @@
+name: Mod integration help
+description: You are building a mod ON Magelight (manifest, Papyrus, or C++) and something does not work.
+title: "[Integration]: "
+labels: [question]
+body:
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Which tier are you on?
+      options:
+        - Manifest (manifest.json + pages, no code)
+        - Papyrus (Magelight.psc)
+        - C++ (MagelightUI_API.h)
+        - Frontend only (the @magelight/* npm packages, no game yet)
+      multiple: false
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you building?
+      description: One or two sentences — the view you want and how it should behave.
+    validations:
+      required: true
+  - type: textarea
+    id: blocker
+    attributes:
+      label: What is blocking you?
+      description: What you tried, what happened, what the docs said should happen. Paste your manifest.json / the relevant script or page snippet, and any Magelight.log lines that name your mod.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Magelight version
+      placeholder: X.Y.Z

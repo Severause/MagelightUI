@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Magelight panel</title>
+<style>
+  html, body { margin: 0; background: transparent; }
+  .panel {
+    box-sizing: border-box; width: 420px; height: 240px; padding: 16px 18px;
+    background: #1e1913; border: 1px solid #5a4a2e; border-radius: 6px;
+    color: #e8dcc4; font: 14px Georgia, serif;
+  }
+  h1 { margin: 0 0 6px; font-size: 17px; color: #cba560; font-weight: normal; }
+  p { margin: 6px 0; line-height: 1.4; }
+  .sub { color: #8a7a5a; font-size: 12px; }
+  input {
+    box-sizing: border-box; width: 100%; margin-top: 8px; padding: 7px 9px;
+    background: #100e0a; border: 1px solid #3b3221; border-radius: 4px;
+    color: #e8dcc4; font: 14px Georgia, serif; outline: none;
+  }
+  input:focus { border-color: #cba560; }
+  button { margin-top: 8px; padding: 5px 10px; background: #292118; border: 1px solid #5a4a2e; border-radius: 4px; color: #e8dcc4; font: 13px Georgia, serif; cursor: pointer; }
+  button:hover { border-color: #cba560; }
+  kbd { background: #292118; border: 1px solid #3b3221; border-radius: 3px; padding: 0 5px; font: 12px monospace; }
+</style></head>
+<body>
+  <div class="panel">
+    <h1>Manifest panel</h1>
+    <p>Opened by <kbd>F7</kbd> straight from <code>manifest.json</code> — no DLL, no script.</p>
+    <p class="sub">Close with <kbd>F7</kbd> or <kbd>Esc</kbd>. Type below: letters must never
+      trigger another mod's hotkey while this field has focus, and <kbd>F6</kbd> (the badge's
+      own key) is swallowed here.</p>
+    <input id="f" placeholder="type here — Ctrl+C / Ctrl+V work too" />
+    <p class="sub" id="s"></p>
+    <!-- UI sounds (host 0.29.0): one attribute, no script — the host plays the
+         vanilla menu click through the game's audio (a page cannot itself). -->
+    <button id="c" data-ml-sound="click" data-ml-sound-hover="focus">Clear draft</button>
+  </div>
+  <script>
+    var f = document.getElementById('f'), s = document.getElementById('s');
+    try {
+      f.value = localStorage.getItem('draft') || '';
+      f.addEventListener('input', function () { localStorage.setItem('draft', f.value); });
+      s.textContent = 'draft persists in this mod’s own session jar';
+    } catch (e) { s.textContent = '(no storage)'; }
+    document.getElementById('c').addEventListener('click', function () { f.value = ''; f.dispatchEvent(new Event('input')); });
+    setTimeout(function () { f.focus(); }, 50);
+  </script>
+</body></html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Inspect Target</title>
+<style>
+  html, body { margin: 0; height: 100%; background: transparent;
+    font-family: "Segoe UI", system-ui, sans-serif; color: #e8e2d4; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  .card { min-width: 300px; background: #1f1913; border: 1px solid rgba(201,164,92,0.4);
+    border-radius: 8px; padding: 22px 26px; box-shadow: 0 18px 56px rgba(0,0,0,0.6); }
+  .name { font-size: 26px; font-weight: 700; color: #c9a45c; }
+  .race { font-size: 13px; color: #948871; margin-bottom: 14px; }
+  .row { display: flex; justify-content: space-between; padding: 4px 0;
+    border-top: 1px solid rgba(201,164,92,0.12); font-size: 14px; }
+  .row .k { color: #948871; } .row .v { color: #e8e2d4; }
+  .combat { color: #d98c6a; }
+  button { margin-top: 16px; width: 100%; font: inherit; padding: 8px;
+    color: #e8e2d4; background: #131009; border: 1px solid rgba(201,164,92,0.5);
+    border-radius: 5px; cursor: pointer; }
+  button:hover { border-color: #c9a45c; }
+</style>
+</head>
+<body>
+  <div id="wrap"><div class="card">
+    <div class="name" id="name">—</div>
+    <div class="race" id="race"></div>
+    <div class="row"><span class="k">Level</span><span class="v" id="level"></span></div>
+    <div class="row"><span class="k">Health</span><span class="v" id="health"></span></div>
+    <div class="row"><span class="k">Magicka</span><span class="v" id="magicka"></span></div>
+    <div class="row"><span class="k">Stamina</span><span class="v" id="stamina"></span></div>
+    <div class="row"><span class="k">Weapon</span><span class="v" id="weapon"></span></div>
+    <div class="row"><span class="k">State</span><span class="v" id="state"></span></div>
+    <button id="close">Close (or Escape)</button>
+  </div></div>
+
+<script>
+  // C++ (MagelightInspect::Open) pushes the snapshot here via InvokeJS.
+  window.setActor = function (a) {
+    if (!a) return;
+    var g = function (id) { return document.getElementById(id); };
+    g('name').textContent    = a.name;
+    g('race').textContent    = a.race || '';
+    g('level').textContent   = a.level;
+    g('health').textContent  = a.health;
+    g('magicka').textContent = a.magicka;
+    g('stamina').textContent = a.stamina;
+    g('weapon').textContent  = a.weapon;
+    g('state').textContent   = a.inCombat ? 'in combat' : 'idle';
+    g('state').className     = 'v' + (a.inCombat ? ' combat' : '');
+  };
+  // Close: the C++ side registered this listener (RegisterJSListenerEx),
+  // so window.inspectClose() reaches OnCloseButton in plugin.cpp.
+  document.getElementById('close').addEventListener('click', function () {
+    if (window.inspectClose) window.inspectClose();
+  });
+</script>
+</body>
+</html>

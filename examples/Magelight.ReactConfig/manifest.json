@@ -1,0 +1,19 @@
+{
+  "modId": "Magelight.ReactConfig",
+  "name": "Magelight React config (SDK example)",
+  "version": "0.1.0",
+  "minHost": "0.15.0",
+  "views": {
+    "config": {
+      "path": "views/config/index.html",
+      "layer": "panel",
+      "anchor": "top-left",
+      "x": 120,
+      "y": 120,
+      "w": 560,
+      "h": 380,
+      "hotkey": "F8",
+      "sounds": { "open": "open", "close": "close" }
+    }
+  }
+}

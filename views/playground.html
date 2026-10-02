@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Magelight milestone 4 — bridge playground.
+  Loaded from disk (Data/SKSE/Plugins/Magelight/views/) via the Ultralight
+  file system, proving the on-disk-frontend path the React port needs.
+
+  Host bridge contract exercised here:
+    JS -> C++ : window.<listener>(argString)   (shims installed by the host)
+    C++ -> JS : window.<fn>(argString)         (InteropCall, real string arg)
+-->
+<style>
+  html, body { margin: 0; background: transparent; font-family: Georgia, serif; }
+  #panel {
+    box-sizing: border-box; width: 640px; height: 400px;
+    background: rgba(244, 236, 211, 0.96);
+    border: 2px solid #6b5a36; border-radius: 10px;
+    padding: 14px 18px; color: #2a2416;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  h1 { font-size: 19px; margin: 0; }
+  .sub { font-size: 11px; font-style: italic; color: #6b5a36; margin: 0; }
+  button {
+    font-family: inherit; font-size: 13px; padding: 4px 12px;
+    background: #e6d9b8; border: 1px solid #6b5a36; border-radius: 5px;
+    color: #2a2416; cursor: pointer;
+  }
+  button:hover { background: #d4c395; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  #playerData {
+    font-size: 13px; background: rgba(255,255,255,0.5);
+    border: 1px solid #b3a273; border-radius: 5px; padding: 6px 10px;
+    min-height: 38px; white-space: pre-wrap;
+  }
+  #notify {
+    font-size: 12px; color: #1f5c1f; min-height: 16px; font-style: italic;
+  }
+  #log {
+    flex: 1; overflow-y: auto; font-size: 11px; font-family: Consolas, monospace;
+    background: rgba(255,255,255,0.45); border: 1px solid #b3a273;
+    border-radius: 5px; padding: 4px 8px;
+  }
+  .foot { font-size: 11px; color: #6b5a36; display: flex; justify-content: space-between; }
+  .ok { color: #1f5c1f; font-weight: bold; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h1>&#10022; Magelight UI &mdash; bridge playground</h1>
+  <p class="sub">Milestone 4: JS &harr; C++ interop. Loaded from disk. ESC or Page Up closes.</p>
+
+  <div class="row">
+    <button id="btnPlayer">Request player data</button>
+    <button id="btnSetting">Send setting change</button>
+    <span id="rtt"></span>
+  </div>
+  <div id="playerData">(player data appears here)</div>
+  <div id="notify"></div>
+  <div id="log"></div>
+  <div class="foot">
+    <span>Bridge: <span id="bridgeState" class="ok">&mdash;</span></span>
+    <span id="clock"></span>
+  </div>
+</div>
+<script>
+  var logEl = document.getElementById('log');
+  function log(msg) {
+    var d = document.createElement('div');
+    d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // ── C++ -> JS surface (what the host reaches via InteropCall) ──────────
+  var reqStart = 0;
+  window.receivePageData = function (arg) {
+    var ms = reqStart ? (performance.now() - reqStart).toFixed(1) : '?';
+    document.getElementById('rtt').textContent = 'round-trip: ' + ms + ' ms';
+    var data;
+    try { data = (typeof arg === 'string') ? JSON.parse(arg) : arg; }
+    catch (e) { log('receivePageData: bad JSON: ' + e); return; }
+    document.getElementById('playerData').textContent =
+      data.name + '  —  level ' + data.level +
+      '\ngold ' + data.gold + '   health ' + data.health + '/' + data.healthMax +
+      '\n' + (data.location || '(unknown location)');
+    log('receivePageData: ' + String(arg).length + ' chars');
+  };
+  window.showNotification = function (msg) {
+    document.getElementById('notify').textContent = String(msg);
+    log('showNotification: ' + msg);
+  };
+
+  // ── JS -> C++ (sendToSKSE-style: call the installed window shim) ───────
+  function sendToHost(fn, arg) {
+    var f = window[fn];
+    if (f == null) { log('MISSING host listener: ' + fn); return; }
+    try { f(arg == null ? '' : String(arg)); }
+    catch (e) { log('host call threw: ' + e); }
+  }
+
+  document.getElementById('btnPlayer').onclick = function () {
+    reqStart = performance.now();
+    log('-> requestPageData("demo")');
+    sendToHost('requestPageData', 'demo');
+  };
+  var settingN = 0;
+  document.getElementById('btnSetting').onclick = function () {
+    var payload = JSON.stringify({ key: 'demoToggle', value: (++settingN % 2) === 0, n: settingN });
+    log('-> settingChanged(' + payload + ')');
+    sendToHost('settingChanged', payload);
+  };
+
+  // Bridge liveness indicator: the host installs shims at window-object
+  // ready, i.e. before this script runs — they should exist already.
+  window.addEventListener('load', function () {
+    var ok = typeof window.requestPageData !== 'undefined' &&
+             typeof window.settingChanged !== 'undefined';
+    document.getElementById('bridgeState').textContent = ok ? 'connected' : 'NOT INSTALLED';
+    document.getElementById('bridgeState').style.color = ok ? '#1f5c1f' : '#8c1f1f';
+    log(ok ? 'bridge shims present at load' : 'bridge shims MISSING at load');
+  });
+  setInterval(function () {
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+  }, 1000);
+</script>
+</body>
+</html>

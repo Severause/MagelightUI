@@ -1,0 +1,55 @@
+name: Bug report
+description: Something the host does wrong in game — rendering, input, crashes, coexistence.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Blank page / nothing renders?** Work through the six-step list in
+        [TROUBLESHOOTING.md](https://github.com/Severause/MagelightUI/blob/main/docs/TROUBLESHOOTING.md)
+        first — most reports are one of those. Include what step you reached below.
+  - type: input
+    id: version
+    attributes:
+      label: Magelight version
+      description: First line of Magelight.log ("Magelight vX.Y.Z"), or the version in the name of the zip you installed.
+      placeholder: X.Y.Z
+    validations:
+      required: true
+  - type: dropdown
+    id: game
+    attributes:
+      label: Game
+      options:
+        - Skyrim SE/AE (flat)
+        - Skyrim VR
+      multiple: false
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected instead. If a specific mod's page is involved, name the mod and the view.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Magelight.log excerpt
+      description: My Games\Skyrim Special Edition\SKSE\Magelight.log (Skyrim VR\... for VR) — the lines from the session where it happened. The log names the mod and view for most failures.
+      render: text
+  - type: input
+    id: cohabitants
+    attributes:
+      label: Other UI hosts or overlays installed?
+      description: Other Ultralight-based UI hosts, SkyrimUpscaler/DLSS Frame Gen, ENB, Community Shaders — coexistence is a tested feature, so say if one of these is present.
+      placeholder: ENB 0.5, Community Shaders
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I read TROUBLESHOOTING.md and this is not one of the six usual causes.
+        - label: The log excerpt above is from a session where the problem actually happened.

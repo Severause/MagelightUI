@@ -1,0 +1,47 @@
+﻿<!doctype html><html><head><meta charset="utf-8"><title>border probe</title>
+<style>
+ body{margin:0;background:transparent;zoom:1.35;color:#e8dcc4;font:14px/1.3 Arial,sans-serif;padding:16px}
+ .grid{display:grid;grid-template-columns:repeat(4,220px);gap:18px}
+ .cell{background:#26211a;height:90px;padding:10px;box-sizing:border-box;position:relative}
+ .lbl{position:absolute;left:10px;bottom:6px;font-size:11px;opacity:.7}
+ /* A: uniform border + radius (control) */
+ .a{border:1px solid #3a342a;border-radius:4px}
+ /* B: radius + thicker coloured left border (stats-dossier) */
+ .b{border:1px solid #3a342a;border-left:3px solid #cba560;border-radius:4px}
+ /* C: radius + coloured top border only (ledger col) */
+ .c{border:1px solid #3a342a;border-top:2px solid #c46a5a;border-radius:4px}
+ /* D: radius + top-only border (control-row separator) */
+ .d{border-top:1px solid rgba(48,54,61,.4);border-radius:2px}
+ /* E: NO radius + coloured left border */
+ .e{border:1px solid #3a342a;border-left:3px solid #cba560}
+ /* F: radius + uniform 1px border + inset box-shadow stripe */
+ .f{border:1px solid #3a342a;border-radius:4px;box-shadow:inset 3px 0 0 #cba560}
+ /* G: radius + uniform border + pseudo stripe */
+ .g{border:1px solid #3a342a;border-radius:4px;overflow:hidden}
+ .g::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#cba560}
+ /* H: radius + top-only via inset shadow */
+ .h{border-radius:2px;box-shadow:inset 0 1px 0 rgba(48,54,61,.9)}
+ /* I: radius 0.01px + left border (does ANY radius trigger it?) */
+ .i{border:1px solid #3a342a;border-left:3px solid #cba560;border-radius:0.5px}
+ /* J: radius + different colour left, same width */
+ .j{border:1px solid #3a342a;border-left:1px solid #cba560;border-radius:4px}
+ /* K: radius + left width 3, same colour everywhere */
+ .k{border:1px solid #cba560;border-left:3px solid #cba560;border-radius:4px}
+ /* L: radius + border-left + transition (control-row hover animates bg) */
+ .l{border:1px solid #3a342a;border-left:3px solid #cba560;border-radius:4px;transition:background .2s}
+</style></head><body>
+<div class="grid">
+ <div class="cell a"><span class="lbl">A uniform+radius</span></div>
+ <div class="cell b"><span class="lbl">B left3 accent+radius</span></div>
+ <div class="cell c"><span class="lbl">C top2 colour+radius</span></div>
+ <div class="cell d"><span class="lbl">D top-only+radius2</span></div>
+ <div class="cell e"><span class="lbl">E left3, no radius</span></div>
+ <div class="cell f"><span class="lbl">F inset-shadow stripe</span></div>
+ <div class="cell g"><span class="lbl">G pseudo stripe</span></div>
+ <div class="cell h"><span class="lbl">H top via inset shadow</span></div>
+ <div class="cell i"><span class="lbl">I left3+radius .5px</span></div>
+ <div class="cell j"><span class="lbl">J left colour only</span></div>
+ <div class="cell k"><span class="lbl">K left width only</span></div>
+ <div class="cell l"><span class="lbl">L B + transition</span></div>
+</div></body></html>
+

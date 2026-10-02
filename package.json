@@ -1,0 +1,21 @@
+{
+  "name": "magelight-workspace",
+  "private": true,
+  "version": "0.30.0",
+  "description": "Magelight UI SDK packages (npm workspaces)",
+  "workspaces": [
+    "packages/sdk",
+    "packages/react",
+    "packages/vite-plugin",
+    "packages/create-magelight-view",
+    "examples/Magelight.ReactConfig"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "clean": "node -e \"for (const p of ['packages/sdk','packages/react','packages/vite-plugin']) require('fs').rmSync(p+'/dist',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3"
+  },
+  "license": "MIT"
+}
