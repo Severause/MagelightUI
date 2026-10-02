@@ -42,7 +42,8 @@ Ultralight runtime cannot load and no Magelight page appears (the log says
 
 ## Quick start (manifest, five minutes)
 
-1. Install Magelight UI and, the first time, its Examples download (both plain zips).
+1. Install Magelight UI (a plain zip). To try the example mods first, build them from this
+   repository (`build.ps1 -Examples`, see "Building the host").
 2. Make `Data/Magelight/MyMod/manifest.json`:
    ```json
    { "modId": "MyMod", "name": "My Mod", "minHost": "0.16.0",
@@ -91,8 +92,8 @@ and that no other mod binds: one binding per key, and the first binder keeps it.
 - **Lifecycle**: create, show, reload, navigate, destroy; load failures name the page in the log
   instead of leaving a blank rectangle.
 - **Dev loop** (`"devMode": true` in `Magelight.json`): edit a page and it reloads in game; JS
-  errors paint a banner on the page itself. The WebKit Web Inspector (the DevTools
-  download) is hosted by Magelight; a C++ mod opens it with `ShowInspector` (there is no key for
+  errors paint a banner on the page itself. The WebKit Web Inspector (staged by `build.ps1`,
+  not in the player download) is hosted by Magelight; a C++ mod opens it with `ShowInspector` (there is no key for
   it).
 - **Coexistence**: a version gate lists mods that need a newer host; the Ultralight runtime ships
   under private names so another Ultralight-based plugin cannot collide with it.
@@ -153,8 +154,8 @@ download and are installed beside the runtime under `SKSE/Plugins/Magelight/lice
   itself ([docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)).
 - **MagelightGPU.dll** — LGPL-2.1, derived from Ultralight's AppCore D3D11 driver and isolated in
   its own DLL behind a C ABI; its corresponding source is the `gpu/` folder of this repository
-  at each release's tag (`v0.30.1` for 0.30.1).
-- **Web Inspector** (the optional DevTools download) — Apple BSD.
+  at each release's tag (`v0.30.2` for 0.30.2).
+- **Web Inspector** (staged by `build.ps1`, not in the player download) — Apple BSD.
 - Compiled into `Magelight.dll`: CommonLibVR (MinLL's MIT continuation of CommonLibSSE-NG),
   {fmt}, spdlog, nlohmann/json, DirectXMath and DirectXTK — MIT; rapidcsv, Xbyak and the
   OpenVR headers — BSD 3-Clause. The example and test pages carry React (MIT).

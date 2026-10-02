@@ -10,7 +10,7 @@ endif()
 
 project(
     Magelight
-    VERSION 0.30.1
+    VERSION 0.30.2
     LANGUAGES CXX
 )
 
@@ -29,6 +29,7 @@ find_package(directxtk CONFIG REQUIRED)
 find_package(directxtex CONFIG REQUIRED)
 find_package(directxmath CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
+find_package(minhook CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(xbyak CONFIG REQUIRED)
@@ -84,6 +85,7 @@ target_link_directories(${PROJECT_NAME} PRIVATE ${ULTRALIGHT_DIR}/lib)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     CommonLibSSE::CommonLibSSE
+    minhook::minhook
     nlohmann_json::nlohmann_json
     Ultralight
     UltralightCore

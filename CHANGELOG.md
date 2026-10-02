@@ -37,6 +37,44 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 0.30.2
+
+Compatibility with mods that wrap the game's window or its frame output: a crash fix, and the
+pages drawing behind upscalers and frame generation.
+
+- **Crash with mods that subclass the game window (fixed).** Skyrim's window is
+  ANSI, and many SKSE plugins subclass it with `SetWindowLongPtrA` and call the
+  previous procedure directly. Magelight's input subclass is a Unicode one, so
+  such a plugin got a handle it could only call through `CallWindowProc`, and a
+  direct call crashed inside USER32 (an address like `0xFFFF...`). An ANSI shim
+  now sits on top of the input subclass and hands every later subclass a real
+  function.
+- **Pages behind another Present hook.** Magelight now also hooks `Present1`,
+  and when another plugin hooked Present first (an upscaler, a camera mod), it
+  draws inside dxgi's own Present instead, after that plugin, so nothing draws
+  over the pages. Behind a swapchain proxy it finds dxgi's own Present through a
+  throwaway swapchain. It steps back to the plain hook when that Present is never
+  reached. `Magelight.json` `"presentHook"`: `auto` (default), `late`, `vtable`.
+- **Pages with Skyrim Upscaler and frame generation.** Skyrim Upscaler's HUD Fix
+  keeps the game's UI apart from the scene and drops anything drawn at Present,
+  so the pages opened (sound, paused game) but stayed invisible. Magelight can now
+  draw the pages in the game's own UI pass: an invisible engine menu, open only
+  while a page the player can click is visible, draws them into the UI's render
+  target. When that pass does not run (loading screens, the console's `tm`), the
+  pages are drawn at Present again within two frames. Click-through HUD pages
+  still draw at Present, so they stay hidden behind the HUD Fix: the menu would
+  keep Escape from opening the Journal for as long as one is up. `Magelight.json` `"composite"`: `auto`
+  (default: the UI pass when Skyrim Upscaler is installed, never on VR),
+  `present`, `ui`.
+- **Diagnostics.** The log names the plugin whose Present hook Magelight found,
+  the game swapchain (size, format, swap effect, flags), each swapchain presented
+  and the plugin that presented it, and the UI-pass render target; every ten
+  seconds it counts presents to swapchains other than the game's, while there are
+  any.
+- Third-party: MinHook (BSD-2-Clause), in `NOTICES.txt` and
+  `THIRD_PARTY_LICENSES.txt`.
+- No API changes; the npm packages stay at 0.30.0.
+
 ## 0.30.1
 
 A fix for a hang on Skyrim VR, and the API call that lets a mod avoid the same one.

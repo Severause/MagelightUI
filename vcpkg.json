@@ -9,6 +9,7 @@
     "directxtex",
     "directxtk",
     "fmt",
+    "minhook",
     "nlohmann-json",
     "rapidcsv",
     "spdlog",

@@ -23,7 +23,7 @@ Stage Magelight's runtime as **required core** files in your own installer, so
 one download installs both. This is what SeverActions does. The pattern:
 
 1. Take the files from a published Magelight release's runtime zip (the main
-   file on the Magelight UI page, or the GitHub release). A released build matches its
+   file on the Magelight UI Nexus page). A released build matches its
    crash symbols and the source tag its notices name; a local `build.ps1`
    stage is for testing.
 2. Stage the **runtime files only** into a folder in your FOMOD tree, e.g.
@@ -32,8 +32,7 @@ one download installs both. This is what SeverActions does. The pattern:
    `resources\` (ICU data is mandatory), `views\gate` + `views\keyboard`,
    `cursor.png`, `Interface\magelightfocus.swf`, the Papyrus tier, and the
    whole `license\` folder. Drop: the Web Inspector, examples, `Source\`, the
-   `views\probe`/`app` dev pages. (The runtime zip is exactly this set; the
-   DevTools and Examples zips hold what you drop.)
+   `views\probe`/`app` dev pages. (The runtime zip is exactly this set.)
 3. Reference it from your `fomod/ModuleConfig.xml`. As **required core** it is
    one `<folder source="98 Magelight UI/00 Core" destination="" priority="1"/>`
    under `<requiredInstallFiles>`; stripping that prefix lays `SKSE\` /

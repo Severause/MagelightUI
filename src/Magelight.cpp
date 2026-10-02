@@ -16,8 +16,10 @@
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 #include <windows.h>
+#include <intrin.h>
+#include <MinHook.h>
 #include <imm.h>   // IME (0.27.0)
 #include <windowsx.h>
 #include <tlhelp32.h>
@@ -279,6 +281,14 @@ namespace Magelight {
     static std::atomic<int>  s_imeCaretX{ -1 }, s_imeCaretY{ -1 }, s_imeCaretH{ 0 };   // client px; x<0 = unknown
 
     static std::filesystem::path s_runtimeDir;  // Data/SKSE/Plugins/Magelight
+    // Magelight.json "presentHook": "auto" (late composite only behind an earlier Present hook, never on VR),
+    // "late" (always try it), "vtable" (never). See InstallLatePresent.
+    static std::string s_presentHookMode = "auto";
+    // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
+    // at Present; "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
+    // the game's UI apart from the scene (Skyrim Upscaler's HUD Fix) keeps ours with it. "auto" picks "ui" when
+    // Skyrim Upscaler is loaded, never on VR. See UiPassActive.
+    static std::string s_compositeMode = "auto";
 
     // Read Magelight.json from the runtime dir (see the settings block at the
     // top of the file for the schema). Missing/corrupt file = defaults.
@@ -311,6 +321,10 @@ namespace Magelight {
                 s_toggleKey.store(it->get<std::uint32_t>());
             if (auto it = j.find("forceCpu"); it != j.end() && it->is_boolean())
                 s_forceCpu.store(it->get<bool>());
+            if (auto it = j.find("presentHook"); it != j.end() && it->is_string())
+                s_presentHookMode = HotkeyNames::Lower(it->get<std::string>());
+            if (auto it = j.find("composite"); it != j.end() && it->is_string())
+                s_compositeMode = HotkeyNames::Lower(it->get<std::string>());
             if (auto it = j.find("devMode"); it != j.end() && it->is_boolean())
                 s_devMode.store(it->get<bool>());
             if (auto it = j.find("fontHinting"); it != j.end() && it->is_string())
@@ -586,6 +600,16 @@ namespace Magelight {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         for (const auto& v : s_views)
             if (v->visible) return true;
+        return false;
+    }
+
+    // A visible view the player can click: the UI-pass carrier opens only for one of these (see
+    // MagelightOverlayMenu), so a HUD view that stays up never holds it open over gameplay.
+    static bool AnyInteractiveViewVisible()
+    {
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        for (const auto& v : s_views)
+            if (v->visible && !v->clickThrough) return true;
         return false;
     }
 
@@ -1156,6 +1180,7 @@ namespace Magelight {
     };
     static HWND                  s_hwnd = nullptr;
     static WNDPROC               s_origWndProc = nullptr;
+    static std::atomic<WNDPROC>  s_ansiShimPrev{ nullptr };   // HookWndProc as an A-callable value (AnsiShimWndProc)
     static std::atomic<bool>     s_focused{ false };
     static std::mutex            s_inputMutex;
     static std::vector<InputMsg> s_inputQueue;
@@ -1288,6 +1313,133 @@ namespace Magelight {
     }
 
     static LONG LogSehAndDisable(const char* where, unsigned long code, void* addr);  // fwd (frame section)
+
+    // ── UI-pass composite ──────────────────────────────────────────────────
+    // With the composite in the game's UI pass, Present still updates and renders the views (into their own
+    // textures) and records the quads it would have drawn; the carrier menu's PostDisplay, which the engine
+    // calls inside its UI render with the UI's render target bound, draws them there one frame later.
+    struct QueuedQuad {
+        ID3D11ShaderResourceView* srv = nullptr;   // owned ref
+        float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+        float x = 0, y = 0, w = 0, h = 0;
+        bool  hasCut = false;
+        float cut[4] = { 0, 0, 0, 0 };
+    };
+    static std::mutex              s_uiPassMutex;
+    static std::vector<QueuedQuad> s_uiPassQuads;            // the last published frame
+    static float                   s_uiPassBackW = 0, s_uiPassBackH = 0;   // the back buffer they were laid out for
+    static std::chrono::steady_clock::time_point s_uiPassPublished{};   // a set older than 250 ms is not drawn
+    static std::atomic<std::uint64_t> s_compositeFrames{ 0 };          // FrameWork composites, deferred or not
+    static std::atomic<std::uint64_t> s_lastUiPassFrame{ 0 };          // s_compositeFrames at the last PostDisplay
+    static std::atomic<bool>          s_uiPassSeen{ false };
+    static bool                       s_overlayMenuRegistered = false;
+
+    static void ReleaseQuads(std::vector<QueuedQuad>& qs)
+    {
+        for (auto& q : qs) if (q.srv) q.srv->Release();
+        qs.clear();
+    }
+
+    // Present defers to the UI pass only while the carrier menu is actually drawing: its PostDisplay ran within
+    // the last two composites. Menus hidden (the console's tm, a photo mode, loading screens) fall back to
+    // Present at once, so the views never vanish with them.
+    static bool UiPassActive()
+    {
+        if (!s_uiPassSeen.load()) return false;
+        return s_compositeFrames.load() - s_lastUiPassFrame.load() <= 2;
+    }
+
+    static void UiPassComposite();   // fwd (frame section)
+
+    // The carrier: an invisible menu that exists for its PostDisplay, open only while an interactive view is
+    // visible. In the menu stack it reads to the engine as an open menu, so Escape no longer opens the Journal
+    // while it is up: it must never stay open over plain gameplay, and a click-through HUD view draws at
+    // Present instead. It takes no input; user events pass on.
+    class MagelightOverlayMenu final : public RE::IMenu
+    {
+    public:
+        static constexpr const char* MENU_NAME = "MagelightOverlay";
+
+        MagelightOverlayMenu()
+        {
+            using F = RE::UI_MENU_FLAGS;
+            depthPriority = 9;  // over the game's menus (3) and HUD, under the focus menu (10), which stays topmost
+            menuFlags.set(F::kAllowSaving);
+            if (auto* sm = RE::BSScaleformManager::GetSingleton()) {
+                sm->LoadMovie(this, uiMovie, "magelightfocus");
+            }
+        }
+
+        static RE::IMenu* Create() { return new MagelightOverlayMenu(); }
+
+        RE::UI_MESSAGE_RESULTS ProcessMessage(RE::UIMessage& msg) override
+        {
+            if (msg.type == RE::UI_MESSAGE_TYPE::kUserEvent) return RE::UI_MESSAGE_RESULTS::kPassOn;
+            return RE::IMenu::ProcessMessage(msg);
+        }
+
+        void PostDisplay() override { UiPassComposite(); }
+
+        // VR object layout: see MagelightFocusMenu.
+        REX::EnumSet<RE::UI_MENU_Unk09, std::uint32_t> vrUnk30{ RE::UI_MENU_Unk09::kNone };   // 30
+        std::byte                                      vrUnk34{ 1 };                          // 34
+        RE::BSFixedString                              vrMenuName{ MENU_NAME };               // 38
+    };
+    static_assert(sizeof(MagelightOverlayMenu) == 0x40, "MagelightOverlayMenu must match the VR IMenu size (0x40)");
+
+    static bool UiCompositeWanted()
+    {
+        if (REL::Module::IsVR()) return false;
+        if (s_compositeMode == "ui") return true;
+        if (s_compositeMode == "present") return false;
+        return GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
+    }
+
+    static void RegisterOverlayMenu()
+    {
+        if (!UiCompositeWanted()) {
+            SKSE::log::info("Magelight: composite '{}' - views draw at Present", s_compositeMode);
+            return;
+        }
+        std::error_code ec;
+        if (!std::filesystem::exists(GameRoot() / L"Data" / L"Interface" / L"magelightfocus.swf", ec)) {
+            SKSE::log::warn("Magelight: magelightfocus.swf missing - views draw at Present");
+            return;
+        }
+        if (auto* ui = RE::UI::GetSingleton()) {
+            ui->Register(MagelightOverlayMenu::MENU_NAME, MagelightOverlayMenu::Create);
+            s_overlayMenuRegistered = true;
+            SKSE::log::info("Magelight: composite '{}' - views draw in the game's UI pass ('{}')", s_compositeMode,
+                MagelightOverlayMenu::MENU_NAME);
+        }
+    }
+
+    // Opens the carrier while a view is visible and closes it a second after the last one hides. Called from
+    // FrameWork on the main thread. A show the engine drops (a load closes every menu) is re-queued after two
+    // seconds; a hide waits so a view flickering between pages does not open and close the menu every frame.
+    static void SyncOverlayMenu(bool wanted)
+    {
+        if (!s_overlayMenuRegistered) return;
+        auto* ui = RE::UI::GetSingleton();
+        auto* q = RE::UIMessageQueue::GetSingleton();
+        if (!ui || !q) return;
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point s_nextShow{}, s_nextHide{}, s_lastWanted{};
+        const auto now = Clock::now();
+        const bool open = ui->IsMenuOpen(MagelightOverlayMenu::MENU_NAME);
+        if (wanted) {
+            s_lastWanted = now;
+            s_nextHide = Clock::time_point{};
+            if (!open && now >= s_nextShow) {
+                s_nextShow = now + std::chrono::seconds(2);
+                q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+            }
+        } else if (open && now - s_lastWanted >= std::chrono::seconds(1) && now >= s_nextHide) {
+            s_nextHide = now + std::chrono::seconds(2);
+            s_nextShow = Clock::time_point{};
+            q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+        }
+    }
 
     static void QueueInput(UINT msg, WPARAM w, LPARAM l)
     {
@@ -1749,6 +1901,17 @@ namespace Magelight {
         }
         if (!s_origWndProc) return DefWindowProcW(hwnd, msg, wparam, lparam);
         return CallWindowProcW(s_origWndProc, hwnd, msg, wparam, lparam);
+    }
+
+    // The game's window, its message loop and most SKSE plugins' subclasses are ANSI. A plugin that subclasses
+    // after us with SetWindowLongPtrA and calls the proc it replaced directly, not through CallWindowProcA, is
+    // handed a USER32 thunk handle for our W proc and executes 0xFFFFxxxx. Sitting on top as an ANSI proc gives it
+    // a real address; CallWindowProcA converts A->W exactly as DispatchMessageA did, so HookWndProc sees no change.
+    static LRESULT CALLBACK AnsiShimWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+    {
+        const WNDPROC next = s_ansiShimPrev.load();
+        if (!next) return DefWindowProcA(hwnd, msg, wparam, lparam);
+        return CallWindowProcA(next, hwnd, msg, wparam, lparam);
     }
 
     // ── Runtime preload ─────────────────────────────────────────────────────
@@ -3399,6 +3562,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     // pixels — the CPU path's uploaded texture (uv 0..1) or the GPU path's
     // render-target texture (uv from RenderTarget::uv_coords, since the target
     // may be padded). Pipeline state save/restore is the CALLER's job.
+    static void DrawQuadTo(ID3D11RenderTargetView* rtv, float bw, float bh, ID3D11ShaderResourceView* srv,
+                           float u0, float v0, float u1, float v1,
+                           float dx, float dy, float dw, float dh,
+                           const float* cutUV);
+
     static void DrawOverlay(IDXGISwapChain* sc, ID3D11ShaderResourceView* srv,
                             float u0, float v0, float u1, float v1,
                             float dx, float dy, float dw, float dh,
@@ -3409,6 +3577,24 @@ float4 ps_straight(VSOut i) : SV_Target {
         const float bw = static_cast<float>(scd.BufferDesc.Width);
         const float bh = static_cast<float>(scd.BufferDesc.Height);
         if (bw <= 0.0f || bh <= 0.0f || !srv) return;
+        ID3D11Texture2D* back = nullptr;
+        if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))))
+            return;
+        ID3D11RenderTargetView* rtv = nullptr;
+        const HRESULT rtvHr = s_device->CreateRenderTargetView(back, nullptr, &rtv);
+        back->Release();
+        if (FAILED(rtvHr)) return;
+        DrawQuadTo(rtv, bw, bh, srv, u0, v0, u1, v1, dx, dy, dw, dh, cutUV);
+        rtv->Release();
+    }
+
+    // One textured quad into `rtv`, a bw x bh target. Pipeline state save/restore is the CALLER's job.
+    static void DrawQuadTo(ID3D11RenderTargetView* rtv, float bw, float bh, ID3D11ShaderResourceView* srv,
+                           float u0, float v0, float u1, float v1,
+                           float dx, float dy, float dw, float dh,
+                           const float* cutUV)
+    {
+        if (!rtv || bw <= 0.0f || bh <= 0.0f || !srv) return;
 
         // Quad in NDC at (dx, dy), dw x dh pixels.
         const float x0 = -1.0f + 2.0f * (dx / bw);
@@ -3425,14 +3611,6 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (FAILED(s_context->Map(s_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
         std::memcpy(mapped.pData, quad, sizeof(quad));
         s_context->Unmap(s_vb, 0);
-
-        ID3D11Texture2D* back = nullptr;
-        if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))))
-            return;
-        ID3D11RenderTargetView* rtv = nullptr;
-        const HRESULT rtvHr = s_device->CreateRenderTargetView(back, nullptr, &rtv);
-        back->Release();
-        if (FAILED(rtvHr)) return;
 
         const UINT stride = sizeof(Vertex), offset = 0;
         const FLOAT bf[4] = { 0, 0, 0, 0 };
@@ -3462,8 +3640,6 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_context->PSSetConstantBuffers(0, 1, &s_cb);
         }
         s_context->Draw(4, 0);
-
-        rtv->Release();
     }
 
     // VR copy pass (docs/VR_PRESENTER.md §2): draw one presented view into a
@@ -3967,6 +4143,26 @@ float4 ps_straight(VSOut i) : SV_Target {
         const auto stageAfterUpdate = ClockT::now();
         double frameUlRender = 0.0;   // THIS frame's render, for the composite subtraction
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
+        // While the UI pass is live the composite records its quads for it instead of drawing them over the
+        // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
+        SyncOverlayMenu(AnyInteractiveViewVisible());
+        s_compositeFrames.fetch_add(1);
+        const bool defer = s_overlayMenuRegistered && UiPassActive();
+        // The first deferred frame also draws here: the UI pass already ran this frame with nothing queued.
+        static bool s_deferredLast = false;
+        const bool drawNow = !defer || !s_deferredLast;
+        s_deferredLast = defer;
+        std::vector<QueuedQuad> queued;
+        auto emit = [&](ID3D11ShaderResourceView* qsrv, float u0, float v0, float u1, float v1,
+                        float x, float y, float w, float h, const float* cutUV) {
+            if (drawNow) DrawOverlay(sc, qsrv, u0, v0, u1, v1, x, y, w, h, cutUV);
+            if (!defer || !qsrv) return;
+            QueuedQuad q;
+            q.srv = qsrv; qsrv->AddRef();
+            q.u0 = u0; q.v0 = v0; q.u1 = u1; q.v1 = v1; q.x = x; q.y = y; q.w = w; q.h = h;
+            if (cutUV) { q.hasCut = true; std::memcpy(q.cut, cutUV, sizeof(q.cut)); }
+            queued.push_back(q);
+        };
         if (AnyViewVisible()) {
             // RenderOnly(visible), not Render(): Render() paints EVERY view
             // whose page marked itself dirty, hidden ones included — a closed
@@ -4044,9 +4240,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                             s_gpuSrv(s_gpu, rt.texture_id));
                         if (cutPtr) mapCut(rt.uv_coords.left, rt.uv_coords.top, rt.uv_coords.right, rt.uv_coords.bottom);
                         if (VR::MirrorEnabled())
-                            DrawOverlay(sc, srv, rt.uv_coords.left, rt.uv_coords.top,
-                                        rt.uv_coords.right, rt.uv_coords.bottom,
-                                        mx, my, mw, mh, cutPtr);
+                            emit(srv, rt.uv_coords.left, rt.uv_coords.top,
+                                 rt.uv_coords.right, rt.uv_coords.bottom,
+                                 mx, my, mw, mh, cutPtr);
                         pv.srv = srv;
                         pv.u0 = rt.uv_coords.left; pv.v0 = rt.uv_coords.top;
                         pv.u1 = rt.uv_coords.right; pv.v1 = rt.uv_coords.bottom;
@@ -4054,8 +4250,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                         UploadSurfaceIfDirty(v);
                         if (cutPtr) mapCut(0.0f, 0.0f, 1.0f, 1.0f);
                         if (VR::MirrorEnabled())
-                            DrawOverlay(sc, v.srv, 0.0f, 0.0f, 1.0f, 1.0f,
-                                        mx, my, mw, mh, cutPtr);
+                            emit(v.srv, 0.0f, 0.0f, 1.0f, 1.0f, mx, my, mw, mh, cutPtr);
                         pv.srv = v.srv;
                     }
                     if (cutPtr) { pv.hasCutout = true; std::memcpy(pv.cutUV, cut, sizeof(cut)); }
@@ -4076,15 +4271,25 @@ float4 ps_straight(VSOut i) : SV_Target {
                     // pixel sits exactly on the cursor position.
                     const float h = s_cursorHeight * (bh / 1080.0f);
                     const float w = h * (static_cast<float>(s_cursorImgW) / s_cursorImgH);
-                    DrawOverlay(sc, s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
-                                px - s_cursorHotX * w, py - s_cursorHotY * h, w, h);
+                    emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
+                         px - s_cursorHotX * w, py - s_cursorHotY * h, w, h, nullptr);
                 } else {
                     const float scale = bh / 720.0f;
-                    DrawOverlay(sc, s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
-                                px, py, kCursorW * scale, kCursorH * scale);
+                    emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
+                         px, py, kCursorW * scale, kCursorH * scale, nullptr);
                 }
             }
             backup.Restore(s_context);
+        }
+        {
+            std::lock_guard<std::mutex> lk(s_uiPassMutex);
+            ReleaseQuads(s_uiPassQuads);
+            if (defer) {
+                s_uiPassQuads = std::move(queued);
+                s_uiPassBackW = bw;
+                s_uiPassBackH = bh;
+                s_uiPassPublished = std::chrono::steady_clock::now();
+            }
         }
         // VR presenter: runs every frame (an empty frame HIDES stale overlays);
         // no-op unless the runtime is live. Same thread as everything above.
@@ -4114,6 +4319,75 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_acc.worst, s_focused.load(), frame.size());
             s_acc = StageAcc{};
             s_acc.lastReport = stageEnd;
+        }
+    }
+
+    // The carrier's PostDisplay: draw the published quads into the render target the game's UI pass has bound,
+    // scaled from the back buffer they were laid out for. Main thread, inside the engine's UI render.
+    static void UiPassCompositeImpl()
+    {
+        s_lastUiPassFrame.store(s_compositeFrames.load());
+        s_uiPassSeen.store(true);
+        if (!s_context || !s_device || s_renderDead.load()) return;
+        std::vector<QueuedQuad> quads;
+        float backW = 0, backH = 0;
+        {
+            std::lock_guard<std::mutex> lk(s_uiPassMutex);
+            // Present stopped composing (a load, a stalled hook): draw nothing rather than a frozen frame.
+            if (s_uiPassQuads.empty() ||
+                std::chrono::steady_clock::now() - s_uiPassPublished > std::chrono::milliseconds(250)) return;
+            quads = s_uiPassQuads;
+            for (auto& q : quads) q.srv->AddRef();
+            backW = s_uiPassBackW;
+            backH = s_uiPassBackH;
+        }
+        StateBackup backup;
+        backup.Capture(s_context);
+        ID3D11RenderTargetView* target = backup.rtvs[0];
+        float tw = 0, th = 0;
+        if (target) {
+            ID3D11Resource* res = nullptr;
+            target->GetResource(&res);
+            ID3D11Texture2D* tex = nullptr;
+            if (res && SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+                D3D11_TEXTURE2D_DESC td{};
+                tex->GetDesc(&td);
+                tw = static_cast<float>(td.Width);
+                th = static_cast<float>(td.Height);
+                tex->Release();
+                // Which target the UI pass draws into is the whole question on an unfamiliar setup: log each change.
+                static void* s_lastTarget = nullptr;
+                static int   s_targetLogs = 0;
+                if (res != s_lastTarget && s_targetLogs < 10) {
+                    s_lastTarget = res;
+                    ++s_targetLogs;
+                    SKSE::log::info("Magelight: UI pass draws into a {}x{} target, format {} (back buffer {}x{})",
+                        td.Width, td.Height, static_cast<int>(td.Format), backW, backH);
+                }
+            }
+            if (res) res->Release();
+        }
+        if (target && tw > 0 && th > 0 && backW > 0 && backH > 0) {
+            StateBackup::Neutralize(s_context);
+            const float sx = tw / backW, sy = th / backH;
+            for (const auto& q : quads)
+                DrawQuadTo(target, tw, th, q.srv, q.u0, q.v0, q.u1, q.v1,
+                           q.x * sx, q.y * sy, q.w * sx, q.h * sy, q.hasCut ? q.cut : nullptr);
+        } else {
+            static std::atomic<int> s_noTargetLogs{ 0 };
+            if (s_noTargetLogs.fetch_add(1) < 3)
+                SKSE::log::warn("Magelight: UI pass had no usable render target bound - nothing drawn this frame");
+        }
+        backup.Restore(s_context);
+        ReleaseQuads(quads);
+    }
+
+    static void UiPassComposite()
+    {
+        __try {
+            UiPassCompositeImpl();
+        } __except (LogSehAndDisable("UI pass", GetExceptionCode(),
+                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
         }
     }
 
@@ -4154,39 +4428,370 @@ float4 ps_straight(VSOut i) : SV_Target {
         return hr;
     }
 
-    static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+    // ── Present diagnostics: who presents, and what ──────────────────────────
+    // A page that draws (ul.render, composite in the cost line) but never shows means something presents
+    // another image after us: frame generation, an upscaler or ENB proxy, a second swapchain. These lines
+    // name it from the log alone.
+
+    static std::string ModuleOf(const void* addr)
     {
-        // Covers every callback made from here and the real Present; GuardedFrameWork catches its own faults.
-        GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
-        // Stall watchdog heartbeat: EVERY present counts, from whichever
-        // thread. 0.28.3 stamped it at the end of FrameWork, which loading
-        // screens and menus never reach (they present from a foreign thread
-        // and FrameWork returns at its top), so every load over the threshold
-        // read as a stall and spent the session's sample budget on nothing
-        // (field 2026-09-08: both of a tester's samples were a tavern exit).
+        HMODULE mod = nullptr;
+        if (!addr || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                         static_cast<LPCWSTR>(addr), &mod) || !mod)
+            return fmt::format("{:p} (no module)", addr);
+        char path[MAX_PATH] = {};
+        GetModuleFileNameA(mod, path, MAX_PATH);
+        const char* name = std::strrchr(path, '\\');
+        return fmt::format("{}+0x{:X}", name ? name + 1 : path,
+            reinterpret_cast<std::uintptr_t>(addr) - reinterpret_cast<std::uintptr_t>(mod));
+    }
+
+    static std::string DescribeSwapChain(IDXGISwapChain* sc)
+    {
+        DXGI_SWAP_CHAIN_DESC d{};
+        if (!sc || FAILED(sc->GetDesc(&d))) return "GetDesc failed";
+        return fmt::format("{}x{} format {} buffers {} swapEffect {} flags 0x{:X} windowed {} hwnd {:p}",
+            d.BufferDesc.Width, d.BufferDesc.Height, static_cast<int>(d.BufferDesc.Format), d.BufferCount,
+            static_cast<int>(d.SwapEffect), d.Flags, d.Windowed ? 1 : 0, static_cast<void*>(d.OutputWindow));
+    }
+
+    static IDXGISwapChain*                 s_gameSwapChain = nullptr;   // the one InstallHook hooked (renderWindows[0])
+    static std::mutex                      s_seenSwapChainsMutex;
+    static std::vector<IDXGISwapChain*>    s_seenSwapChains;            // bounded: kMaxSeenSwapChains
+    static std::atomic<IDXGISwapChain*>    s_lastPresenter{ nullptr };
+    static std::atomic<std::uint64_t>      s_presentsGame{ 0 }, s_presentsOther{ 0 };
+    static constexpr std::size_t           kMaxSeenSwapChains = 8;
+
+    // Once per swapchain: its description and the module that called Present on it. A periodic line counts
+    // presents of other swapchains, logged only while there are some.
+    static void NotePresenter(IDXGISwapChain* sc, const void* caller)
+    {
+        (sc == s_gameSwapChain ? s_presentsGame : s_presentsOther).fetch_add(1, std::memory_order_relaxed);
+        if (s_lastPresenter.exchange(sc) != sc) {
+            std::lock_guard<std::mutex> lk(s_seenSwapChainsMutex);
+            if (std::find(s_seenSwapChains.begin(), s_seenSwapChains.end(), sc) == s_seenSwapChains.end()
+                && s_seenSwapChains.size() < kMaxSeenSwapChains) {
+                s_seenSwapChains.push_back(sc);
+                SKSE::log::info("Magelight: Present on swapchain {:p} ({}) from {} - {}", static_cast<void*>(sc),
+                    sc == s_gameSwapChain ? "the game's" : "NOT the game's", ModuleOf(caller), DescribeSwapChain(sc));
+            }
+        }
+        static std::atomic<long long> s_nextSummaryMs{ 0 };
+        const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        long long due = s_nextSummaryMs.load();
+        if (now >= due && s_nextSummaryMs.compare_exchange_strong(due, now + 10000) && due != 0) {
+            const auto other = s_presentsOther.exchange(0);
+            const auto game = s_presentsGame.exchange(0);
+            if (other > 0)
+                SKSE::log::warn("Magelight: presents in the last 10 s - game swapchain {}, other swapchains {}", game, other);
+        }
+    }
+
+    // Where the frame is composited. The vtable hooks below are installed at kDataLoaded, so a plugin that
+    // hooked Present earlier (an upscaler, a proxy) runs AFTER our composite and can draw over it. Late
+    // composite moves the draw into a detour on dxgi's own Present, the last code before the frame is queued.
+    // One composite per present per thread: a wrapper's Present that calls Present1, or a vtable hook above
+    // the late detour, must not draw twice (t_presentDepth / t_composited).
+    static std::atomic<bool> s_lateComposite{ false };
+    static std::atomic<int>  s_lateMisses{ 0 };   // vtable presents whose chain never reached the late detour
+    static thread_local int  t_presentDepth = 0;
+    static thread_local bool t_composited = false;
+
+    static void StampPresent(IDXGISwapChain* sc, const void* caller)
+    {
+        NotePresenter(sc, caller);
+        // Stall watchdog heartbeat: EVERY present counts, from whichever thread (loading screens and menus
+        // present from a foreign thread and FrameWork returns at its top).
         s_lastPresentMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                                   std::chrono::steady_clock::now().time_since_epoch()).count());
         s_lastPresentTid.store(GetCurrentThreadId());
-        if (s_runtimeReady.load() && !s_renderDead.load()) {
-            GuardedFrameWork(sc);
-        }
-        // Render death is announced from HERE (outside the SEH guard, on
-        // whichever present thread notices), once — FrameWork itself is
-        // never entered again after the kill switch, so an emit inside it
-        // would only cover the init-failure path.
+    }
+
+    // A swapchain on another device (a frame-generation backend's own D3D11 or D3D12 swapchain) must never be
+    // drawn into with our device's resources. Skipping without marking the present composited lets the late
+    // fallback count it as a miss.
+    static ID3D11Device* s_gameDevice = nullptr;   // the game swapchain's device, read at hook install (owned ref)
+
+    static bool OnOurDevice(IDXGISwapChain* sc)
+    {
+        ID3D11Device* const ours = s_device ? s_device : s_gameDevice;
+        ID3D11Device* dev = nullptr;
+        if (!ours || FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&dev))) || !dev) return false;
+        const bool same = dev == ours;
+        dev->Release();
+        return same;
+    }
+
+    static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour)
+    {
+        if (t_composited || fromLateDetour != s_lateComposite.load()) return;
+        if (!OnOurDevice(sc)) return;
+        t_composited = true;
+        if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
+    }
+
+    static void AfterCompose()
+    {
+        // Render death is announced once, outside the SEH guard (FrameWork is never entered again after the
+        // kill switch), and a player is never left with suspended controls by a dead renderer.
         if (s_renderDead.load()) {
             static std::atomic<bool> s_deadNotified{ false };
             if (!s_deadNotified.exchange(true)) {
                 VR::Shutdown();   // overlays must not outlive a dead overlay host
                 Emit(HostEvent::RenderDead, 0);
+                if (s_overlayMenuRegistered)
+                    GameTask::Post([]() {
+                        if (auto* q = RE::UIMessageQueue::GetSingleton())
+                            q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+                    });
+            }
+            if (s_focused.load()) GameTask::Post([]() { SetUIMode(false); });
+        }
+    }
+
+    // The outermost present of a thread ends here; the next one may composite again. In late mode a vtable
+    // present whose chain never reached the detour (the plugin under us presented another way) is a miss, and
+    // 30 in a row fall back to compositing in the vtable hook, so the UI is never lost for good.
+    static void EndPresent(bool vtableHook)
+    {
+        if (--t_presentDepth > 0) return;
+        if (vtableHook && s_lateComposite.load()) {
+            if (t_composited) {
+                s_lateMisses.store(0);
+            } else if (s_lateMisses.fetch_add(1) + 1 >= 30) {
+                s_lateComposite.store(false);
+                SKSE::log::warn("Magelight: late composite did not draw in 30 frames (dxgi's Present not reached, or not on the game's device) - compositing in the vtable hook again");
             }
         }
-        // If anything tripped the kill switch while UI mode was up, drop the
-        // mode so the player is never stranded with suspended controls.
-        if (s_renderDead.load() && s_focused.load()) {
-            GameTask::Post([]() { SetUIMode(false); });
+        t_composited = false;
+    }
+
+    static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+    {
+        GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
+        ++t_presentDepth;
+        StampPresent(sc, _ReturnAddress());
+        ComposeOnce(sc, false);
+        AfterCompose();
+        const HRESULT hr = s_origPresent(sc, sync, flags);
+        EndPresent(true);
+        return hr;
+    }
+
+    using Present1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+    static Present1Fn s_origPresent1 = nullptr;
+
+    // Flip-model presenters (frame generation, some upscalers and overlays) can present through Present1,
+    // which never passes through Present.
+    static std::atomic<bool> s_latePresent1Hooked{ false };   // dxgi's Present1 carries a late detour
+
+    static HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
+                                                  const DXGI_PRESENT_PARAMETERS* params)
+    {
+        GameTask::Scope pumpScope;
+        ++t_presentDepth;
+        StampPresent(sc, _ReturnAddress());
+        // Without a Present1 detour, late mode has nowhere later to draw a Present1 frame: draw it here.
+        ComposeOnce(sc, s_lateComposite.load() && !s_latePresent1Hooked.load());
+        AfterCompose();
+        const HRESULT hr = s_origPresent1(sc, sync, flags, params);
+        EndPresent(true);
+        return hr;
+    }
+
+    static PresentFn  s_latePresentNext = nullptr;    // MinHook trampolines into dxgi's own code
+    static Present1Fn s_latePresent1Next = nullptr;
+
+    static HRESULT STDMETHODCALLTYPE LatePresent(IDXGISwapChain* sc, UINT sync, UINT flags)
+    {
+        GameTask::Scope pumpScope;
+        ++t_presentDepth;
+        ComposeOnce(sc, true);
+        AfterCompose();
+        const HRESULT hr = s_latePresentNext(sc, sync, flags);
+        EndPresent(false);
+        return hr;
+    }
+
+    static HRESULT STDMETHODCALLTYPE LatePresent1(IDXGISwapChain1* sc, UINT sync, UINT flags,
+                                                  const DXGI_PRESENT_PARAMETERS* params)
+    {
+        GameTask::Scope pumpScope;
+        ++t_presentDepth;
+        ComposeOnce(sc, true);
+        AfterCompose();
+        const HRESULT hr = s_latePresent1Next(sc, sync, flags, params);
+        EndPresent(false);
+        return hr;
+    }
+
+    static const IMAGE_NT_HEADERS* NtHeaders(const void* base)
+    {
+        const auto* b = static_cast<const std::uint8_t*>(base);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(b + dos->e_lfanew);
+        return nt->Signature == IMAGE_NT_SIGNATURE ? nt : nullptr;
+    }
+
+    // dxgi's own function for a vtable slot, whatever was patched into the slot since. The slot's bytes are
+    // read from the dxgi.dll FILE: an image mapping shares the live module's (relocated, patched) pages. The
+    // file holds preferred base + RVA, unrelocated.
+    static void* OriginalVtableSlot(HMODULE mod, void* const* vtbl, int slot)
+    {
+        wchar_t path[MAX_PATH] = {};
+        if (!GetModuleFileNameW(mod, path, MAX_PATH)) return nullptr;
+        const auto* liveNt = NtHeaders(mod);
+        if (!liveNt) return nullptr;
+        const std::uint64_t rva = static_cast<std::uint64_t>(
+            reinterpret_cast<const std::uint8_t*>(&vtbl[slot]) - reinterpret_cast<const std::uint8_t*>(mod));
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return nullptr;
+        IMAGE_DOS_HEADER dos{};
+        IMAGE_NT_HEADERS64 nt{};
+        if (!f.read(reinterpret_cast<char*>(&dos), sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+        f.seekg(dos.e_lfanew);
+        if (!f.read(reinterpret_cast<char*>(&nt), sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE ||
+            nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+            nt.OptionalHeader.SizeOfImage != liveNt->OptionalHeader.SizeOfImage ||
+            nt.FileHeader.TimeDateStamp != liveNt->FileHeader.TimeDateStamp ||
+            nt.OptionalHeader.CheckSum != liveNt->OptionalHeader.CheckSum)
+            return nullptr;
+        f.seekg(dos.e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader);
+        for (WORD i = 0; i < nt.FileHeader.NumberOfSections; ++i) {
+            IMAGE_SECTION_HEADER sh{};
+            if (!f.read(reinterpret_cast<char*>(&sh), sizeof(sh))) return nullptr;
+            if (rva < sh.VirtualAddress || rva + sizeof(std::uint64_t) > std::uint64_t{ sh.VirtualAddress } + sh.SizeOfRawData) continue;
+            std::uint64_t onDisk = 0;
+            f.seekg(sh.PointerToRawData + (rva - sh.VirtualAddress));
+            if (!f.read(reinterpret_cast<char*>(&onDisk), sizeof(onDisk))) return nullptr;
+            const std::uint64_t fnRva = onDisk - nt.OptionalHeader.ImageBase;
+            return fnRva < nt.OptionalHeader.SizeOfImage ? reinterpret_cast<std::uint8_t*>(mod) + fnRva : nullptr;
         }
-        return s_origPresent(sc, sync, flags);
+        return nullptr;
+    }
+
+    static HMODULE ModuleAt(const void* p)
+    {
+        HMODULE mod = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(p), &mod);
+        return mod;
+    }
+
+    // `mod` is the system directory's `name`: a same-named proxy in the game folder (ReShade or a frame-gen
+    // layer installed as dxgi.dll) is not dxgi's own code.
+    static bool IsSystemModule(HMODULE mod, const wchar_t* name)
+    {
+        wchar_t path[MAX_PATH] = {}, sys[MAX_PATH] = {};
+        if (!mod || !GetModuleFileNameW(mod, path, MAX_PATH) || !GetSystemDirectoryW(sys, MAX_PATH)) return false;
+        return _wcsicmp(path, (std::wstring(sys) + L"\\" + name).c_str()) == 0;
+    }
+
+    // dxgi's swapchain vtable when the game's swapchain is a proxy (ENB's d3d11.dll wraps it): a throwaway
+    // WARP device and swapchain made through the SYSTEM d3d11.dll, so a d3d11.dll proxy does not see them. A
+    // dxgi.dll proxy would (system d3d11 binds to the loaded dxgi.dll); the caller's IsSystemModule refuses it.
+    // The vtable is shared by every dxgi swapchain; only its address is kept.
+    static void* const* DxgiSwapChainVtable()
+    {
+        wchar_t sys[MAX_PATH] = {};
+        if (!GetSystemDirectoryW(sys, MAX_PATH)) return nullptr;
+        HMODULE d3d = LoadLibraryW((std::wstring(sys) + L"\\d3d11.dll").c_str());
+        if (!d3d) return nullptr;
+        void* const* out = nullptr;
+        auto create = reinterpret_cast<PFN_D3D11_CREATE_DEVICE>(GetProcAddress(d3d, "D3D11CreateDevice"));
+        HWND wnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 8, 8, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        ID3D11Device* dev = nullptr;
+        if (create && wnd && SUCCEEDED(create(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &dev, nullptr, nullptr))) {
+            IDXGIDevice* dxgiDev = nullptr;
+            IDXGIAdapter* adapter = nullptr;
+            IDXGIFactory* factory = nullptr;
+            if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDev))) &&
+                SUCCEEDED(dxgiDev->GetAdapter(&adapter)) &&
+                SUCCEEDED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&factory)))) {
+                DXGI_SWAP_CHAIN_DESC d{};
+                d.BufferCount = 1;
+                d.BufferDesc.Width = 8;
+                d.BufferDesc.Height = 8;
+                d.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                d.OutputWindow = wnd;
+                d.SampleDesc.Count = 1;
+                d.Windowed = TRUE;
+                IDXGISwapChain* sc = nullptr;
+                if (SUCCEEDED(factory->CreateSwapChain(dev, &d, &sc)) && sc) {
+                    out = *reinterpret_cast<void***>(sc);
+                    sc->Release();
+                }
+            }
+            if (factory) factory->Release();
+            if (adapter) adapter->Release();
+            if (dxgiDev) dxgiDev->Release();
+            dev->Release();
+        }
+        if (wnd) DestroyWindow(wnd);
+        return out;
+    }
+
+    // "auto" turns it on only behind an earlier Present hook: the slot we patched did not hold its own
+    // vtable's code (a plain dxgi swapchain's, or a proxy's such as ENB's). Never on VR.
+    static void InstallLatePresent(void* const* vtbl, void* const* vtbl1)
+    {
+        const std::string& mode = s_presentHookMode;
+        if (mode == "vtable") {
+            SKSE::log::info("Magelight: presentHook 'vtable' - compositing in the vtable hook");
+            return;
+        }
+        const bool earlierHook = ModuleAt(reinterpret_cast<const void*>(s_origPresent)) != ModuleAt(vtbl);
+        if (mode != "late" && (!earlierHook || REL::Module::IsVR())) {
+            SKSE::log::info("Magelight: presentHook 'auto' - {}, compositing in the vtable hook",
+                REL::Module::IsVR() ? "VR" : "no earlier Present hook");
+            return;
+        }
+        HMODULE dxgi = ModuleAt(vtbl);
+        if (!IsSystemModule(dxgi, L"dxgi.dll")) {
+            // A proxy's swapchain wraps a real dxgi one: detour dxgi's own functions, found through a throwaway
+            // dxgi swapchain.
+            SKSE::log::info("Magelight: the game swapchain is a proxy ({}); finding dxgi's own swapchain", ModuleOf(vtbl));
+            vtbl = DxgiSwapChainVtable();
+            vtbl1 = vtbl;
+            dxgi = vtbl ? ModuleAt(vtbl) : nullptr;
+            if (!vtbl || !IsSystemModule(dxgi, L"dxgi.dll")) {
+                SKSE::log::warn("Magelight: late composite unavailable - no dxgi swapchain vtable found");
+                return;
+            }
+        }
+        void* present = OriginalVtableSlot(dxgi, vtbl, 8);
+        void* present1 = (vtbl1 && ModuleAt(vtbl1) == dxgi) ? OriginalVtableSlot(dxgi, vtbl1, 22) : nullptr;
+        if (!present || ModuleAt(present) != dxgi) {
+            SKSE::log::warn("Magelight: late composite unavailable - dxgi's own Present not found");
+            return;
+        }
+        const MH_STATUS init = MH_Initialize();
+        if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
+            SKSE::log::warn("Magelight: late composite unavailable - MinHook init: {}", MH_StatusToString(init));
+            return;
+        }
+        MH_STATUS st = MH_CreateHook(present, reinterpret_cast<void*>(&LatePresent), reinterpret_cast<void**>(&s_latePresentNext));
+        if (st == MH_OK) st = MH_EnableHook(present);
+        if (st != MH_OK) {
+            SKSE::log::warn("Magelight: late composite unavailable - hooking dxgi's Present at {} failed: {}",
+                ModuleOf(present), MH_StatusToString(st));
+            return;
+        }
+        if (present1 && ModuleAt(present1) == dxgi) {
+            MH_STATUS st1 = MH_CreateHook(present1, reinterpret_cast<void*>(&LatePresent1), reinterpret_cast<void**>(&s_latePresent1Next));
+            if (st1 == MH_OK) st1 = MH_EnableHook(present1);
+            if (st1 == MH_OK)
+                s_latePresent1Hooked.store(true);
+            else
+                SKSE::log::warn("Magelight: late composite: dxgi's Present1 at {} not hooked ({}) - Present1 frames composite in the vtable hook",
+                    ModuleOf(present1), MH_StatusToString(st1));
+        }
+        s_lateComposite.store(true);
+        SKSE::log::info("Magelight: late composite ON ('{}') - drawing inside dxgi's Present at {}, after {}",
+            mode, ModuleOf(present), ModuleOf(reinterpret_cast<const void*>(s_origPresent)));
     }
 
     // ── Hook install (game thread, kDataLoaded) ─────────────────────────────
@@ -4216,8 +4821,26 @@ float4 ps_straight(VSOut i) : SV_Target {
             return;
         }
         s_origPresent = reinterpret_cast<PresentFn>(vtbl[kPresentSlot]);
+        s_gameSwapChain = sc;
+        sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&s_gameDevice));
         vtbl[kPresentSlot] = reinterpret_cast<void*>(&HookPresent);
         VirtualProtect(&vtbl[kPresentSlot], sizeof(void*), oldProt, &oldProt);
+        // dxgi.dll here is a plain swapchain; anything else (an ENB d3d11.dll, an upscaler or frame-generation
+        // proxy) wraps it, and what it presents is not necessarily the buffer we draw into.
+        SKSE::log::info("Magelight: hooked Present was {} (vtable in {}); game swapchain {}",
+            ModuleOf(reinterpret_cast<const void*>(s_origPresent)), ModuleOf(vtbl), DescribeSwapChain(sc));
+        void** vtbl1 = nullptr;
+        IDXGISwapChain1* sc1 = nullptr;
+        if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain1), reinterpret_cast<void**>(&sc1))) && sc1) {
+            vtbl1 = *reinterpret_cast<void***>(sc1);
+            constexpr int kPresent1Slot = 22;
+            if (VirtualProtect(&vtbl1[kPresent1Slot], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
+                s_origPresent1 = reinterpret_cast<Present1Fn>(vtbl1[kPresent1Slot]);
+                vtbl1[kPresent1Slot] = reinterpret_cast<void*>(&HookPresent1);
+                VirtualProtect(&vtbl1[kPresent1Slot], sizeof(void*), oldProt, &oldProt);
+            }
+            sc1->Release();
+        }
         constexpr int kResizeBuffersSlot = 13;
         if (VirtualProtect(&vtbl[kResizeBuffersSlot], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
             s_origResizeBuffers = reinterpret_cast<ResizeBuffersFn>(vtbl[kResizeBuffersSlot]);
@@ -4241,6 +4864,18 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (s_origWndProc) {
                 SKSE::log::info("Magelight: window subclassed for input (hwnd {:p})",
                     static_cast<void*>(s_hwnd));
+                // Read before installing, so the shim never runs with no next proc (see AnsiShimWndProc).
+                s_ansiShimPrev.store(reinterpret_cast<WNDPROC>(GetWindowLongPtrA(s_hwnd, GWLP_WNDPROC)));
+                const auto replaced = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(
+                    s_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&AnsiShimWndProc)));
+                if (replaced) {
+                    s_ansiShimPrev.store(replaced);
+                    SKSE::log::info("Magelight: ANSI shim on top of the input subclass");
+                } else {
+                    SKSE::log::warn("Magelight: ANSI shim not installed (GetLastError={}); a plugin that subclasses "
+                        "after Magelight with SetWindowLongPtrA and calls its previous proc directly will crash",
+                        GetLastError());
+                }
             } else {
                 SKSE::log::error("Magelight: window subclass failed (GetLastError={}) — no view input",
                     GetLastError());
@@ -4252,6 +4887,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         // Host settings (toggle key, demo views) — s_runtimeDir is set by
         // PreloadRuntime, well before kDataLoaded lands here.
         LoadHostSettings();
+        InstallLatePresent(vtbl, vtbl1);
+        RegisterOverlayMenu();
         RegisterFocusMenu();
         // Manifest mods (Data/Magelight/<ModId>/manifest.json): folders that
         // are mods. Registered through the v4 path like any DLL consumer.
