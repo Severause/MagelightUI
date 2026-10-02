@@ -1156,6 +1156,7 @@ namespace Magelight {
     };
     static HWND                  s_hwnd = nullptr;
     static WNDPROC               s_origWndProc = nullptr;
+    static std::atomic<WNDPROC>  s_ansiShimPrev{ nullptr };   // HookWndProc as an A-callable value (AnsiShimWndProc)
     static std::atomic<bool>     s_focused{ false };
     static std::mutex            s_inputMutex;
     static std::vector<InputMsg> s_inputQueue;
@@ -1749,6 +1750,17 @@ namespace Magelight {
         }
         if (!s_origWndProc) return DefWindowProcW(hwnd, msg, wparam, lparam);
         return CallWindowProcW(s_origWndProc, hwnd, msg, wparam, lparam);
+    }
+
+    // The game's window, its message loop and most SKSE plugins' subclasses are ANSI. A plugin that subclasses
+    // after us with SetWindowLongPtrA and calls the proc it replaced directly, not through CallWindowProcA, is
+    // handed a USER32 thunk handle for our W proc and executes 0xFFFFxxxx. Sitting on top as an ANSI proc gives it
+    // a real address; CallWindowProcA converts A->W exactly as DispatchMessageA did, so HookWndProc sees no change.
+    static LRESULT CALLBACK AnsiShimWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+    {
+        const WNDPROC next = s_ansiShimPrev.load();
+        if (!next) return DefWindowProcA(hwnd, msg, wparam, lparam);
+        return CallWindowProcA(next, hwnd, msg, wparam, lparam);
     }
 
     // ── Runtime preload ─────────────────────────────────────────────────────
@@ -4241,6 +4253,18 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (s_origWndProc) {
                 SKSE::log::info("Magelight: window subclassed for input (hwnd {:p})",
                     static_cast<void*>(s_hwnd));
+                // Read before installing, so the shim never runs with no next proc (see AnsiShimWndProc).
+                s_ansiShimPrev.store(reinterpret_cast<WNDPROC>(GetWindowLongPtrA(s_hwnd, GWLP_WNDPROC)));
+                const auto replaced = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(
+                    s_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&AnsiShimWndProc)));
+                if (replaced) {
+                    s_ansiShimPrev.store(replaced);
+                    SKSE::log::info("Magelight: ANSI shim on top of the input subclass");
+                } else {
+                    SKSE::log::warn("Magelight: ANSI shim not installed (GetLastError={}); a plugin that subclasses "
+                        "after Magelight with SetWindowLongPtrA and calls its previous proc directly will crash",
+                        GetLastError());
+                }
             } else {
                 SKSE::log::error("Magelight: window subclass failed (GetLastError={}) — no view input",
                     GetLastError());
