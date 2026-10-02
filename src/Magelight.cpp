@@ -4253,9 +4253,25 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_lastPresentTid.store(GetCurrentThreadId());
     }
 
+    // A swapchain on another device (a frame-generation backend's own D3D11 or D3D12 swapchain) must never be
+    // drawn into with our device's resources. Skipping without marking the present composited lets the late
+    // fallback count it as a miss.
+    static ID3D11Device* s_gameDevice = nullptr;   // the game swapchain's device, read at hook install (owned ref)
+
+    static bool OnOurDevice(IDXGISwapChain* sc)
+    {
+        ID3D11Device* const ours = s_device ? s_device : s_gameDevice;
+        ID3D11Device* dev = nullptr;
+        if (!ours || FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&dev))) || !dev) return false;
+        const bool same = dev == ours;
+        dev->Release();
+        return same;
+    }
+
     static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour)
     {
         if (t_composited || fromLateDetour != s_lateComposite.load()) return;
+        if (fromLateDetour && !OnOurDevice(sc)) return;
         t_composited = true;
         if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
     }
@@ -4537,6 +4553,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         s_origPresent = reinterpret_cast<PresentFn>(vtbl[kPresentSlot]);
         s_gameSwapChain = sc;
+        sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&s_gameDevice));
         vtbl[kPresentSlot] = reinterpret_cast<void*>(&HookPresent);
         VirtualProtect(&vtbl[kPresentSlot], sizeof(void*), oldProt, &oldProt);
         // dxgi.dll here is a plain swapchain; anything else (an ENB d3d11.dll, an upscaler or frame-generation
