@@ -18,6 +18,7 @@
 #include <d3dcompiler.h>
 #include <dxgi.h>
 #include <windows.h>
+#include <intrin.h>
 #include <imm.h>   // IME (0.27.0)
 #include <windowsx.h>
 #include <tlhelp32.h>
@@ -4166,8 +4167,69 @@ float4 ps_straight(VSOut i) : SV_Target {
         return hr;
     }
 
+    // ── Present diagnostics: who presents, and what ──────────────────────────
+    // A page that draws (ul.render, composite in the cost line) but never shows means something presents
+    // another image after us: frame generation, an upscaler or ENB proxy, a second swapchain. These lines
+    // name it from the log alone.
+
+    static std::string ModuleOf(const void* addr)
+    {
+        HMODULE mod = nullptr;
+        if (!addr || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                         static_cast<LPCWSTR>(addr), &mod) || !mod)
+            return fmt::format("{:p} (no module)", addr);
+        char path[MAX_PATH] = {};
+        GetModuleFileNameA(mod, path, MAX_PATH);
+        const char* name = std::strrchr(path, '\\');
+        return fmt::format("{}+0x{:X}", name ? name + 1 : path,
+            reinterpret_cast<std::uintptr_t>(addr) - reinterpret_cast<std::uintptr_t>(mod));
+    }
+
+    static std::string DescribeSwapChain(IDXGISwapChain* sc)
+    {
+        DXGI_SWAP_CHAIN_DESC d{};
+        if (!sc || FAILED(sc->GetDesc(&d))) return "GetDesc failed";
+        return fmt::format("{}x{} format {} buffers {} swapEffect {} flags 0x{:X} windowed {} hwnd {:p}",
+            d.BufferDesc.Width, d.BufferDesc.Height, static_cast<int>(d.BufferDesc.Format), d.BufferCount,
+            static_cast<int>(d.SwapEffect), d.Flags, d.Windowed ? 1 : 0, static_cast<void*>(d.OutputWindow));
+    }
+
+    static IDXGISwapChain*                 s_gameSwapChain = nullptr;   // the one InstallHook hooked (renderWindows[0])
+    static std::mutex                      s_seenSwapChainsMutex;
+    static std::vector<IDXGISwapChain*>    s_seenSwapChains;            // bounded: kMaxSeenSwapChains
+    static std::atomic<IDXGISwapChain*>    s_lastPresenter{ nullptr };
+    static std::atomic<std::uint64_t>      s_presentsGame{ 0 }, s_presentsOther{ 0 };
+    static constexpr std::size_t           kMaxSeenSwapChains = 8;
+
+    // Once per swapchain: its description and the module that called Present on it. A periodic line counts
+    // presents of other swapchains, logged only while there are some.
+    static void NotePresenter(IDXGISwapChain* sc, const void* caller)
+    {
+        (sc == s_gameSwapChain ? s_presentsGame : s_presentsOther).fetch_add(1, std::memory_order_relaxed);
+        if (s_lastPresenter.exchange(sc) != sc) {
+            std::lock_guard<std::mutex> lk(s_seenSwapChainsMutex);
+            if (std::find(s_seenSwapChains.begin(), s_seenSwapChains.end(), sc) == s_seenSwapChains.end()
+                && s_seenSwapChains.size() < kMaxSeenSwapChains) {
+                s_seenSwapChains.push_back(sc);
+                SKSE::log::info("Magelight: Present on swapchain {:p} ({}) from {} - {}", static_cast<void*>(sc),
+                    sc == s_gameSwapChain ? "the game's" : "NOT the game's", ModuleOf(caller), DescribeSwapChain(sc));
+            }
+        }
+        static std::atomic<long long> s_nextSummaryMs{ 0 };
+        const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        long long due = s_nextSummaryMs.load();
+        if (now >= due && s_nextSummaryMs.compare_exchange_strong(due, now + 10000) && due != 0) {
+            const auto other = s_presentsOther.exchange(0);
+            const auto game = s_presentsGame.exchange(0);
+            if (other > 0)
+                SKSE::log::warn("Magelight: presents in the last 10 s - game swapchain {}, other swapchains {}", game, other);
+        }
+    }
+
     static HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* sc, UINT sync, UINT flags)
     {
+        NotePresenter(sc, _ReturnAddress());
         // Covers every callback made from here and the real Present; GuardedFrameWork catches its own faults.
         GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
         // Stall watchdog heartbeat: EVERY present counts, from whichever
@@ -4228,8 +4290,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             return;
         }
         s_origPresent = reinterpret_cast<PresentFn>(vtbl[kPresentSlot]);
+        s_gameSwapChain = sc;
         vtbl[kPresentSlot] = reinterpret_cast<void*>(&HookPresent);
         VirtualProtect(&vtbl[kPresentSlot], sizeof(void*), oldProt, &oldProt);
+        // dxgi.dll here is a plain swapchain; anything else (an ENB d3d11.dll, an upscaler or frame-generation
+        // proxy) wraps it, and what it presents is not necessarily the buffer we draw into.
+        SKSE::log::info("Magelight: hooked Present was {} (vtable in {}); game swapchain {}",
+            ModuleOf(reinterpret_cast<const void*>(s_origPresent)), ModuleOf(vtbl), DescribeSwapChain(sc));
         constexpr int kResizeBuffersSlot = 13;
         if (VirtualProtect(&vtbl[kResizeBuffersSlot], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
             s_origResizeBuffers = reinterpret_cast<ResizeBuffersFn>(vtbl[kResizeBuffersSlot]);
