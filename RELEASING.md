@@ -109,14 +109,12 @@ ancestry, so a branch or tag made in a private clone would publish that clone's 
 - Annotated tag on the release commit, in a clone of the public repository:
   `git tag -a vX.Y.Z -m "Magelight UI X.Y.Z"`, then `git push origin vX.Y.Z` once
   `git remote -v` shows `origin` is `https://github.com/Severause/MagelightUI.git`.
-- GitHub release from the tag: attach the runtime, `-DevTools` and `-Examples` zips; attach
-  the `-pdb.zip` labelled "symbols for crash decoding, not for players"; notes pasted
-  from the CHANGELOG.md section.
+- No GitHub release: mod authors build the DevTools and examples from the repository. Keep
+  the `-pdb.zip` with the release records (never ship it to players).
 - npm, when the packages changed: section 6.
 - Nexus: only after the tag exists (NOTICES names `gpu/` at the tag as the LGPL source for
-  `MagelightGPU.dll`). The runtime zip is the only file; the `-DevTools` and `-Examples`
-  zips stay on the GitHub release, where mod authors get them. Set the requirements per
-  runtime as the page lists them.
+  `MagelightGPU.dll`). The runtime zip is the only file. Set the requirements per runtime as
+  the page lists them.
 
 ## 6. npm packages
 
