@@ -1341,8 +1341,9 @@ namespace Magelight {
 
     static void UiPassComposite();   // fwd (frame section)
 
-    // The carrier: an invisible, always-open menu that exists for its PostDisplay. It takes no input: user
-    // events pass through to the menus beneath (the focus menu's Cancel).
+    // The carrier: an invisible menu that exists for its PostDisplay, open only while a view is visible. In the
+    // menu stack it reads to the engine as an open menu, so Escape no longer opens the Journal while it is up:
+    // it must never stay open over plain gameplay. It takes no input; user events pass on.
     class MagelightOverlayMenu final : public RE::IMenu
     {
     public:
@@ -1351,9 +1352,8 @@ namespace Magelight {
         MagelightOverlayMenu()
         {
             using F = RE::UI_MENU_FLAGS;
-            depthPriority = 11;  // over the game's menus and the focus menu (10); the Present composite drew over all
-            menuFlags.set(F::kAlwaysOpen, F::kCustomRendering, F::kRendersUnderPauseMenu,
-                          F::kAdvancesUnderPauseMenu, F::kAllowSaving, F::kDontHideCursorWhenTopmost);
+            depthPriority = 9;  // over the game's menus (3) and HUD, under the focus menu (10), which stays topmost
+            menuFlags.set(F::kAllowSaving);
             if (auto* sm = RE::BSScaleformManager::GetSingleton()) {
                 sm->LoadMovie(this, uiMovie, "magelightfocus");
             }
@@ -1403,19 +1403,31 @@ namespace Magelight {
         }
     }
 
-    // Keeps the carrier open: called from FrameWork on the main thread. A load or a menu reset can close even an
-    // always-open menu; the show is re-queued at most every two seconds while it is not open.
-    static void EnsureOverlayMenuOpen()
+    // Opens the carrier while a view is visible and closes it a second after the last one hides. Called from
+    // FrameWork on the main thread. A show the engine drops (a load closes every menu) is re-queued after two
+    // seconds; a hide waits so a view flickering between pages does not open and close the menu every frame.
+    static void SyncOverlayMenu(bool wanted)
     {
         if (!s_overlayMenuRegistered) return;
         auto* ui = RE::UI::GetSingleton();
-        if (!ui || ui->IsMenuOpen(MagelightOverlayMenu::MENU_NAME)) return;
-        static auto s_next = std::chrono::steady_clock::time_point{};
-        const auto now = std::chrono::steady_clock::now();
-        if (now < s_next) return;
-        s_next = now + std::chrono::seconds(2);
-        if (auto* q = RE::UIMessageQueue::GetSingleton())
-            q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+        auto* q = RE::UIMessageQueue::GetSingleton();
+        if (!ui || !q) return;
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point s_nextShow{}, s_nextHide{}, s_lastWanted{};
+        const auto now = Clock::now();
+        const bool open = ui->IsMenuOpen(MagelightOverlayMenu::MENU_NAME);
+        if (wanted) {
+            s_lastWanted = now;
+            s_nextHide = Clock::time_point{};
+            if (!open && now >= s_nextShow) {
+                s_nextShow = now + std::chrono::seconds(2);
+                q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+            }
+        } else if (open && now - s_lastWanted >= std::chrono::seconds(1) && now >= s_nextHide) {
+            s_nextHide = now + std::chrono::seconds(2);
+            s_nextShow = Clock::time_point{};
+            q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+        }
     }
 
     static void QueueInput(UINT msg, WPARAM w, LPARAM l)
@@ -4122,7 +4134,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
         // While the UI pass is live the composite records its quads for it instead of drawing them over the
         // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
-        EnsureOverlayMenuOpen();
+        SyncOverlayMenu(AnyViewVisible());
         s_compositeFrames.fetch_add(1);
         const bool defer = s_overlayMenuRegistered && UiPassActive();
         std::vector<QueuedQuad> queued;
