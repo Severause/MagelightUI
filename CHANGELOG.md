@@ -37,6 +37,54 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 0.30.5
+
+- **No UI with Community Shaders frame generation (fixed).** Community Shaders'
+  frame-generation swapchain answers `IDXGISwapChain1` with an 18-slot vtable.
+  Magelight wrote its Present1 hook into slot 22, past the end, over the
+  interface id that swapchain's `GetDevice` compares. `GetDevice` then failed,
+  and the renderer gave up at start ("render-thread init failed"). On other
+  Community Shaders versions the same write broke the device interfaces other
+  plugins ask for, a crash risk. Magelight now checks that IDXGISwapChain1's
+  slots are code before patching. A swapchain whose vtable is short, or that
+  refuses its device, is treated as untrusted:
+  - no Present1 hook and no late composite;
+  - the engine's device when the swapchain refuses its own;
+  - the overlay drawn into the game's own framebuffer view, which is
+    Community Shaders' UI buffer while frame generation runs, so pages
+    stay sharp and are not interpolated;
+  - a back buffer never released unless the swapchain gave a reference (an
+    over-release freed the game's buffer on Community Shaders 1.6-1.8.3).
+- **NVIDIA Smooth Motion: pages show steadily instead of freezing the game.**
+  Behind Streamline the swapchain hands out its own wrapper device, and
+  Magelight drew with it; under Smooth Motion (the driver's frame generation,
+  `NvPresent64.dll`) mixing those wrappers with the engine's own objects
+  removed the graphics device, and the game froze until it was killed. With
+  Smooth Motion loaded, Magelight now runs in engine mode: it renders with the
+  engine's own device and context and draws from the engine's end-of-frame
+  call into the target the engine has bound, never at Present, so Smooth
+  Motion's generated frames carry the page too. `Magelight.json`
+  `"composite": "engine"` forces the mode on any flat setup. If a game
+  version moves that engine call, it falls back to drawing late, inside dxgi's
+  own Present (pages flicker, nothing freezes; not behind an ENB or ReShade
+  `d3d11.dll`).
+- **A lost graphics device stops the overlay.** Magelight checks the device
+  after every frame; once it is gone it logs the reason, turns the renderer off
+  and drops UI mode, so the game is never left paused under a menu that cannot
+  draw.
+- **A UI pass with nothing bound hands pages to Present.** Thirty passes in a
+  row with no render target switch the composite to Present for the session,
+  rather than leaving an open page invisible.
+- **A disabled renderer says why.** Every failed start step is logged (a device
+  call with its HRESULT),
+  and the reason travels with the `RenderDead` event and the `RenderDead` error
+  text of `CreateViewEx` and `RequestUIMode`. A HUD notice pointing to
+  `Magelight.log` shows once the HUD is up.
+- The log names the present layers it recognises: NVIDIA's driver present
+  layer (Smooth Motion), Streamline, Community Shaders' frame-generation proxy,
+  and Skyrim Upscaler.
+- No API changes; the npm packages stay at 0.30.0.
+
 ## 0.30.4
 
 - **Pages invisible with NVIDIA Streamline upscaling (fixed).** Behind
