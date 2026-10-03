@@ -37,6 +37,29 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 0.30.4
+
+- **Pages invisible with NVIDIA Streamline upscaling (fixed).** Behind
+  Streamline's swapchain (`sl.interposer.dll`: Community Shaders' and Open
+  Shaders' DLSS and frame generation), a page opened (sound, paused game) but
+  never showed, because frame generation drops what is drawn at Present.
+  `composite` `auto` now draws in the game's UI pass when the game swapchain is
+  Streamline's, not only when Skyrim Upscaler is loaded.
+- **Two cursors at once with the UI-pass composite (fixed).** Only the Windows
+  cursor was ever hidden; the game's own menu cursor kept drawing, under the page at
+  Present but on top of it in the UI pass. Its cursor movie is now transparent while
+  a page has the mouse (any reskinned cursor too) and restored on exit.
+- **A new cursor, drawn in code.** The flat cursor is a faceted steel arrowhead
+  rasterized at the exact size it is drawn, so it is crisp at any resolution, and
+  it follows the page: a brass glow fades in over anything clickable (CSS
+  `cursor: pointer`), it shrinks while you click, and it becomes an I-beam over
+  text. It is 24 px tall at 1080p (was 36): 48 px at 4K. The College pin image
+  (`cursor.png`) no longer ships; `Magelight.json` `"cursorFile"` still loads your
+  own image (its `cursorHotspotX/Y` now default to 0, the top-left pixel), and
+  `"cursorHeight"` still sets the size. In VR with `"cursorDot": false` the laser
+  end shows the plain arrow instead of the pin.
+- No API changes; the npm packages stay at 0.30.0.
+
 ## 0.30.3
 
 Three fixes for 0.30.2.
