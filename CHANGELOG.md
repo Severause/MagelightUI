@@ -15,6 +15,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 |---|---|---|
 | 0.31.0 | 3100 | `SetViewFreezeWorld(view, freeze)` — the game skips its 3D world render behind a paused page (flat only); Papyrus `SetFreezeWorld`; `QueryCapability("freezeworld")` |
 | 0.31.0 | 3100 | Page console lines in `Magelight.log` are opt-in (`Magelight.json` `consoleLog`); `QueryCapability("consolelog")` says what the log records (0-3); the `ConsoleMessage` event is unchanged |
+| 0.31.0 | 3100 | Staggered first page loads (`Magelight.json` `loadStagger`, `loadBudgetMs`; `QueryCapability("loadstagger")`); `SetViewLoadOnShow(view, onShow)` and manifest `loadOnShow` — no page load until the view is first shown; `QueryCapability("loadonshow")` |
 | 0.30.1 | 3001 | `PostGameTask(fn, user)` — post game-thread work from any thread; from a callback inside a frame it never waits on SKSE's task lock |
 | 0.30.0 | 3000 | `NetworkPolicy::FileOnly` (the new default), manifest `"network": "file" \| "loopback"`, Papyrus `SetNetworkPolicy(modId, policy)`; the Papyrus tier acts only on script-owned mods |
 | 0.29.0 | 2900 | `PlayUISound(view, name)`, `SetViewSounds(view, open, close)`; page `magelight.sound()` / `__sound`, `data-ml-sound` markup, manifest `sounds`, Papyrus `PlaySound`; `QueryCapability("sound")` |
@@ -84,6 +85,36 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   no manifest key or API to turn a mod's lines on: what goes into the log is
   the player's choice. The settings line in the log names the level in effect.
   Not yet run in game or in the desktop harness.
+- **Pages load over several frames after a save loads.** The host used to
+  start every registered view's page in the frame the world became ready, so
+  every page's parse and first script run landed in the same few frames (in
+  one field log, 16 views cost about 0.75 s of frames and a 96 ms frame). The
+  pages of views that have not been opened now start one per frame, in the
+  order they were created, and the next only once the previous page reached
+  DOM ready or failed (or 100 ms passed) and the last frame's Ultralight
+  update took under `loadBudgetMs` (default 8). A batch lasts at most about
+  a second: whatever is still waiting then starts together. A view that is
+  visible at creation (`startVisible`), is shown or enters UI mode before its
+  page loaded loads at once. DOM ready still arrives some time after
+  `CreateView`, never inside it; calls made before it (listeners,
+  `InteropCall`, `InvokeJS`, `EvalJS`) are still delivered after it. What
+  changes for a mod is how long after a load a page it has not opened becomes
+  ready: up to about a second plus the page's own load. A mod that waits for
+  DOM ready before it shows a view (or refuses to show it until then) waits
+  for the queue too, so showing the view is the way to have it at once.
+  `Magelight.log` sums each batch (`staggered load - N views over F frames in
+  T ms`). A player turns it off with `"loadStagger": false` in
+  `Magelight.json`; `QueryCapability("loadstagger")` says whether it is on.
+  Not yet run in game: the frame-time gain and the batch length are to be
+  measured, and the batch line is how a test reads them.
+- `SetViewLoadOnShow(view, true)` (manifest `loadOnShow`): a view's page is
+  not loaded at all until the view is first shown, for panels that are rarely
+  opened. It decides only a load that has not started, so call it right after
+  `CreateViewEx`, before the world loads; a loaded page stays loaded. Such a
+  view's DOM ready comes after its first show. Opt-in: nothing changes for a
+  mod that does not call it. `QueryCapability("loadonshow")` is 1.
+- A view destroyed before its page loaded is no longer loaded first only to
+  be torn down in the same frame.
 
 ## 0.30.6
 

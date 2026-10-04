@@ -90,6 +90,8 @@ namespace Magelight {
     //                              // log (unset: "all" in devMode, else "warnings")
     //   "stallWatchdog": true, "stallThresholdMs": 1500   // 0.28.3: log the stalled thread's stack when no
     //                                                     // frame presents this long (250-60000)
+    //   "loadStagger": true, "loadBudgetMs": 8   // 0.31.0: hidden views start their first load one per frame
+    //                                            // (see MaterializeViews); false = all in one frame (1-100)
     //   "hotkeys": { "ModId/viewName": "F7", "Other/hud": 0 }   // rebind (or 0 = disable) any mod's hotkey
     // }
     // Toggle key default: PAGE UP (201). Moved off Home in 0.3.1: Home sits
@@ -233,6 +235,9 @@ namespace Magelight {
     static std::atomic<DWORD>     s_lastPresentTid{ 0 };
     static std::atomic<bool>      s_stallWatchdog{ true };
     static std::atomic<int>       s_stallThresholdMs{ 1500 };
+    // Staggered view loading (0.31.0, MaterializeViews): "loadStagger" and "loadBudgetMs" in Magelight.json.
+    static std::atomic<bool>      s_loadStagger{ true };
+    static std::atomic<int>       s_loadBudgetMs{ 8 };
     static std::atomic<bool> s_renderDead{ false };  // latched on any init failure
     static PresentFn         s_origPresent = nullptr;
 
@@ -473,6 +478,10 @@ namespace Magelight {
                 s_stallWatchdog.store(it->get<bool>());
             if (auto it = j.find("stallThresholdMs"); it != j.end() && it->is_number())
                 s_stallThresholdMs.store(std::clamp(it->get<int>(), 250, 60000));
+            if (auto it = j.find("loadStagger"); it != j.end() && it->is_boolean())
+                s_loadStagger.store(it->get<bool>());
+            if (auto it = j.find("loadBudgetMs"); it != j.end() && it->is_number())
+                s_loadBudgetMs.store(std::clamp(it->get<int>(), 1, 100));
             if (auto it = j.find("cursorFile"); it != j.end() && it->is_string())
                 s_cursorFile = it->get<std::string>();
             if (auto it = j.find("cursorHeight"); it != j.end() && it->is_number())
@@ -482,8 +491,10 @@ namespace Magelight {
             if (auto it = j.find("cursorHotspotY"); it != j.end() && it->is_number())
                 s_cursorHotY = std::clamp(it->get<float>(), 0.0f, 1.0f);
             static constexpr const char* kConsoleLogNames[] = { "none", "errors", "warnings", "all" };
-            SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={})",
-                s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()]);
+            SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
+                            "loadStagger={}, loadBudgetMs={})",
+                s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
+                s_loadStagger.load(), s_loadBudgetMs.load());
         } catch (...) {
             SKSE::log::warn("Magelight: Magelight.json unreadable — defaults in effect");
         }
@@ -577,6 +588,9 @@ namespace Magelight {
         std::uint64_t hiddenSince = 0;  // GetTickCount64 at the last hide (0 = visible / never hidden)
         bool dormant = false;           // hibernated: no View until shown again
         bool domReady = false;          // main frame reached DOM ready since its last load
+        bool loadNow = false;           // shown before its first load: skips the load queue (MaterializeViews)
+        bool loadFailed = false;        // main frame failed to load since its last load (the load queue's settle test)
+        bool loadOnShow = false;        // 0.31.0 SetViewLoadOnShow: no first load until the view is shown
         bool fullscreen = false;    // w/h track the backbuffer (0,0 at CreateView)
         // Ultralight device scale: CSS px -> view px. The page lays out and
         // rasterizes at this scale (real DPI — sharp), instead of a consumer
@@ -1164,7 +1178,7 @@ namespace Magelight {
             ViewId id = 0;
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
-                if (MlView* v = FindViewByUlLocked(caller)) id = v->id;
+                if (MlView* v = FindViewByUlLocked(caller)) { id = v->id; v->loadFailed = true; }
             }
             const std::string detail = std::string(url.utf8().data()) + ": " + description.utf8().data() +
                 " (" + error_domain.utf8().data() + ":" + std::to_string(error_code) + ")";
@@ -3549,55 +3563,151 @@ float4 ps_straight(VSOut i) : SV_Target {
         return session;
     }
 
+    // A view's first load (or its wake from hibernation): create the View and start the page. s_viewsMutex held:
+    // LoadURL runs OnBeginLoading synchronously inside it (invariant 16). False = CreateView failed.
+    static bool LoadViewLocked(MlView& v)
+    {
+        const bool waking = v.dormant;
+        v.dormant = false;
+        v.domReady = false;
+        v.loadFailed = false;
+        ultralight::ViewConfig vc;
+        vc.is_accelerated = s_gpuActive;
+        vc.is_transparent = true;
+        vc.initial_device_scale = v.deviceScale;
+        v.pageCursor = 0;   // a new View has reported nothing yet
+        v.ul = s_ulRenderer->CreateView(
+            static_cast<std::uint32_t>(v.w), static_cast<std::uint32_t>(v.h), vc,
+            GetOrCreateSession(v.sessionName));
+        if (!v.ul) {
+            SKSE::log::error("Magelight: CreateView failed for view {}", v.id);
+            return false;
+        }
+        v.loadNow = false;
+        v.ul->set_load_listener(&s_loadListener);
+        v.ul->set_view_listener(&s_viewListener);
+        v.ul->set_network_listener(&s_networkListener);
+        // Prefer the on-disk page (the path the React frontend ships
+        // through). Relative paths resolve against s_runtimeDir via the
+        // platform file system; a drive-letter path loads as-is (SA's
+        // HTML lives in SA's own mod folder). Inline banner fallback.
+        const bool absolute = v.htmlPath.size() > 1 && v.htmlPath[1] == ':';
+        const std::filesystem::path onDisk =
+            absolute ? std::filesystem::path(v.htmlPath) : (s_runtimeDir / v.htmlPath);
+        if (!v.htmlPath.empty() && std::filesystem::exists(onDisk)) {
+            SKSE::log::info("Magelight: view {} loading from disk ({})", v.id, v.htmlPath);
+            const std::string url =
+                absolute ? PathToFileUrl(onDisk) : ("file:///" + v.htmlPath);
+            v.ul->LoadURL(url.c_str());
+        } else {
+            SKSE::log::warn("Magelight: view {} page '{}' missing — inline banner fallback",
+                v.id, v.htmlPath);
+            v.ul->LoadHTML(kBannerHTML);
+        }
+        if (waking) SKSE::log::info("Magelight: view {} woke from hibernation", v.id);
+        // The UI-mode target loading late (a wake, or an entry while it waited in the queue): the focus marker ran
+        // against a null View, so re-run it for keys to reach the new page.
+        if (s_focused.load() && v.id == static_cast<ViewId>(s_uiModeView.load())) QueueInput(0, 1, 0);
+        return true;
+    }
+
+    // Staggered first loads (render thread only). A page's parse and first script run land in the following frames'
+    // Renderer::Update, so loading every registered view at world ready stacked them all into the first frames after a
+    // save loads. The queue starts one waiting view per frame, and the next only once the previous one reached DOM
+    // ready or failed (or kStaggerMaxWaitMs passed) and the last frame's Update ran under loadBudgetMs. Both caps are
+    // wall time, not frames, so a slow post-load frame rate cannot stretch the queue: a batch older than
+    // kStaggerBatchMaxMs starts everything still waiting, which keeps consumers that wait for DOM ready before they
+    // show a view (SeverActions' popups and wheel) close to the 0.30.x readiness.
+    static constexpr double kStaggerMaxWaitMs = 100.0;
+    static constexpr double kStaggerBatchMaxMs = 1000.0;
+    struct LoadStagger {
+        ViewId last = 0;                 // the latest view loaded; the queue waits for it to settle
+        std::chrono::steady_clock::time_point lastLoadAt{};   // epoch = nothing loaded yet (never waits)
+        bool   batch = false;            // views have been waiting since batchStart
+        int    batchQueued = 0, batchAtOnce = 0, batchFrames = 0, batchAtCap = 0;
+        double batchWorstUpdateMs = 0.0;
+        std::chrono::steady_clock::time_point batchStart{};
+    };
+    static LoadStagger s_stagger;
+    static double s_lastUlUpdateMs = 0.0;   // the previous frame's Renderer::Update, ms (FrameWork)
+
+    // Render thread: give every view that should have a page its View. Without staggering (Magelight.json
+    // "loadStagger": false) every waiting view loads in this frame, as before 0.31.0. With it, a view loads at once
+    // when it is shown before its load (startVisible or ShowView(true)), is the UI-mode target or wakes from
+    // hibernation; the others wait in a queue in registration order, at most kStaggerBatchMaxMs. Hibernated and
+    // load-on-show views wait for ShowView(true). Pre-load calls (listeners, InteropCall, EvalJS, InvokeJS) stay queued on the view and
+    // are delivered after its DOM ready, exactly as for a view created before the world loaded.
     static void MaterializeViews()
     {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
+        const bool stagger = s_loadStagger.load();
+        const ViewId uiView = s_focused.load() ? static_cast<ViewId>(s_uiModeView.load()) : 0;
+        const auto nowT = std::chrono::steady_clock::now();
+        std::vector<MlView*> queued;
+        int atOnce = 0;
         for (auto& vp : s_views) {
             MlView& v = *vp;
-            if (v.ul || v.w <= 0 || v.h <= 0) continue;
-            if (v.dormant && !v.visible) continue;   // hibernated: wakes on ShowView(true)
-            const bool waking = v.dormant;
-            v.dormant = false;
-            v.domReady = false;
-            ultralight::ViewConfig vc;
-            vc.is_accelerated = s_gpuActive;
-            vc.is_transparent = true;
-            vc.initial_device_scale = v.deviceScale;
-            v.pageCursor = 0;   // a new View has reported nothing yet
-            v.ul = s_ulRenderer->CreateView(
-                static_cast<std::uint32_t>(v.w), static_cast<std::uint32_t>(v.h), vc,
-                GetOrCreateSession(v.sessionName));
-            if (!v.ul) {
-                SKSE::log::error("Magelight: CreateView failed for view {}", v.id);
-                continue;
-            }
-            v.ul->set_load_listener(&s_loadListener);
-            v.ul->set_view_listener(&s_viewListener);
-            v.ul->set_network_listener(&s_networkListener);
-            // Prefer the on-disk page (the path the React frontend ships
-            // through). Relative paths resolve against s_runtimeDir via the
-            // platform file system; a drive-letter path loads as-is (SA's
-            // HTML lives in SA's own mod folder). Inline banner fallback.
-            const bool absolute = v.htmlPath.size() > 1 && v.htmlPath[1] == ':';
-            const std::filesystem::path onDisk =
-                absolute ? std::filesystem::path(v.htmlPath) : (s_runtimeDir / v.htmlPath);
-            if (!v.htmlPath.empty() && std::filesystem::exists(onDisk)) {
-                SKSE::log::info("Magelight: view {} loading from disk ({})", v.id, v.htmlPath);
-                const std::string url =
-                    absolute ? PathToFileUrl(onDisk) : ("file:///" + v.htmlPath);
-                v.ul->LoadURL(url.c_str());
-            } else {
-                SKSE::log::warn("Magelight: view {} page '{}' missing — inline banner fallback",
-                    v.id, v.htmlPath);
-                v.ul->LoadHTML(kBannerHTML);
-            }
-            if (waking) {
-                SKSE::log::info("Magelight: view {} woke from hibernation", v.id);
-                // If it is the UI-mode target, the focus marker ran against
-                // a null View — re-run it so keys reach the new page.
-                if (s_focused.load() && v.id == static_cast<ViewId>(s_uiModeView.load())) QueueInput(0, 1, 0);
+            if (v.ul || v.w <= 0 || v.h <= 0 || v.destroyPending) continue;
+            if ((v.dormant || v.loadOnShow) && !v.visible) continue;   // wakes / first loads on ShowView(true)
+            const bool now = !stagger || v.dormant || v.loadNow || v.loadOnShow || v.id == uiView;
+            if (!now) { queued.push_back(&v); continue; }
+            if (LoadViewLocked(v)) {
+                ++atOnce;
+                s_stagger.last = v.id;
+                s_stagger.lastLoadAt = nowT;
             }
         }
+        if (queued.empty() && !s_stagger.batch) return;
+        if (!s_stagger.batch) {
+            s_stagger.batch = true;
+            s_stagger.batchQueued = 0;
+            s_stagger.batchAtOnce = 0;
+            s_stagger.batchFrames = 0;
+            s_stagger.batchAtCap = 0;
+            s_stagger.batchWorstUpdateMs = 0.0;
+            s_stagger.batchStart = nowT;
+        }
+        ++s_stagger.batchFrames;
+        s_stagger.batchAtOnce += atOnce;
+        s_stagger.batchWorstUpdateMs = std::max(s_stagger.batchWorstUpdateMs, s_lastUlUpdateMs);
+        const auto msSince = [&](std::chrono::steady_clock::time_point t) {
+            return std::chrono::duration<double, std::milli>(nowT - t).count();
+        };
+        if (!queued.empty() && msSince(s_stagger.batchStart) >= kStaggerBatchMaxMs) {
+            // The batch ran past its wall-time cap: start everything still waiting now.
+            std::vector<MlView*> retry;
+            for (MlView* v : queued) {
+                if (!LoadViewLocked(*v)) { retry.push_back(v); continue; }   // CreateView failed: a later frame
+                ++s_stagger.batchAtCap;
+                s_stagger.last = v->id;
+                s_stagger.lastLoadAt = nowT;
+            }
+            queued.swap(retry);
+        } else if (!queued.empty() && atOnce == 0) {
+            bool settled = true;   // the latest load reached DOM ready or failed, or its view is gone or released
+            if (MlView* prev = FindViewLocked(s_stagger.last))
+                settled = prev->domReady || prev->loadFailed || !prev->ul || prev->destroyPending;
+            const bool due = msSince(s_stagger.lastLoadAt) >= kStaggerMaxWaitMs;
+            if (due || (settled && s_lastUlUpdateMs < static_cast<double>(s_loadBudgetMs.load()))) {
+                std::sort(queued.begin(), queued.end(), [](const MlView* a, const MlView* b) { return a->id < b->id; });
+                for (auto it = queued.begin(); it != queued.end(); ++it) {
+                    if (!LoadViewLocked(**it)) continue;   // CreateView failed: retried on a later frame, the next goes now
+                    ++s_stagger.batchQueued;
+                    s_stagger.last = (*it)->id;
+                    s_stagger.lastLoadAt = nowT;
+                    queued.erase(it);
+                    break;
+                }
+            }
+        }
+        if (!queued.empty()) return;
+        const int views = s_stagger.batchQueued + s_stagger.batchAtOnce + s_stagger.batchAtCap;
+        if (views > 1)
+            SKSE::log::info("Magelight: staggered load - {} views over {} frames in {:.0f} ms ({} at once for a show or "
+                            "UI mode, {} together at the {:.0f} ms cap; worst Update {:.1f} ms)",
+                views, s_stagger.batchFrames, msSince(s_stagger.batchStart), s_stagger.batchAtOnce,
+                s_stagger.batchAtCap, kStaggerBatchMaxMs, s_stagger.batchWorstUpdateMs);
+        s_stagger.batch = false;
     }
 
     // Render thread, before MaterializeViews: release the View + texture of
@@ -4789,6 +4899,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // freezes without this call. Our views all ride default display 0.
         s_ulRenderer->RefreshDisplay(0);
         const auto stageAfterUpdate = ClockT::now();
+        s_lastUlUpdateMs = stageMs(stageT0, stageAfterUpdate);   // the next frame's load-queue budget (MaterializeViews)
         double frameUlRender = 0.0;   // THIS frame's render, for the composite subtraction
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
         // While the UI pass is live the composite records its quads for it instead of drawing them over the
@@ -6327,6 +6438,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         v->x = x; v->y = y; v->w = w; v->h = h;
         v->fullscreen = fullscreen;
         v->visible = startVisible;
+        v->loadNow = startVisible;   // visible at creation counts as shown: skips the load queue
         v->clickThrough = clickThrough;
         v->onDomReady = onDomReady;
         v->sessionName = sessionName ? sessionName : "";
@@ -6360,6 +6472,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (MlView* v = FindViewLocked(view)) {
             if (v->visible != show) v->hiddenSince = show ? 0 : GetTickCount64();
             v->visible = show;
+            if (!v->ul) v->loadNow = show;   // an open never waits behind the load queue
             if (!show) v->pageCursor = 0;   // reopened, the page reports again on the first mouse move
         }
     }
@@ -6522,6 +6635,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->reloadPending = true;
         v->domReady = false;   // hold outbound calls for the new page
+        v->loadFailed = false;
         return true;
     }
 
@@ -6538,6 +6652,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->navigateUrl = u;
         v->domReady = false;   // hold outbound calls for the new page
+        v->loadFailed = false;
         return true;
     }
 
@@ -6579,6 +6694,29 @@ float4 ps_straight(VSOut i) : SV_Target {
         SKSE::log::info("Magelight: view {} world freeze {}", view, freeze ? "requested" : "withdrawn");
         if (s_focused.load() && static_cast<ViewId>(s_uiModeView.load()) == view)
             GameTask::Post([]() { ApplyFreezeWorld("view preference"); });
+    }
+    bool LoadStaggerEnabled()
+    {
+        return s_loadStagger.load();
+    }
+    bool SetViewLoadOnShow(ViewId view, bool onShow)
+    {
+        bool started = false;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending) return false;
+            if (v->loadOnShow == onShow) return true;
+            v->loadOnShow = onShow;
+            started = v->ul || v->dormant;   // a page already loaded (a hibernated one wakes on show anyway)
+        }
+        if (started)
+            SKSE::log::info("Magelight: view {} load-on-show {} - its page already loaded, nothing changes", view,
+                            onShow ? "set" : "cleared");
+        else
+            SKSE::log::info("Magelight: view {} load-on-show {}", view,
+                            onShow ? "set - first load waits for a show" : "cleared");
+        return true;
     }
     void SetViewNetworkLevel(ViewId view, NetLevel level)
     {
