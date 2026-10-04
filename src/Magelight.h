@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 struct ID3D11ShaderResourceView;
@@ -275,6 +276,55 @@ namespace Magelight {
     // no menu churn, so no holder can mistake it for an exit. Cursor, controls
     // and text entry are untouched. No-op when unfocused or unchanged.
     void SetUIModePause(bool pause);
+    // World freeze (0.31.0): the view's preference that the game skip its 3D
+    // render behind it (kFreezeFrameBackground on the focus menu) while it holds
+    // UI mode paused. Any thread; applied on the game thread, never on VR, and
+    // dropped before the pause whenever pause, focus or the view change.
+    void SetViewFreezeWorld(ViewId view, bool freeze);
+    bool FreezeWorldAvailable();           // flat and Magelight.json "freezeWorld" not false
+    // Which page console messages reach Magelight.log (0.31.0): 0 none, 1 errors, 2 warnings and errors, 3 all.
+    // Magelight.json "consoleLog", else 3 in devMode and 2 otherwise. Any thread.
+    int ConsoleLogLevel();
+    // Staggered view loading (0.31.0): Magelight.json "loadStagger" (default true). Any thread.
+    bool LoadStaggerEnabled();
+    // Load on show (0.31.0): the view's FIRST load waits until it is shown (ShowView(true), UI-mode entry). Only
+    // decides a load that has not started; a loaded page stays loaded. False = no such view. Any thread.
+    bool SetViewLoadOnShow(ViewId view, bool onShow);
+    // Per-view cursors (0.31.0). A view may carry its own cursor images, one per page state, or "none" (the page
+    // draws its own pointer). Two layers per view: its own set (SetViewCursor, Papyrus SetCursor, the manifest's
+    // view "cursor") over its mod's default (the manifest's top-level "cursor"). Images decode lazily on a worker
+    // thread the first time they are drawn and are shared by file, hotspot, height and press.
+    struct CursorImage;                       // Magelight.cpp
+    inline constexpr int kCursorStates = 3;   // 0 arrow, 1 pointer (over a clickable element), 2 text
+    struct CursorSet {
+        std::shared_ptr<CursorImage> image[kCursorStates];
+        bool none = false;                    // hide the host cursor over the view: the page draws its own
+        bool Empty() const { return !none && !image[0] && !image[1] && !image[2]; }
+    };
+    // An image for an absolute file (PNG, DDS or another format WIC reads; at most 256x256). hotX/hotY in image
+    // pixels, height in px at 1080p (0 = the image's own height), press = shrink on a click like the host arrow.
+    // nullptr, with why, when the file does not exist. Any thread; nothing is decoded here.
+    std::shared_ptr<CursorImage> MakeCursorImage(const std::filesystem::path& file, float hotX, float hotY,
+                                                 float height, bool press, std::string* why);
+    // `path` against the view's mod folder (its page root, PageRootFor): relative, no "..". absoluteOk takes an
+    // absolute path as is.
+    bool ResolveViewFile(ViewId view, const std::string& path, bool absoluteOk, std::filesystem::path& out,
+                         std::string* why);
+    // Replace the view's own set, or (modDefault) its mod's default layer. False = no such view. Any thread.
+    bool SetViewCursorSet(ViewId view, bool modDefault, const CursorSet& set);
+    // One state of the view's own set (nullptr clears it; an image, or clearing state 0, clears "none"), or the
+    // "none" form (replaces the own set). False = no such view. Any thread.
+    bool SetViewCursorState(ViewId view, int state, std::shared_ptr<CursorImage> image);
+    bool SetViewCursorNone(ViewId view);
+    // Cursor tint (0.31.1): recolours the host's drawn cursor over this view, and the VR laser dot (lit core, ink rim).
+    // 0xAARRGGBB each; alpha 0 keeps the host colour, any other alpha uses the colour opaque. The view's own images
+    // still win, and "cursorForce" / "modCursors": false drop the tint like they drop images. Any thread.
+    struct CursorTintSet {
+        std::uint32_t lit = 0, shade = 0, ink = 0, glow = 0, ibeam = 0;
+        bool Empty() const { return !((lit | shade | ink | glow | ibeam) & 0xFF000000u); }
+    };
+    // False = no such view.
+    bool SetViewCursorTint(ViewId view, const CursorTintSet& tint);
     ViewId GetUIModeView();                // the current/last UI-mode target (0 = none)
     std::uint32_t GetToggleKey();          // the host's own UI-mode toggle scancode (Magelight.json)
     bool IsUIModeActive();

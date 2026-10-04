@@ -6,7 +6,7 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v0.30.4 loading`).
+version (`Magelight v0.31.1 loading`).
 
 ## Nothing from any Magelight mod appears
 
@@ -99,8 +99,52 @@ the UI-mode view: only the focused view receives keys.
 Each visible view costs a texture and a paint when it changes; idle pages cost nothing. Keep
 HUD widgets small, avoid `position: fixed` full-screen containers on HUD layers, and prefer
 `startVisible: false` for panels. Fullscreen views repaint on resolution change. A page's
-JavaScript runs on the game's main thread, so heavy script work, or console output in a loop
-(every line goes to the log), costs frame time; strip console logging from release builds.
+JavaScript runs on the game's main thread, so heavy script work, or console output in a loop,
+costs frame time; strip console logging from release builds.
+
+Loading a page costs frame time too (its parse and first script run). Since 0.31.0 the pages of
+views that have not been opened start loading one per frame after a save loads, instead of all in
+the first frames, which is meant to spread that cost (not yet measured in game); a page you open
+loads at once, and a batch lasts at most about a second. `Magelight.log` sums each batch:
+`staggered load - N views over F frames in T ms (...; worst Update X ms)`. A single page whose own
+parse is long still costs one long frame. If a mod's page is not ready right after a load because
+of this (a mod that waits for its page before it opens it), set `"loadStagger": false` in
+`Magelight.json` (and tell the mod's author: a page that is shown loads at once).
+
+Since 0.31.0 pages draw with 4x MSAA on the GPU path, and every page target holds a multisample
+copy: a full-screen page at 1440p holds at least about 60 MB more video memory, more when it
+composites full-size layers. On a graphics card short of video memory, `"msaa": 2` or `1` in
+`Magelight.json` lowers that (`1` is the 0.30.x cost, with stair-stepped curves).
+
+## A page's console lines are missing from the log
+
+Since 0.31.0 `Magelight.log` records a page's console warnings and errors only, as
+`[view N console/warn]` and `[view N console/ERROR]`: pages log whatever they like, settings and
+keys included, and the log is the file players post. To see `console.log`, `info` and `debug`
+lines too, set `"consoleLog": "all"` (or `"devMode": true`) in `Magelight.json`, reproduce, and
+set it back before posting the log anywhere. Other rules:
+
+- A message longer than 2 KB is cut, ending in `… [N bytes]` with its full length.
+- A view writes at most 20 console lines a second; the rest are counted, and the view's next
+  logged line, or its destruction, is preceded by `[view N console] N lines not logged (over 20 a
+  second)`.
+- The mod that owns the view still receives every message in full through its `ConsoleMessage`
+  event, whatever the log records; a mod that forwards its console lines elsewhere is unaffected.
+- The settings line (`settings loaded (... consoleLog=warnings)`) names the level in effect.
+
+## The cursor looks different over one mod, or disappears
+
+Since 0.31.0 a mod can bring its own cursor images for its views, and a page that draws its own
+pointer can hide the host's (CSS `cursor: none`, or `"none"` in its manifest). Over such a view
+you see the mod's cursor, or the page's own, instead of Magelight's; elsewhere, and as soon as
+the pointer leaves that view, Magelight's cursor is back. A mod's cursor images win over your
+`cursorFile` over that mod's views; a mod's cursor colours (0.31.1) never do. To keep your own cursor everywhere set `"cursorForce": true`
+in `Magelight.json`; to drop mods' images but let pages that draw their own pointer keep doing so,
+set `"modCursors": false` (since 0.31.1 that also drops a mod's cursor colours, `view N cursor
+tint: ...` in the log). `Magelight.log` names each view's cursor (`view N cursor: ...`) and
+each image it loads, or why one failed (`cursor image ... - not an image Windows can read`); a
+failed image shows Magelight's cursor instead. In VR the laser keeps its dot; with
+`vr.cursorDot` `false` it shows the mod's image.
 
 ## Rendering oddities (Ultralight 1.4 GPU path)
 
@@ -133,14 +177,20 @@ it read, or says that defaults are in effect.
 |---|---|---|
 | `toggleKey` | `201` (Page Up) | DirectInput scancode of the host toggle key, which always leaves UI mode. A number, not a key name |
 | `hotkeys` | none | Rebind or disable any mod's hotkey: `"ModId/viewName": "F7"` (a key name or scancode), `0`, `"none"` or `"off"` disables |
-| `devMode` | `false` | Hot reload of page files and the on-page JS error banner |
+| `devMode` | `false` | Hot reload of page files and the on-page JS error banner; also writes every page console line to the log unless `consoleLog` says otherwise |
+| `consoleLog` | `"warnings"` | Which page console messages go into the log (0.31.0): `none`, `errors`, `warnings` (warnings and errors) or `all` (`console.log`, `info` and `debug` too). Unset, it is `all` with `devMode` and `warnings` otherwise. See "A page's console lines are missing from the log" |
 | `logLevel` | `"info"` | `trace`, `debug`, `info`, `warn` or `error` |
 | `forceCpu` | `false` | Skip the GPU driver and use Ultralight's CPU renderer |
 | `presentHook` | `"auto"` | Where pages are drawn onto the frame. `auto` draws inside dxgi's own Present only when another mod hooked Present first (an upscaler, for one) and could otherwise draw over the pages, never behind a d3d11.dll or dxgi proxy (ENB, ReShade, Skyrim Upscaler) and never on VR. `late` always does, `vtable` never. Try `late` when a page opens (sound, paused game) but stays invisible, but not with ENB: behind ENB's `d3d11.dll`, `late` can crash the game at start |
 | `composite` | `"auto"` | The stage pages are drawn at. `present` draws them over the finished frame at Present; `ui` draws them in the game's own UI pass, as part of the game's menus (click-through HUD pages stay at Present). `auto` uses `ui` when Skyrim Upscaler is installed or the game's swapchain is NVIDIA Streamline's (`sl.interposer.dll`: Skyrim Upscaler, Community Shaders' and Open Shaders' upscaling), since a HUD Fix keeps the game's UI apart from the scene and frame generation drops anything drawn at Present; never on VR. Try `ui` when a page opens but stays invisible behind an upscaler or frame generation |
+| `freezeWorld` | `true` | Lets mods stop the game's 3D world render behind a paused fullscreen page (0.31.0; flat only). `false` turns it off for every mod and restores 0.30.6's menu flags; try it if the background behind a page goes black or a page stops answering when it opens |
+| `freezeWorldSkipCapture` | `true` | In UI-pass composite (`composite` `ui`, or `auto` behind an upscaler), keeps pages out of the frame the game freezes as the background. `false` if a page flickers when the freeze starts. No effect with composite `present` or `engine`, or with `freezeWorld` `false` |
+| `msaa` | `4` | 0.31.0: anti-aliasing samples for page shapes on the GPU path: SVG, icons and other non-rectangular shapes (boxes, rounded corners and text are smooth either way). `1` turns it off, `2`, `4` or `8`. Each count above 1 adds that many copies of every page target in video memory (about 15 MB each at 2560x1440), held while the page exists (hidden too, until a hibernating page frees it): at the default 4 that is at least about 60 MB per full-screen page, plus about the same again for each full-size layer the page composites (a transformed or translucent group, such as a transform-scaled shell). A count the graphics card cannot do steps down; any other number rounds down to one of these |
 | `fontHinting`, `fontGamma` | `"normal"`, `1.8` | Text rendering: `smooth`, `normal`, `monochrome` or `none`; gamma 1.0-3.0 |
 | `cursorFile`, `cursorHeight` | `""`, `24` | The cursor is drawn in code (it glows over a clickable element and becomes an I-beam over text); `cursorFile` replaces it with your own image (relative to the runtime folder, or absolute, placed by `cursorHotspotX/Y`). `cursorHeight` is its height in pixels at 1080p (8-256), scaled with the resolution: 24 is 48 px at 4K |
 | `cursorHotspotX`, `cursorHotspotY` | `0`, `0` | The pointer pixel of a `cursorFile` image, 0-1 across and down |
+| `cursorForce`, `modCursors` | `false`, `true` | 0.31.0: mods may bring their own cursor. `cursorForce` `true` shows yours (your `cursorFile`, else the drawn cursor) everywhere, over every mod's cursor and over pages that hide the pointer. `modCursors` `false` ignores mods' cursor images and colours (0.31.1), but a page that draws its own pointer still hides yours. See "The cursor looks different over one mod, or disappears" |
+| `loadStagger`, `loadBudgetMs` | `true`, `8` | 0.31.0: views not yet opened start loading their pages one per frame after a load, the next once the previous page is ready or failed (or 100 ms passed) and the last frame's page work took under `loadBudgetMs` (1-100), at most about a second per batch; a view being opened, or visible at creation, loads at once. `false` loads every page in the same frame, as before 0.31.0. See "Performance" |
 | `stallWatchdog`, `stallThresholdMs` | `true`, `1500` | Log the present and main threads' stacks when no frame is presented for this long (250-60000 ms); the first time per session, every other thread's too |
 | `vr` | see below | Skyrim VR only |
 

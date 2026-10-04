@@ -76,6 +76,7 @@ namespace Magelight::Api4 {
             // a manifest mod, cleared when a DLL adopts the manifest mod.
             bool scriptOwned = false;
             Magelight::NetLevel net = Magelight::NetLevel::File;   // NetworkPolicy, pushed to every view of the mod
+            Magelight::CursorSet cursor;   // 0.31.0: the manifest's default cursor, pushed to every view of the mod
             std::map<ViewId, ViewRec> views;
             // Generation token: queued game-thread deliveries check it, so an
             // event queued just before UnregisterMod never reaches a freed user.
@@ -757,6 +758,14 @@ namespace Magelight::Api4 {
             }
         }
         PushNetLevel(mod, { id }, net);
+        {
+            Magelight::CursorSet cursor;
+            {
+                std::lock_guard<std::mutex> lk(s_mutex);
+                if (const Mod* m = FindLocked(mod)) cursor = m->cursor;
+            }
+            if (!cursor.Empty()) Magelight::SetViewCursorSet(id, true, cursor);
+        }
         if (Magelight::DevModeEnabled()) {
             const std::filesystem::path page = desc->htmlPath;
             Dev::WatchView(id, (page.is_absolute() ? page : Magelight::RuntimeDirPath() / page).parent_path());
@@ -963,6 +972,12 @@ namespace Magelight::Api4 {
         if (n == "pagebridge") return 1;    // window.magelight core installed on every page (0.15.0)
         if (n == "cutout") return 1;        // compositor cutout rect (0.16.0)
         if (n == "hibernate") return 1;     // hidden views release their texture (0.16.0)
+        if (n == "freezeworld") return Magelight::FreezeWorldAvailable() ? 1 : 0;   // SetViewFreezeWorld (0.31.0; flat only)
+        if (n == "consolelog") return Magelight::ConsoleLogLevel();   // 0.31.0: 0 none, 1 errors, 2 warnings, 3 all
+        if (n == "loadstagger") return Magelight::LoadStaggerEnabled() ? 1 : 0;   // 0.31.0: hidden views load one per frame
+        if (n == "loadonshow") return 1;    // SetViewLoadOnShow / manifest "loadOnShow" (0.31.0)
+        if (n == "cursor") return 1;        // SetViewCursor / manifest "cursor" / Papyrus SetCursor (0.31.0)
+        if (n == "cursortint") return 1;    // SetViewCursorTint (0.31.1)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1074,7 +1089,8 @@ namespace Magelight::Api4 {
                                         "networkDeny", "sessions", "manifest", "http", "vr", "hotkeys", "evaljs",
                                         "pagebridge", "cutout", "hibernate", "inspector", "ime",
                                         "loopback", "escapeCapture", "viewOrder", "scrollStep", "networkPolicy",
-                                        "sound" };
+                                        "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
+                                        "cursorTint" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1353,6 +1369,95 @@ namespace Magelight::Api4 {
         if (const Result g = GateView(view, "SetViewSounds"); g != Result::Ok) return g;
         Magelight::SetViewSounds(view, open, close);
         return Result::Ok;
+    }
+
+    // 0.31.0: the preference is stored per view; the host applies it only while
+    // that view holds UI mode paused (Magelight::SetViewFreezeWorld).
+    Result SetViewFreezeWorld(ViewId view, bool freeze)
+    {
+        if (const Result g = GateView(view, "SetViewFreezeWorld"); g != Result::Ok) return g;
+        if (!Magelight::FreezeWorldAvailable())
+            return Fail(OwnerOf(view), Result::Unsupported,
+                        "SetViewFreezeWorld: unavailable (VR, or Magelight.json freezeWorld is false)");
+        Magelight::SetViewFreezeWorld(view, freeze);
+        return Result::Ok;
+    }
+
+    // 0.31.0: decides only a first load that has not started (Magelight::SetViewLoadOnShow).
+    Result SetViewLoadOnShow(ViewId view, bool onShow)
+    {
+        if (const Result g = GateView(view, "SetViewLoadOnShow"); g != Result::Ok) return g;
+        if (!Magelight::SetViewLoadOnShow(view, onShow))
+            return Fail(OwnerOf(view), Result::InvalidView, "SetViewLoadOnShow: view is gone");
+        return Result::Ok;
+    }
+
+    // 0.31.0: one state of the view's own cursor, or all of them cleared (Magelight.h "Per-view cursors").
+    Result SetViewCursor(ViewId view, const MAGELIGHT_API::CursorDesc* desc)
+    {
+        if (const Result g = GateView(view, "SetViewCursor"); g != Result::Ok) return g;
+        const ModId owner = OwnerOf(view);
+        if (!desc) {
+            if (!Magelight::SetViewCursorSet(view, false, Magelight::CursorSet{}))
+                return Fail(owner, Result::InvalidView, "SetViewCursor: view is gone");
+            return Result::Ok;
+        }
+        if (desc->size < sizeof(MAGELIGHT_API::CursorDesc))
+            return Fail(owner, Result::InvalidArgument, "SetViewCursor: desc->size is smaller than CursorDesc");
+        if (desc->state >= static_cast<std::uint32_t>(Magelight::kCursorStates))
+            return Fail(owner, Result::InvalidArgument, "SetViewCursor: state must be kCursorArrow, kCursorPointer or kCursorText");
+        const int state = static_cast<int>(desc->state);
+        const std::string path = desc->imagePath ? desc->imagePath : "";
+        bool ok = false;
+        if (path.empty()) {
+            ok = Magelight::SetViewCursorState(view, state, nullptr);
+        } else if (Lower(path) == "none") {
+            if (state != 0)
+                return Fail(owner, Result::InvalidArgument, "SetViewCursor: \"none\" is set through kCursorArrow");
+            ok = Magelight::SetViewCursorNone(view);
+        } else {
+            std::filesystem::path file;
+            std::string why;
+            if (!Magelight::ResolveViewFile(view, path, true, file, &why))
+                return Fail(owner, Result::InvalidArgument, "SetViewCursor: '" + path + "' - " + why);
+            auto img = Magelight::MakeCursorImage(file, desc->hotspotX, desc->hotspotY, desc->height, desc->pressShrink, &why);
+            if (!img) return Fail(owner, Result::InvalidArgument, "SetViewCursor: " + why);
+            ok = Magelight::SetViewCursorState(view, state, std::move(img));
+        }
+        if (!ok) return Fail(owner, Result::InvalidView, "SetViewCursor: view is gone");
+        return Result::Ok;
+    }
+
+    // 0.31.1: the drawn cursor's colours over the view (Magelight.h "Cursor tint").
+    Result SetViewCursorTint(ViewId view, const MAGELIGHT_API::CursorTint* tint)
+    {
+        if (const Result g = GateView(view, "SetViewCursorTint"); g != Result::Ok) return g;
+        Magelight::CursorTintSet set;
+        if (tint) {
+            if (tint->size < sizeof(MAGELIGHT_API::CursorTint))
+                return Fail(OwnerOf(view), Result::InvalidArgument, "SetViewCursorTint: tint->size is smaller than CursorTint");
+            set.lit = tint->lit;
+            set.shade = tint->shade;
+            set.ink = tint->ink;
+            set.glow = tint->glow;
+            set.ibeam = tint->ibeam;
+        }
+        if (!Magelight::SetViewCursorTint(view, set))
+            return Fail(OwnerOf(view), Result::InvalidView, "SetViewCursorTint: view is gone");
+        return Result::Ok;
+    }
+
+    void SetModCursor(ModId mod, const Magelight::CursorSet& set)
+    {
+        std::vector<ViewId> views;
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            Mod* m = FindLocked(mod);
+            if (!m) return;
+            m->cursor = set;
+            for (const auto& [id, rec] : m->views) views.push_back(id);
+        }
+        for (ViewId v : views) Magelight::SetViewCursorSet(v, true, set);
     }
 
     Result SetViewHibernate(ViewId view, std::uint32_t idleMs)

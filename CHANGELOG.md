@@ -13,6 +13,11 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 0.31.1 | 3101 | `SetViewCursorTint(view, tint)` with `CursorTint` — the host's drawn cursor (arrow, hover glow, I-beam) and the VR laser dot in your colours over a view; `QueryCapability("cursortint")` |
+| 0.31.0 | 3100 | `SetViewFreezeWorld(view, freeze)` — the game skips its 3D world render behind a paused page (flat only); Papyrus `SetFreezeWorld`; `QueryCapability("freezeworld")` |
+| 0.31.0 | 3100 | Page console lines in `Magelight.log` are opt-in (`Magelight.json` `consoleLog`); `QueryCapability("consolelog")` says what the log records (0-3); the `ConsoleMessage` event is unchanged |
+| 0.31.0 | 3100 | Staggered first page loads (`Magelight.json` `loadStagger`, `loadBudgetMs`; `QueryCapability("loadstagger")`); `SetViewLoadOnShow(view, onShow)` and manifest `loadOnShow` — no page load until the view is first shown; `QueryCapability("loadonshow")` (not in every unreleased 0.31.0 build: gate on 3101 or the capability) |
+| 0.31.0 | 3100 | Per-view cursors: `SetViewCursor(view, desc)` with `CursorDesc`, manifest `cursor` (per view and mod-wide), Papyrus `SetCursor` / `ClearCursor`; CSS `cursor: none` hides the host cursor over a page on flat; `Magelight.json` `cursorForce`, `modCursors`; `QueryCapability("cursor")` (not in every unreleased 0.31.0 build: gate on 3101 or the capability) |
 | 0.30.1 | 3001 | `PostGameTask(fn, user)` — post game-thread work from any thread; from a callback inside a frame it never waits on SKSE's task lock |
 | 0.30.0 | 3000 | `NetworkPolicy::FileOnly` (the new default), manifest `"network": "file" \| "loopback"`, Papyrus `SetNetworkPolicy(modId, policy)`; the Papyrus tier acts only on script-owned mods |
 | 0.29.0 | 2900 | `PlayUISound(view, name)`, `SetViewSounds(view, open, close)`; page `magelight.sound()` / `__sound`, `data-ml-sound` markup, manifest `sounds`, Papyrus `PlaySound`; `QueryCapability("sound")` |
@@ -36,6 +41,187 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 0.31.1
+
+- **A mod can recolour Magelight's cursor over its pages.**
+  `SetViewCursorTint(view, tint)` takes five colours (the arrow's lit and
+  shaded facets, the outline, the hover glow and the I-beam) and the host
+  draws its own cursor in them over that view: the same shape, glow,
+  press-shrink and sharpness at every resolution, at the player's
+  `cursorHeight`, with no image files. The VR laser dot takes the lit colour
+  for its core and the outline colour for its rim. A colour with alpha 0 keeps
+  the host's and any other alpha is drawn opaque; `nullptr` gives every colour
+  back. The view's own cursor images still win; on flat the player's
+  `cursorFile` replaces the drawn cursor, and `"cursorForce": true` or
+  `"modCursors": false` drop the tint as they drop images. Each tint's cursor
+  is built once per resolution and kept (four at a time). C++ only (no
+  manifest key or Papyrus call). The cursor art was checked offline (the
+  host's colours draw byte-identical to 0.31.0, a tint changes colour only);
+  not yet run in game.
+- Version gate: 0.31.0 was never released, and its test builds lack parts of
+  the 0.31.0 appendix (`SetViewLoadOnShow`, `SetViewCursor`, Papyrus
+  `SetCursor` / `ClearCursor`). Gate those, and the tint, on
+  `hostVersionNumber >= 3101`, or keep `>= 3100` together with
+  `QueryCapability("loadonshow")` / `("cursor")` == 1 as docs/CPP.md does.
+  `SetViewFreezeWorld` is in every 0.31.0 build.
+
+## 0.31.0
+
+- **The world can stop rendering behind a fullscreen page.** A mod calls
+  `SetViewFreezeWorld(view, true)` once for a view; whenever that view holds
+  UI mode with the game paused (`kUIModeFlagPause`), the game is expected to
+  show a frozen frame instead of drawing its 3D world. This is the Journal's
+  freeze flag without the Journal's `kTopmostRenderedMenu`, which would stop
+  Magelight's UI-pass drawing; the flag alone has not been run in game yet.
+  How much frame time it gives back is to be measured. The host puts the
+  freeze on and takes it off itself: it starts with the pause, and it stops
+  before the pause does when the view is unpaused in place, another view
+  takes UI mode (the inspector included), UI mode closes, a load starts, or
+  another mod lets the game run. The HUD is expected to keep drawing under
+  the page, so use it for opaque pages. Papyrus: `SetFreezeWorld(view,
+  freeze)`. `QueryCapability("freezeworld")` is 1 on flat Skyrim; on VR the
+  call returns `Unsupported` (untested there, so excluded as a precaution). A
+  player can turn it off for every mod with `"freezeWorld": false` in
+  `Magelight.json`, which also gives back 0.30.6's menu flags.
+- `Magelight.json` `freezeWorldSkipCapture` (default `true`): in UI-pass
+  composite, meant to keep Magelight's drawing out of the frame the game
+  captures as the frozen background, so a translucent page cannot show a
+  stale copy of itself underneath. Set it to `false` if a page flickers when
+  the freeze starts. No effect with composite `present` or `engine`, or when
+  `freezeWorld` is `false`.
+- `Magelight.log` notes when the UI pass stops drawing while a page is open
+  (its views then draw at Present, which frame generation drops) and when it
+  comes back, with the world freeze's state.
+- **Page console output in `Magelight.log` is opt-in.** Every `console.log`
+  of every page used to be written to the log, and a page that logged its own
+  settings put the start of an API key into a log players post with bug
+  reports. The log now records a page's warnings and errors only;
+  `console.log`, `info` and `debug` lines are written with `"devMode": true`
+  or with `"consoleLog": "all"` in `Magelight.json` (`"errors"` keeps errors
+  only, `"none"` nothing; an explicit `consoleLog` wins over devMode). Each
+  logged message is cut at 2 KB with its full length noted, and a view writes
+  at most 20 lines a second, followed by a count of the lines left out. The
+  `ConsoleMessage` event still delivers every message, in full, to the mod
+  that owns the view, and the devMode error banner is unchanged, so a mod
+  that forwards its console lines itself keeps working.
+  `QueryCapability("consolelog")` answers what the log records (0 none,
+  1 errors, 2 warnings and errors, 3 all), for a mod that wants its own
+  lines and should forward them itself when the answer is below 3. There is
+  no manifest key or API to turn a mod's lines on: what goes into the log is
+  the player's choice. The settings line in the log names the level in effect.
+  Not yet run in game or in the desktop harness.
+- **Pages load over several frames after a save loads.** The host used to
+  start every registered view's page in the frame the world became ready, so
+  every page's parse and first script run landed in the same few frames (in
+  one field log, 16 views cost about 0.75 s of frames and a 96 ms frame). The
+  pages of views that have not been opened now start one per frame, in the
+  order they were created, and the next only once the previous page reached
+  DOM ready or failed (or 100 ms passed) and the last frame's Ultralight
+  update took under `loadBudgetMs` (default 8). A batch lasts at most about
+  a second: whatever is still waiting then starts together. A view that is
+  visible at creation (`startVisible`), is shown or enters UI mode before its
+  page loaded loads at once. DOM ready still arrives some time after
+  `CreateView`, never inside it; calls made before it (listeners,
+  `InteropCall`, `InvokeJS`, `EvalJS`) are still delivered after it. What
+  changes for a mod is how long after a load a page it has not opened becomes
+  ready: up to about a second plus the page's own load. A mod that waits for
+  DOM ready before it shows a view (or refuses to show it until then) waits
+  for the queue too, so showing the view is the way to have it at once.
+  `Magelight.log` sums each batch (`staggered load - N views over F frames in
+  T ms`). A player turns it off with `"loadStagger": false` in
+  `Magelight.json`; `QueryCapability("loadstagger")` says whether it is on.
+  Not yet run in game: the frame-time gain and the batch length are to be
+  measured, and the batch line is how a test reads them.
+- `SetViewLoadOnShow(view, true)` (manifest `loadOnShow`): a view's page is
+  not loaded at all until the view is first shown, for panels that are rarely
+  opened. It decides only a load that has not started, so call it right after
+  `CreateViewEx`, before the world loads; a loaded page stays loaded. Such a
+  view's DOM ready comes after its first show. Opt-in: nothing changes for a
+  mod that does not call it. `QueryCapability("loadonshow")` is 1.
+- A view destroyed before its page loaded is no longer loaded first only to
+  be torn down in the same frame.
+- **A mod can bring its own cursor.** Until now the cursor was the host's,
+  for every view of every mod; only the player could swap it, for one still
+  image everywhere (`cursorFile`). A view can now carry its own images, one
+  for each page state: `arrow`, `pointer` (over `cursor: pointer`, `grab` and
+  `grabbing`) and `text`, each with its hotspot in image pixels, a height at
+  1080p, and an opt-in press shrink. A missing pointer image uses the arrow
+  image; a missing text image keeps the host's I-beam. Declare it in the
+  manifest (`"cursor"` on a view, or at the top level as the default for
+  every view of the mod), from C++ with `SetViewCursor(view, &desc)` (one
+  call per state, `nullptr` clears) or from Papyrus with `SetCursor` /
+  `ClearCursor`. Images are PNG or DDS (anything Windows' image decoder
+  reads), at most 256x256, relative to the mod folder (`Data/Magelight/<Mod>/`
+  for a page there, else the page's own folder). They decode on a worker the
+  first time they are drawn, never inside a frame; until then, and when one
+  fails (logged once), the host cursor shows. `QueryCapability("cursor")` is
+  1. A mod that sets no cursor gets the same cursor as before; the one
+  difference is that a page's hover state is now forgotten when UI mode
+  closes (below), so after reopening, the glow over a button waits for the
+  first mouse move. None of the cursor changes has been run in game yet.
+- **`cursor: none` now means "the page draws its own pointer".** Over a page
+  whose CSS cursor is `none`, or a view whose cursor is `"none"`, the host
+  draws no cursor on flat (before, the arrow was drawn over the page's own,
+  so such a page showed two). The host cursor comes back the moment the
+  pointer leaves that view, and every page's cursor is forgotten when UI
+  mode closes, so a page cannot leave the player without a pointer. A CSS
+  `cursor: url(...)` whose image loaded shows the view's own arrow image
+  when it has one (the host cannot read the page's image), else the host
+  arrow, as before. Neither SeverActions nor SkyrimNet uses either.
+- The player keeps the last word: `"cursorForce": true` in `Magelight.json`
+  draws the host cursor (their `cursorFile`, else the drawn art) everywhere,
+  over mod images and over pages that hide the pointer; `"modCursors": false`
+  ignores mod images but still lets a page that draws its own pointer hide
+  the host's. With neither, a view's own cursor wins over its mod's default,
+  which wins over the host cursor, so a mod's cursor now shows instead of a
+  player's `cursorFile` over that mod's views.
+- In VR the laser end stays a dot. With `vr.cursorDot` false it shows the
+  view's own image (sized from the panel like the arrow) when it has one,
+  else the arrow or `cursorFile` as before; `cursor: none` and `"none"` are
+  ignored there, because the laser has to show where it points.
+- **Anti-aliased page shapes.** The GPU driver draws pages with 4x MSAA again
+  (Ultralight's reference driver uses 8x; Magelight had turned it off).
+  Ultralight fills SVG paths and other non-rectangular shapes as plain
+  triangles and leaves their edges to MSAA, so without it every curve and
+  diagonal was stair-stepped; boxes, rounded corners and text were smooth
+  either way. `Magelight.json` `"msaa"` sets the samples (1 off, 2, 4, 8);
+  each count above 1 adds that many copies of every page target in video
+  memory (about 15 MB each at 2560x1440) while the page exists, hidden or not,
+  until the view hibernates: at 4x about 60 MB per full-screen page, plus about
+  the same again for each full-size layer the page composites (a
+  transform-scaled shell is one). A count the graphics card cannot do steps
+  down, and a fractional number such as `8.0` is read. A multisampled target resolves
+  into the plain texture the compositor and Ultralight sample, so nothing that
+  reads a page changes. `MagelightGPU.dll` gains the optional export
+  `MgGpu_SetSampleCount`; an older backend keeps working without MSAA. The
+  CPU path (`forceCpu`) is unchanged. `Magelight.log` names the count in
+  effect (`MSAA 4x`) and the settings line lists `msaa`. Run in game on flat
+  at 4x: SVG edges are smooth.
+- `build.ps1` builds into `MG_BUILD_DIR` when it is set (default `C:\b\mgl`).
+
+## 0.30.6
+
+- **A second, Windows mouse pointer after closing a page (fixed).** Leaving a
+  page forced the Windows cursor on instead of putting back what was there
+  before. On some installs (most likely those where Skyrim does not hold the
+  mouse exclusively, such as `bBackgroundMouse=1` in `Skyrim.ini`) it then
+  stayed on screen beside the game's pointer until the game window was
+  minimized and restored. Magelight no longer touches the Windows cursor at
+  all; the game keeps it hidden as it always does. `Magelight.log` now notes
+  the cursor's state shortly after the first page open and close of a session,
+  and after up to five later closes that leave the Windows pointer over the game.
+- **VR: arrows, Delete, Insert, Home, End, Page Down, numpad Enter and numpad
+  Divide now type into pages.** These keys were dropped in VR typing, where the
+  game's keyboard device feeds the page. Pause is passed on as Pause. (Page Up
+  is the host toggle key and leaves UI mode, unless `Magelight.json` sets
+  `toggleKey`.)
+- **VR: held keys repeat.** A held key sent a key release every frame instead
+  of repeating; it now repeats at the Windows keyboard delay and rate, so
+  holding an arrow or Backspace moves or deletes as on flat.
+- **VR: the numpad types digits with NumLock on**, and Shift, Ctrl and Alt
+  reach pages as the same key codes the flat window sends.
+- No API changes; the npm packages stay at 0.30.0.
 
 ## 0.30.5
 
@@ -96,7 +282,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 - **Two cursors at once with the UI-pass composite (fixed).** Only the Windows
   cursor was ever hidden; the game's own menu cursor kept drawing, under the page at
   Present but on top of it in the UI pass. Its cursor movie is now transparent while
-  a page has the mouse (any reskinned cursor too) and restored on exit.
+  a page has the mouse (any reskinned cursor too) and visible again on exit. (The
+  Windows cursor was not restored on exit but forced on; fixed in 0.30.6.)
 - **A new cursor, drawn in code.** The flat cursor is a faceted steel arrowhead
   rasterized at the exact size it is drawn, so it is crisp at any resolution, and
   it follows the page: a brass glow fades in over anything clickable (CSS

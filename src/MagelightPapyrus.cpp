@@ -386,6 +386,52 @@ namespace Magelight::Papyrus {
                 Api4::SetViewHibernate(static_cast<ViewId>(view), static_cast<std::uint32_t>(idleMs));
         }
 
+        // 0.31.0: freeze the world behind the view while it holds UI mode paused (see SetViewFreezeWorld).
+        bool SetFreezeWorld(RE::StaticFunctionTag*, std::int32_t view, bool freeze)
+        {
+            if (!ScriptMayDrive(view, "SetFreezeWorld")) return false;
+            return Api4::SetViewFreezeWorld(static_cast<ViewId>(view), freeze) == Result::Ok;
+        }
+
+        // 0.31.0: one state of the view's own cursor ("arrow", "pointer", "text"); imagePath relative to the view's
+        // folder (no absolute path from a script), "" clears the state, "none" (arrow) = the page draws its own.
+        bool SetCursor(RE::StaticFunctionTag*, std::int32_t view, RE::BSFixedString state, RE::BSFixedString imagePath,
+                       float hotX, float hotY, std::int32_t height, bool press)
+        {
+            if (!ScriptMayDrive(view, "SetCursor")) return false;
+            const std::string st = Lower(Str(state));
+            int idx = -1;
+            if (st == "arrow" || st == "default") idx = 0;
+            else if (st == "pointer" || st == "hand") idx = 1;
+            else if (st == "text") idx = 2;
+            const std::string path = Str(imagePath);
+            if (idx < 0) {
+                RefuseOnce("SetCursor|state|" + st, "SetCursor(view " + std::to_string(view) + ", '" + Str(state) +
+                           "') refused - the state is \"arrow\", \"pointer\" or \"text\"");
+                return false;
+            }
+            if (!path.empty() && path.size() > 1 && path[1] == ':') {
+                RefuseOnce("SetCursor|abs|" + std::to_string(view), "SetCursor(view " + std::to_string(view) +
+                           ") refused - a script's image path is relative to the mod folder");
+                return false;
+            }
+            MAGELIGHT_API::CursorDesc d{};
+            d.size = sizeof(d);
+            d.state = static_cast<std::uint32_t>(idx);
+            d.imagePath = path.c_str();
+            d.hotspotX = hotX;
+            d.hotspotY = hotY;
+            d.height = static_cast<float>(height);
+            d.pressShrink = press;
+            return Api4::SetViewCursor(static_cast<ViewId>(view), &d) == Result::Ok;
+        }
+
+        // 0.31.0: every state of the view's own cursor cleared (back to the mod's default or the host cursor).
+        void ClearCursor(RE::StaticFunctionTag*, std::int32_t view)
+        {
+            if (ScriptMayDrive(view, "ClearCursor")) Api4::SetViewCursor(static_cast<ViewId>(view), nullptr);
+        }
+
         // 0.29.0: a UI sound through the game's audio — see PlayUISound.
         void PlaySound(RE::StaticFunctionTag*, std::int32_t view, RE::BSFixedString name)
         {
@@ -456,11 +502,14 @@ namespace Magelight::Papyrus {
             vm->RegisterFunction("BindHotkey", kScript, BindHotkey);
             vm->RegisterFunction("SetCutout", kScript, SetCutout);
             vm->RegisterFunction("SetHibernate", kScript, SetHibernate);
+            vm->RegisterFunction("SetFreezeWorld", kScript, SetFreezeWorld);
+            vm->RegisterFunction("SetCursor", kScript, SetCursor);
+            vm->RegisterFunction("ClearCursor", kScript, ClearCursor);
             vm->RegisterFunction("RegisterListener", kScript, RegisterListener);
             vm->RegisterFunction("GetLastError", kScript, GetLastError);
             vm->RegisterFunction("PlaySound", kScript, PlaySound);
             vm->RegisterFunction("SetNetworkPolicy", kScript, SetNetworkPolicy);
-            SKSE::log::info("Magelight[papyrus]: 24 natives registered on script '{}'", kScript);
+            SKSE::log::info("Magelight[papyrus]: 25 natives registered on script '{}'", kScript);
             return true;
         }
 

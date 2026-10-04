@@ -243,7 +243,8 @@ namespace MAGELIGHT_API {
         FocusDenied = 6,      // another mod asked for UI mode while you own it; detail = its modId
         DisplayResized = 7,   // x = width, y = height (backbuffer pixels)
         ConsoleMessage = 8,   // detail = every console argument stringified and space-joined (objects as
-                              // JSON); x = level (0 log, 1 warning, 2 error); y = source line
+                              // JSON); x = level (0 log, 1 warning, 2 error); y = source line. Every message,
+                              // whatever Magelight.log records of it (QueryCapability("consoleLog"), 0.31.0)
         RenderDead = 9,       // the overlay disabled itself for the session (also sent at RegisterMod if already dead)
         HostShutdown = 10,    // reserved
         UIModeRefused = 11,   // your RequestUIMode lost the race on the game thread; detail = reason
@@ -358,6 +359,45 @@ namespace MAGELIGHT_API {
         std::uint8_t  hand;              // 0 either, 1 left, 2 right
     };
 
+    // ── Per-view cursors (0.31.0) ──────────────────────────────────────────
+    // SetViewCursor: the image the flat cursor shows over this view, one per
+    // page state. The state follows the page's CSS cursor: kCursorPointer over
+    // pointer/grab/grabbing, kCursorText over text, kCursorArrow everywhere else
+    // (including cursor: url(...)). A missing pointer image falls back to the
+    // arrow image; a missing text image keeps the host's I-beam.
+    inline constexpr std::uint32_t kCursorArrow   = 0;
+    inline constexpr std::uint32_t kCursorPointer = 1;
+    inline constexpr std::uint32_t kCursorText    = 2;
+    struct CursorDesc {
+        std::uint32_t size;              // = sizeof(CursorDesc)
+        std::uint32_t state;             // kCursorArrow / kCursorPointer / kCursorText
+        const char* imagePath;           // PNG or DDS (anything Windows' image decoder reads), at most 256x256:
+                                         // relative to the mod folder (Data/Magelight/<Mod>/ for a page there,
+                                         // else the page's own folder; no ".."), or absolute. nullptr or ""
+                                         // clears this state. "none" (kCursorArrow only): the page draws its own
+                                         // pointer, so the host draws nothing over this view (flat; VR keeps
+                                         // its pointer)
+        float hotspotX, hotspotY;        // the pointer pixel, in IMAGE pixels from the top-left (CSS url() x y)
+        float height;                    // drawn height in px at 1080p, scaled with the resolution (8-256);
+                                         // 0 = the image's own height
+        bool pressShrink;                // shrink about the hotspot while the button is down, like the host arrow
+    };
+
+    // ── Cursor tint (0.31.1) ───────────────────────────────────────────────
+    // SetViewCursorTint recolours the host's DRAWN cursor over this view (the
+    // arrow, its hover glow and the I-beam keep their shape, sharpness and the
+    // player's cursorHeight) and the VR laser dot (lit core, ink rim). Each
+    // colour is 0xAARRGGBB: alpha 0 keeps the host's colour, any other alpha
+    // uses the colour, drawn opaque.
+    struct CursorTint {
+        std::uint32_t size;              // = sizeof(CursorTint)
+        std::uint32_t lit;               // the arrow's lit facet (host: steel 0xFFD8CCB0); the VR dot's core
+        std::uint32_t shade;             // the arrow's shaded facet (host: 0xFF7D6E52)
+        std::uint32_t ink;               // the outline (host: 0xFF120E0A); the VR dot's rim
+        std::uint32_t glow;              // the hover glow over a clickable element (host: brass 0xFFECC983)
+        std::uint32_t ibeam;             // the I-beam over text (host: vellum 0xFFF0E4C9)
+    };
+
     // Actions for BindHotkey (one binding per DirectInput scancode, process-wide).
     inline constexpr std::uint32_t kHotkeyActionUnbind = 0;             // scancode 0 = every binding of the view
     inline constexpr std::uint32_t kHotkeyActionToggleUIMode = 1;       // RequestUIMode / ReleaseUIMode + hide
@@ -425,17 +465,22 @@ namespace MAGELIGHT_API {
         void   (*GetDisplaySize)(std::int32_t* w, std::int32_t* h);   // 0,0 before the first frame
         std::int32_t (*QueryCapability)(const char* name);  // 1/0. Case-insensitive here. The authoritative
                                                             // name list is QueryCapability() in the host; as of
-                                                            // 0.28.4: "gpu" "textureImage" "clipPathHole"
+                                                            // 0.31.1: "gpu" "textureImage" "clipPathHole"
                                                             // "pause" "events" "clipboard" "networkDeny"
                                                             // "sessions" "manifest" "http" "vr" "hotkeys"
                                                             // "evaljs" "pagebridge" "cutout" "hibernate"
                                                             // "inspector" "ime" (0.27.0) "loopback"
                                                             // "escapeCapture" "viewOrder" "scrollStep" (0.28.0)
-                                                            // "networkPolicy" (0.28.2) "sound" (0.29.0). The page-injected
-                                                            // window.__MAGELIGHT__.capabilities (SDK: host.can)
-                                                            // and the SDK mock carry
-                                                            // this same set under the camelCase spellings shown
-                                                            // (the page side is a plain key lookup).
+                                                            // "networkPolicy" (0.28.2) "sound" (0.29.0)
+                                                            // "freezeWorld" "consoleLog" (0.31.0: not 1/0 but
+                                                            // which page console messages Magelight.log
+                                                            // records, 0 none, 1 errors, 2 warnings and
+                                                            // errors, 3 all) "loadStagger" "loadOnShow"
+                                                            // "cursor" (0.31.0) "cursorTint" (0.31.1). The
+                                                            // page-injected window.__MAGELIGHT__.capabilities
+                                                            // (SDK: host.can) and the SDK mock carry this same
+                                                            // set under the camelCase spellings shown (the page
+                                                            // side is a plain key lookup).
         const char* (*GetLastErrorMessage)(ModId mod);      // per-mod storage, valid until the mod's next failing
                                                             // call or UnregisterMod — copy it; "" if none
         Result (*BindHotkey)(ViewId view, std::uint32_t dxScancode, std::uint32_t action);  // kHotkeyAction*; Busy names
@@ -577,6 +622,46 @@ namespace MAGELIGHT_API {
         // module and skipped. Null fn: InvalidArgument; before SKSE's task
         // interface exists: NotReady.
         Result (*PostGameTask)(GameTaskFn fn, void* user);
+        // ── appended in 0.31.0 — gate SetViewFreezeWorld on hostVersionNumber >= 3100. Unreleased 0.31.0 test
+        // builds lack SetViewLoadOnShow and SetViewCursor: gate those two on >= 3101, or on >= 3100 together with
+        // QueryCapability("loadonshow") / ("cursor") == 1 ──
+        // The game skips its 3D world render behind this view (a frozen frame
+        // shows instead) while the view holds UI mode with kUIModeFlagPause. Any
+        // thread; a per-view preference kept until changed or the view is
+        // destroyed, applied and dropped by the host as pause and focus move.
+        // Flat only: QueryCapability("freezeworld") == 0 and Unsupported on VR
+        // or when the player set Magelight.json "freezeWorld": false.
+        Result (*SetViewFreezeWorld)(ViewId view, bool freeze);
+        // The view's FIRST page load waits until it is shown (ShowView(true), or
+        // UI-mode entry, which shows it); DOM ready, and every call queued for
+        // the page, follow that load. For panels that are rarely opened: no
+        // load cost at all until then. Decides only a load that has not
+        // started: call it right after CreateViewEx, before the world loads
+        // (a view created mid-session may already be loading; Ok either way,
+        // a loaded page stays loaded). Never wait for DOM ready before showing
+        // such a view. Any thread. Manifest key "loadOnShow".
+        Result (*SetViewLoadOnShow)(ViewId view, bool onShow);
+        // Your own cursor over this view (see CursorDesc): one call per state,
+        // kept until changed or the view is destroyed. desc == nullptr clears
+        // every state, back to the host cursor (or the mod's manifest default,
+        // which a view without a cursor of its own uses). The image decodes on
+        // a worker the first time it is drawn; until then, and if it fails
+        // (logged once), the host cursor shows. The player can override it
+        // (Magelight.json "cursorForce" / "modCursors"). InvalidArgument for a
+        // bad size or state, a relative path that leaves the mod folder, or
+        // a missing file. Any thread. QueryCapability("cursor"). Manifest key
+        // "cursor".
+        Result (*SetViewCursor)(ViewId view, const CursorDesc* desc);
+        // ── appended in 0.31.1 — gate on hostVersionNumber >= 3101 ──
+        // The host's drawn cursor over this view in your colours (see
+        // CursorTint), kept until changed or the view is destroyed; nullptr
+        // gives the host's colours back. The view's own images (SetViewCursor,
+        // the manifest's "cursor") still win over the tint; on flat the
+        // player's cursorFile replaces the drawn cursor, and "cursorForce" and
+        // "modCursors": false drop the tint. The VR dot takes the new colours
+        // at the panel's next redraw. Any thread. InvalidArgument for a bad
+        // size. QueryCapability("cursortint").
+        Result (*SetViewCursorTint)(ViewId view, const CursorTint* tint);
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)

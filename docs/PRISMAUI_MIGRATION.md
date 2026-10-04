@@ -85,10 +85,11 @@ function-pointer struct, null = host absent). The calls SA used map one-to-one:
 | `HasAnyActiveFocus()` | `IsUIModeActive()` | per-host — see [Running both](#running-both) |
 | `Invoke(view, js)` | `InvokeJS(view, js)` / `EvalJS` | EvalJS also returns result/exception |
 | `InteropCall` / `RegisterJSListener` | same names | `RegisterJSListenerEx` adds a `void* user` |
+| `kFreezeFrameBackground` / `kTopmostRenderedMenu` on `PrismaUI_FocusMenu` | `SetViewFreezeWorld(view, true)` (0.31.0) | once per view; the host applies it while the view holds UI mode paused and drops it before the pause. Never set flags on `MagelightFocus` yourself |
 | FocusMenu close polling | **delete it** | `onEvent` gets `UIModeExited` on *every* exit path — no Escape poller, no orphaned FocusMenu |
 | Destroy (unused by most) | `DestroyView(view)` | async; views can also `ReloadView`/`Navigate` |
 
-Three behavioral differences to design around:
+Five behavioral differences to design around:
 
 1. **Threading contract is explicit.** `onEvent` and `EvalJS` results arrive on the callback
    thread you pick at `RegisterMod` (default: game thread — the only thread where `RE::` is
@@ -103,6 +104,19 @@ Three behavioral differences to design around:
 3. **Failures name themselves.** `GetLastErrorMessage(mod)`, load-failure events with the
    resolved path, page console in `Magelight.log` — instead of a blank view with nothing in
    the log.
+4. **A hidden page is ready a little later** (0.31.0). Pages load one per frame after a save
+   loads, so a hidden view's DOM ready can come up to about a second later than before; showing
+   the view (or giving it UI mode) loads it at once, and calls made before DOM ready are
+   delivered after it. Never gate an open on DOM ready: a bridge that refuses to show its view
+   until DOM ready waits for the whole queue. `SetViewLoadOnShow` holds a rarely used panel's load until
+   its first show ([CPP.md](CPP.md), "When pages load").
+5. **The cursor is drawn by the host, not Windows.** PrismaUI showed the Windows pointer for
+   every CSS keyword; Magelight draws its own and tells three states apart (arrow, pointer over
+   `pointer`/`grab`, I-beam over text), so `not-allowed` and the resize keywords show the arrow.
+   Since 0.31.0 a mod can supply its own images per state (`SetViewCursor`, manifest `cursor`)
+   and CSS `cursor: none` hides the host's for a page that draws its own ([CPP.md](CPP.md),
+   "Your own cursor"). Since 0.31.1 `SetViewCursorTint` recolours the host's drawn cursor to
+   match your palette, with no image files ([CPP.md](CPP.md), "Tinting the host cursor").
 
 ## Distribution changes
 
@@ -122,7 +136,7 @@ If your mod is Papyrus-only, you were never on PrismaUI — start at
    by hand) and iterate in a plain browser with the SDK's mock host — no game needed.
 2. Swap the native calls per the table; delete your Escape poller and FocusMenu plumbing.
 3. Smoke-test in the desktop harness (`tools/desktop-harness`), then in game with
-   `"devMode": true` for hot reload and the on-page error banner (page console output is in
-   `Magelight.log` either way).
+   `"devMode": true` for hot reload, the on-page error banner and every page console line in
+   `Magelight.log` (without it the log records console warnings and errors only, 0.31.0).
 4. Ship to a small test group *with both hosts installed* — coexistence is the thing to
    exercise, and it's the configuration your users will actually have during any transition.

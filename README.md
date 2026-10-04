@@ -65,7 +65,9 @@ and that no other mod binds: one binding per key, and the first binder keeps it.
 
 - **GPU rendering** on the game's device, transparent compositing, per-view z-order in four
   layers (`hud` < `panel` < `popup` < `system`); CPU fallback if the GPU path cannot start.
-- **Input**: mouse via the game's input sink, keys and text via the window; an own-drawn cursor;
+- **Input**: mouse via the game's input sink, keys and text via the window; an own-drawn cursor
+  (a mod can bring its own per view, or hide it for a page that draws its own, 0.31.0, or recolour
+  the drawn one, 0.31.1);
   clipboard; hotkeys that never fire over an engine menu, the console or game text entry, and
   never open another mod's page while you are typing. On flat, pages take mouse and keyboard;
   controller navigation inside a page is up to each mod. On VR, the controller laser points
@@ -90,9 +92,11 @@ and that no other mod binds: one binding per key, and the first binder keeps it.
 - **Page identity** (0.30.0): a page's `window.magelight.send` reaches only its own view's
   listeners; one page cannot act as another view.
 - **Lifecycle**: create, show, reload, navigate, destroy; load failures name the page in the log
-  instead of leaving a blank rectangle.
+  instead of leaving a blank rectangle. Pages load one per frame after a save loads, an opened
+  view first, and a view can wait for its first show (`loadOnShow`, 0.31.0).
 - **Dev loop** (`"devMode": true` in `Magelight.json`): edit a page and it reloads in game; JS
-  errors paint a banner on the page itself. The WebKit Web Inspector (staged by `build.ps1`,
+  errors paint a banner on the page itself, and every page console line reaches the log (without
+  devMode, warnings and errors only; `consoleLog` sets it either way). The WebKit Web Inspector (staged by `build.ps1`,
   not in the player download) is hosted by Magelight; a C++ mod opens it with `ShowInspector` (there is no key for
   it).
 - **Coexistence**: a version gate lists mods that need a newer host; the Ultralight runtime ships
@@ -154,7 +158,7 @@ download and are installed beside the runtime under `SKSE/Plugins/Magelight/lice
   itself ([docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)).
 - **MagelightGPU.dll** — LGPL-2.1, derived from Ultralight's AppCore D3D11 driver and isolated in
   its own DLL behind a C ABI; its corresponding source is the `gpu/` folder of this repository
-  at each release's tag (`v0.30.4` for 0.30.4).
+  at each release's tag (`v0.31.1` for 0.31.1).
 - **Web Inspector** (staged by `build.ps1`, not in the player download) — Apple BSD.
 - Compiled into `Magelight.dll`: CommonLibVR (MinLL's MIT continuation of CommonLibSSE-NG),
   {fmt}, spdlog, nlohmann/json, DirectXMath and DirectXTK — MIT; rapidcsv, Xbyak and the

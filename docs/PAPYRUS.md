@@ -87,6 +87,9 @@ storage jar a plugin uses (see [Which mods a script can drive](#which-mods-a-scr
 | `BindHotkey(view, dxScancode, action)` | 1 toggle UI mode · 2 toggle UI mode paused · 3 toggle visible · 0 unbind. The host's toggle key (PageUp, 201) is refused. Avoid keys the game binds (F5 Quicksave, F9 Quickload), F12 (Steam's screenshot key) and keys other mods are likely to use: the press that opens a view also reaches the game |
 | `SetCutout(view, x, y, w, h)` | see-through rectangle (view pixels); `w = 0` clears |
 | `SetHibernate(view, idleMs)` | free a hidden view's texture after `idleMs`; showing reloads it |
+| `SetFreezeWorld(view, freeze)` | 0.31.0. While the view holds UI mode with `pauseGame`, the game skips its 3D world render behind it (a frozen frame shows): for opaque fullscreen pages. Kept until changed; `false` on VR or when `Magelight.json` sets `"freezeWorld": false` |
+| `SetCursor(view, cursorState, imagePath, hotX, hotY, height, press)` | 0.31.0; guard with `GetVersion() >= 3101` (unreleased 0.31.0 builds lack it). The view's own cursor for one page state: `"arrow"`, `"pointer"` (over a clickable element) or `"text"`. `imagePath` is a PNG or DDS up to 256x256 relative to the mod folder (`Data/Magelight/<Mod>/` for a page there, else the page's own folder) (no absolute path, no `..`); `""` clears that state; `"none"` (arrow) hides the host cursor over the view because the page draws its own. `hotX`/`hotY` = the pointer pixel in image pixels, `height` = px at 1080p (0 = the image's own), `press` = shrink on a click. `false` for a bad state or path, a missing file, or a view the script may not drive. The player may override it in `Magelight.json`. A manifest mod can declare the same with its `cursor` key and needs no script |
+| `ClearCursor(view)` | 0.31.0; guard like `SetCursor`. Every state cleared: the manifest's default cursor, else the host cursor |
 | `RegisterListener(view, name)` | page calls `window.name(payload)` → ModEvent `Magelight_JS_name` |
 | `SetNetworkPolicy(modId, policy)` | 0.30.0. `"file"` (the default) or `"loopback"`, case-insensitive; `true` when applied. `"any"`, an unknown word or a plugin-owned mod returns `false`. See [Network](#network) |
 | `GetLastError(modId)` | why the mod's last failed host call failed (UI mode held, hotkey taken, …); works for any mod. The ownership refusals below are logged to `Magelight.log` only |
@@ -110,7 +113,8 @@ view id. `sender` is always None.
 the view id for all of them.
 
 Events are global: every script hears every mod's events, so filter on the modId in `strArg`.
-Console messages are not forwarded (they stay in `Magelight.log`).
+Console messages are not forwarded; `Magelight.log` records a page's warnings and errors, and
+every console line with `"consoleLog": "all"` or `"devMode": true` in `Magelight.json` (0.31.0).
 
 ## Which mods a script can drive
 
@@ -126,8 +130,8 @@ A script may act only on script-owned mods. With a plugin-owned slug, `RegisterM
 `CreateView`, `ReleaseUIMode` and `SetNetworkPolicy` return `false` (or 0) and log one line (once
 per function and slug, so a script retrying on every load does not flood the log). On a
 plugin-owned mod's view, `DestroyView`, `ShowView`, `RequestUIMode`, `ReloadView`, `Call`, `Eval`,
-`EvalAsync`, `BindHotkey`, `SetCutout`, `SetHibernate`, `RegisterListener` and `PlaySound` do
-nothing and return `false` (or 0). `FindView`, `IsVisible`, `IsUIModeActive`, `GetUIModeView`,
+`EvalAsync`, `BindHotkey`, `SetCutout`, `SetHibernate`, `SetFreezeWorld`, `SetCursor`, `ClearCursor`,
+`RegisterListener` and `PlaySound` do nothing and return `false` (or 0). `FindView`, `IsVisible`, `IsUIModeActive`, `GetUIModeView`,
 `GetLastError`, `GetVersion`, `GetVersionString` and `IsReady` still work for any mod. A plugin
 that wants scripts to open its panel exposes its own Papyrus native
 (`examples/Magelight.InspectTarget` shows how). Before 0.30.0 a script could reuse a plugin's
@@ -170,3 +174,8 @@ Before 0.30.0 every page could reach loopback without asking.
   focus only its own key fires (to close).
 - Pages are file-only unless the mod opts into loopback (see [Network](#network)).
 - `Magelight_ViewDomReady` fires again after every reload; re-send state from there.
+- A hidden view's page can take up to about a second longer after a load to reach DOM ready
+  (0.31.0: pages load one per frame, an opened view first). Showing a view loads it at once; `Call` and `Eval`
+  made before DOM ready are delivered after it. A manifest view with `"loadOnShow": true` loads
+  only when first shown (there is no script call for it: a script's `CreateView` runs after the
+  world loaded, too late to hold back the first load).

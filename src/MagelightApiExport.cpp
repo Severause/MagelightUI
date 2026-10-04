@@ -136,6 +136,12 @@ namespace {
         &Magelight::Api4::SetViewSounds,
         // 0.30.1 appendix
         &Magelight::Api4::PostGameTask,
+        // 0.31.0 appendix
+        &Magelight::Api4::SetViewFreezeWorld,
+        &Magelight::Api4::SetViewLoadOnShow,
+        &Magelight::Api4::SetViewCursor,
+        // 0.31.1 appendix
+        &Magelight::Api4::SetViewCursorTint,
     };
 
 }  // namespace

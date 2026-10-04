@@ -69,6 +69,20 @@ Function SetCutout(int view, int x, int y, int w, int h) Global Native
 ; A view hidden longer than idleMs frees its texture; showing it reloads the page (ViewDomReady
 ; fires again). 0 = never. Good for popups that spend most of the game hidden.
 Function SetHibernate(int view, int idleMs) Global Native
+; While the view holds UI mode with pauseGame, the game skips its 3D world render behind it (a
+; frozen frame shows instead): for an opaque fullscreen page. Kept until changed. False on VR, when
+; the player turned it off in Magelight.json, or for a view the script may not drive. Host 0.31.0+.
+bool Function SetFreezeWorld(int view, bool freeze) Global Native
+; Your own cursor over the view, one page state at a time: cursorState "arrow", "pointer" (over a clickable
+; element) or "text". imagePath: a PNG or DDS up to 256x256, relative to the mod folder
+; (Data/Magelight/<Mod>/ for a page there, else the page's own folder); "" clears
+; the state; "none" (arrow) hides the host cursor over the view because the page draws its own. hotX/hotY
+; = the pointer pixel in image pixels, height = px at 1080p (0 = the image's own), press = shrink on a
+; click. The player may override it in Magelight.json. Host 0.31.1+ (guard with GetVersion() >= 3101: unreleased 0.31.0 builds lack it).
+bool Function SetCursor(int view, string cursorState, string imagePath, float hotX = 0.0, float hotY = 0.0, \
+    int height = 0, bool press = false) Global Native
+; Every state cleared: back to the manifest's default cursor or the host cursor. Host 0.31.0+.
+Function ClearCursor(int view) Global Native
 ; Expose window.<name>(payload) on the page; each call raises ModEvent Magelight_JS_<name>.
 ; "magelight" and names starting "__" belong to the host's page script: false.
 bool Function RegisterListener(int view, string name) Global Native

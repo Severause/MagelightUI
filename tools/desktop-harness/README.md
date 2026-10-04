@@ -12,7 +12,8 @@ rendering questions can be answered in a minute instead of a game cycle.
 ## Build (once)
 
 ```
-build.bat      -> harness.exe        (needs the UNPATCHED C:\b\mgl\MagelightGPU.dll beside it:
+build.bat      -> harness.exe        (needs the UNPATCHED C:\b\mgl\MagelightGPU.dll beside it, or
+                                      $MG_BUILD_DIR\MagelightGPU.dll when you built with MG_BUILD_DIR:
                                       the stage copy imports the namespaced runtime names)
 build2.bat     -> probe_appcore.exe
 ```
@@ -27,6 +28,8 @@ load `file:///sa/index.html`.
 ```
 harness.exe [url] [viewW] [viewH]        default: file:///sa/index.html 2560 1440
 ```
+
+The harness draws with 4x MSAA, the host's default; set `MG_MSAA` (1 off, 2, 4, 8) to compare.
 
 `harness.exe` evaluates `inject.js` (next to the exe) into the page ~400 frames in, which is how a
 live CSS bisect works: edit the file, rerun, screenshot. It also carries a scripted walk into

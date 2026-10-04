@@ -231,7 +231,13 @@ where the runtime keyboard owns text entry.
 - **Inspector, z-order, scroll step.** `ShowInspector`, `SetViewOrder`,
   `SetScrollStep` — see the header (`QueryCapability("inspector")`,
   `"vieworder"`, `"scrollstep"`). Page console output reaches you as the
-  `ConsoleMessage` host event; there is no separate console callback.
+  `ConsoleMessage` host event; there is no separate console callback. The
+  event carries every message in full; `Magelight.log` records only what the
+  player's `consoleLog` allows (0.31.0: warnings and errors by default, cut at
+  2 KB, 20 lines a second per view). `QueryCapability("consolelog")` answers
+  that level (0 none, 1 errors, 2 warnings, 3 all); forward your own lines
+  from the event when you need them and it is below 3. Keep secrets out of a
+  page's console output either way.
 
 ## UI sounds (0.29.0)
 
@@ -277,11 +283,174 @@ surface (SECURITY.md) and would bypass the audio settings.
   nothing is hidden or re-shown, so your close detection never fires. Gate
   on `hostVersionNumber >= 2611`.
 
+## Freezing the world behind a fullscreen page (0.31.0)
+
+`SetViewFreezeWorld(view, true)` asks the game to skip its 3D world render
+while `view` holds UI mode with `kUIModeFlagPause`: the engine shows a frozen
+frame instead (expected from the Journal's freeze flag; the flag alone is
+untested in game as of 0.31.0, and the saving is still to be measured).
+It is a per-view preference, callable from any thread and kept until you
+change it or destroy the view; the host applies it on the game thread.
+
+- **Pause is required.** A freeze over a running game hangs it, so the host
+  sets the freeze only while its own menu holds the pause, and drops it
+  before the pause whenever the view is unpaused in place, another view takes
+  UI mode, UI mode closes or a load starts. If another mod lets the game run
+  under it, the host drops it within a fraction of a second.
+- **Opaque pages only.** The HUD is expected to keep drawing under the page,
+  and anything translucent shows the frozen frame, not the live world.
+- **Flat only.** Untested on VR, so excluded as a precaution (the frozen frame
+  may never be drawn in the headset): `QueryCapability("freezeworld")` answers 0 and the call returns
+  `Unsupported`. The player can turn it off for every mod with
+  `"freezeWorld": false` in `Magelight.json`; then it answers 0 too.
+- **Never set menu flags yourself.** `kFreezeFrameBackground` and
+  `kTopmostRenderedMenu` on `MagelightFocus` (the PrismaUI recipe) would not
+  outlive a pause retarget safely, and `kTopmostRenderedMenu` stops the UI
+  pass that draws your page behind an upscaler.
+
+```cpp
+if (v4()->hostVersionNumber >= 3100 && v4()->QueryCapability("freezeworld") == 1)
+    v4()->SetViewFreezeWorld(dashboard, true);   // once; takes effect while it holds UI mode paused
+```
+
+## When pages load (0.31.0)
+
+A view's page loads some time after `CreateViewEx`, never inside it; DOM ready
+(your `onDomReady`, the `ViewDomReady` event) follows the load. Since 0.31.0
+the host spreads first loads over frames instead of starting every registered
+view in the frame the world becomes ready (each page's parse and first script
+run otherwise land in the same few frames after a save loads):
+
+- A view loads at once when it is visible at creation (`startVisible`) or is
+  shown (`ShowView(true)` or UI-mode entry) before its page has loaded, so an
+  open never waits behind other views.
+- The others wait in a queue in the order they were created. One starts per
+  frame, and the next only once the previous page reached DOM ready or failed
+  (or 100 ms passed) and the frame's Ultralight update ran under the player's
+  `loadBudgetMs` (default 8 ms). A batch lasts at most about a second;
+  whatever is still waiting then starts together. The log line
+  `staggered load - N views over F frames in T ms` sums each batch.
+- Calls made before DOM ready (`RegisterJSListenerEx`, `InteropCall`,
+  `InvokeJS`, `EvalJS`) stay queued on the view and are delivered after it, as
+  for any view created before the world loaded. A consumer that waits for DOM
+  ready before it shows a view (or refuses to show it until then) waits for
+  the queue as well, up to about a second after a load plus its page's own
+  load. Show the view instead: showing it loads it at once.
+- `QueryCapability("loadstagger")` is 1 while staggering is on; the player
+  turns it off with `"loadStagger": false` in `Magelight.json` (every waiting
+  view then loads in one frame, as before 0.31.0).
+
+`SetViewLoadOnShow(view, true)` goes further for a panel that is rarely
+opened: its page is not loaded at all until the view is first shown. Call it
+right after `CreateViewEx`, before the world loads (manifest views take the
+`loadOnShow` key); it decides only a load that has not started, and a loaded
+page stays loaded. Such a view's DOM ready comes after its first show, so
+never wait for it before showing the view.
+
+```cpp
+if (v4()->hostVersionNumber >= 3100 && v4()->QueryCapability("loadonshow") == 1)
+    v4()->SetViewLoadOnShow(settingsPanel, true);   // right after CreateViewEx
+```
+
+## Your own cursor (0.31.0)
+
+The flat cursor is the host's by default: a drawn arrow that glows over a
+clickable element and turns into an I-beam over text. `SetViewCursor` gives a
+view its own images, one per page state, chosen from the page's CSS cursor:
+
+| State | Shown over | Without an image |
+|---|---|---|
+| `kCursorArrow` | everything not below, `cursor: url(...)` included | the host arrow |
+| `kCursorPointer` | `cursor: pointer`, `grab`, `grabbing` | the view's arrow image, else the host arrow |
+| `kCursorText` | text (`cursor: text`) | the host I-beam (the caret hint matters more than the look) |
+
+```cpp
+if (v4()->hostVersionNumber >= 3100 && v4()->QueryCapability("cursor") == 1) {
+    MAGELIGHT_API::CursorDesc d{ sizeof(d) };
+    d.state = MAGELIGHT_API::kCursorArrow;
+    d.imagePath = "views/cursor/arrow.png";   // relative to the mod folder, or absolute
+    d.hotspotX = 3; d.hotspotY = 1;           // image pixels, like CSS cursor: url(x) 3 1
+    d.height = 28;                            // px at 1080p, scaled with the resolution; 0 = the image's own
+    d.pressShrink = true;                     // shrink about the hotspot on a click, like the host arrow
+    v4()->SetViewCursor(view, &d);
+    d.state = MAGELIGHT_API::kCursorPointer;
+    d.imagePath = "views/cursor/hand.png";
+    v4()->SetViewCursor(view, &d);
+}
+// later: v4()->SetViewCursor(view, nullptr) clears every state
+```
+
+- One call per state, kept until changed or the view is destroyed; an empty
+  `imagePath` clears that state, `nullptr` clears them all. Any thread.
+- Images are PNG or DDS (anything Windows' image decoder reads), at most
+  256x256. A relative path resolves against the mod folder (`Data/Magelight/
+  <Mod>/` for a page there, else the page's own folder) and may not contain
+  `..`; a plugin may pass an absolute path. A missing file is
+  `InvalidArgument`. The image decodes on a worker thread the first time it is
+  drawn, never inside a frame, and is shared by every view that names the
+  same file with the same hotspot, height and press; until it is ready, and
+  if it fails (one log line), the host cursor shows.
+- `imagePath = "none"` (state `kCursorArrow`) says the page draws its own
+  pointer: the host draws nothing over the view. A page can say the same with
+  CSS `cursor: none`, on any element. Either only takes effect while the
+  pointer is inside that view, and every page's cursor is forgotten when UI
+  mode closes, so a page cannot leave the player without a pointer.
+- A view with no cursor of its own uses its mod's default (the manifest's
+  top-level `"cursor"`), then the host cursor (the player's `cursorFile`, else
+  the drawn art).
+- The player can override all of it: `Magelight.json` `"cursorForce": true`
+  shows the host cursor everywhere, even over a page that hides the pointer;
+  `"modCursors": false` ignores mod images (a page that hides the pointer
+  still hides it). Design for the host cursor too.
+- VR keeps its laser dot. With `vr.cursorDot` false the laser end shows the
+  view's image for the page state (text falls back to the arrow image; the
+  size comes from the panel, `vr.cursorScale`); `"none"` and `cursor: none`
+  are ignored there.
+- The hover glow belongs to the drawn art and does not carry over: give the
+  pointer state its own image if you want hover feedback.
+
+The manifest equivalent is the `cursor` key ([MANIFEST.md](MANIFEST.md)), and
+Papyrus has `SetCursor` / `ClearCursor` ([PAPYRUS.md](PAPYRUS.md)).
+
+## Tinting the host cursor (0.31.1)
+
+To match a page's colours without image files, recolour the host's own drawn
+cursor over the view. It keeps its shape, hover glow, press-shrink, I-beam and
+the player's `cursorHeight`, and stays sharp at every resolution:
+
+```cpp
+if (v4()->hostVersionNumber >= 3101 && v4()->QueryCapability("cursortint") == 1) {
+    MAGELIGHT_API::CursorTint t{ sizeof(t) };
+    t.lit   = 0xFFDCE6F0;   // 0xAARRGGBB; alpha 0 keeps the host's colour, any other is drawn opaque
+    t.shade = 0xFF6E8296;
+    t.ink   = 0xFF0B1118;
+    t.glow  = 0xFF7CB2CE;   // the hover glow over a clickable element
+    t.ibeam = 0xFFDCE6F0;   // the I-beam over text
+    v4()->SetViewCursorTint(view, &t);
+}
+// later: v4()->SetViewCursorTint(view, nullptr) gives the host's colours back
+```
+
+- Kept until changed or the view is destroyed. Any thread; the cursor is
+  rebuilt on the render thread the next time it is drawn over the view. Set it
+  when the colours change, not every frame: each new tint builds its textures,
+  and the host keeps four.
+- The view's own images (`SetViewCursor`, the manifest's `"cursor"`) win over
+  the tint. On flat the player's `cursorFile` replaces the drawn cursor, and
+  `"cursorForce": true` or `"modCursors": false` drop the tint, as they drop
+  images.
+- VR: the laser dot takes `lit` for its core and `ink` for its rim, at the
+  panel's next redraw (`"cursorForce": true` and `"modCursors": false` drop it
+  there too). With `vr.cursorDot` false the laser end shows the view's image,
+  the player's `cursorFile` or the baked arrow, none of them tinted.
+- C++ only: there is no manifest key or Papyrus call for the tint.
+
 ## When something doesn't work
 
 Every failure is logged to `My Games\Skyrim Special Edition\SKSE\Magelight.log`
 (`Skyrim VR` on VR, `Skyrim Special Edition GOG` on GOG) with your mod id and
 the view name. `GetLastErrorMessage(mod)` returns the last
-per-mod failure string. Page console output always goes to the same log;
-`"devMode": true` in `Magelight.json` adds hot reload and an on-page banner for
-script errors. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+per-mod failure string. Page console warnings and errors go to the same log
+(every console line with `"consoleLog": "all"` or `"devMode": true` in
+`Magelight.json`, 0.31.0); devMode also adds hot reload and an on-page banner
+for script errors. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

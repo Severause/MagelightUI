@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <string>
 
+namespace Magelight { struct CursorSet; }   // Magelight.h
+
 namespace Magelight::Api4 {
 
     using MAGELIGHT_API::ImageId;
@@ -119,6 +121,13 @@ namespace Magelight::Api4 {
     Result PlayUISound(ViewId view, const char* name);                        // 0.29.0 host-played UI sound
     Result SetViewSounds(ViewId view, const char* open, const char* close);   // 0.29.0 open/close sounds for a view
     Result PostGameTask(MAGELIGHT_API::GameTaskFn fn, void* user);              // 0.30.1 game-thread task, safe in a frame
+    Result SetViewFreezeWorld(ViewId view, bool freeze);                        // 0.31.0 world freeze behind a paused page
+    Result SetViewLoadOnShow(ViewId view, bool onShow);                         // 0.31.0 first load waits for a show
+    Result SetViewCursor(ViewId view, const MAGELIGHT_API::CursorDesc* desc);    // 0.31.0 the view's own cursor
+    Result SetViewCursorTint(ViewId view, const MAGELIGHT_API::CursorTint* tint); // 0.31.1 the drawn cursor's colours
+    // 0.31.0: a manifest's top-level "cursor", the default for every view of the mod without a cursor of its own
+    // (existing views now, later ones at CreateViewEx).
+    void SetModCursor(ModId mod, const Magelight::CursorSet& set);
     // Mods refused with HostTooOld, as the version gate's payload:
     // {"host":"x.y.z","mods":[{"modId":"..","needs":packed},..]}; "" when none.
     std::string TooOldJson();

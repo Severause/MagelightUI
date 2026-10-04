@@ -35,6 +35,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <climits>
@@ -73,6 +74,7 @@ namespace Magelight {
     //   "imageProbe": false   // create the ImageSource probe page (views/probe)
     //   "devMode": false      // hot reload every v4 page folder, JS error overlay (reload/inspector keys unbound for now)
     //   "fontHinting": "normal", "fontGamma": 1.8   // text rasterization: smooth|normal|monochrome|none, gamma 1.0-3.0
+    //   "msaa": 4             // GPU path: anti-aliasing samples for page shapes (1 = off, 2, 4, 8)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
     //            "suppressRuntimeLaser": true, "aimUseTip": true, "aimPitchDeg": -35,
@@ -85,8 +87,14 @@ namespace Magelight {
     //                                                  // with an absolute floor in degrees
     //                                                  // Skyrim VR presenter (docs/VR_PRESENTER.md)
     //   "logLevel": "info"    // trace | debug | info | warn | error — Magelight.log verbosity
+    //   "consoleLog": "warnings"   // 0.31.0: none | errors | warnings | all — page console lines written to the
+    //                              // log (unset: "all" in devMode, else "warnings")
     //   "stallWatchdog": true, "stallThresholdMs": 1500   // 0.28.3: log the stalled thread's stack when no
     //                                                     // frame presents this long (250-60000)
+    //   "loadStagger": true, "loadBudgetMs": 8   // 0.31.0: hidden views start their first load one per frame
+    //                                            // (see MaterializeViews); false = all in one frame (1-100)
+    //   "cursorFile": "", "cursorHeight": 24, "cursorHotspotX": 0, "cursorHotspotY": 0   // the host cursor
+    //   "cursorForce": false, "modCursors": true   // 0.31.0: the player's say over mod cursors (Per-view cursors)
     //   "hotkeys": { "ModId/viewName": "F7", "Other/hud": 0 }   // rebind (or 0 = disable) any mod's hotkey
     // }
     // Toggle key default: PAGE UP (201). Moved off Home in 0.3.1: Home sits
@@ -111,6 +119,11 @@ namespace Magelight {
     // instead of a rebuild per guess.
     static std::string s_fontHinting = "normal";
     static double      s_fontGamma   = 1.8;
+    // Magelight.json "msaa": the GPU driver's MSAA samples (1 off, 2, 4, 8). Ultralight fills SVG and other
+    // non-rectangular shapes as plain triangles and leaves their edges to MSAA; boxes, rounded corners and text
+    // smooth themselves. Each sample adds a copy of every render target in video memory: a page's own (2560x1440:
+    // ~15 MB a sample, held while the view exists, hidden or not) and each layer Ultralight composites inside it.
+    static int         s_msaa        = 4;
     // Cursor art: the flat cursor is drawn in code (MagelightCursorArt.h) and follows the page's CSS cursor.
     // "cursorFile" (relative to the runtime dir, or absolute; default none) replaces it with a still image,
     // "cursorHeight" is the drawn height in px at 1080p (scaled with resolution) and "cursorHotspotX/Y"
@@ -123,6 +136,11 @@ namespace Magelight {
     static float       s_cursorHotX = 0.0f, s_cursorHotY = 0.0f;
     static bool        s_cursorCustom = false;   // custom art loaded (render thread)
     static int         s_cursorImgW = 0, s_cursorImgH = 0;
+    // Mod cursors (0.31.0, see "Per-view cursors"). "cursorForce": true = the host cursor (the cursorFile image,
+    // else the drawn art) everywhere, over every mod cursor and over pages that hide the pointer. "modCursors":
+    // false = mod images are ignored; a page or view that draws its own pointer still hides the host cursor.
+    static std::atomic<bool> s_cursorForce{ false };
+    static std::atomic<bool> s_modCursors{ true };
     // "imageProbe": true — the ImageSource probe (views/probe): a host-repainted
     // texture placed eight ways in a page. Dev-only; see TickImageProbe.
     static bool s_imageProbe = false;
@@ -230,6 +248,9 @@ namespace Magelight {
     static std::atomic<DWORD>     s_lastPresentTid{ 0 };
     static std::atomic<bool>      s_stallWatchdog{ true };
     static std::atomic<int>       s_stallThresholdMs{ 1500 };
+    // Staggered view loading (0.31.0, MaterializeViews): "loadStagger" and "loadBudgetMs" in Magelight.json.
+    static std::atomic<bool>      s_loadStagger{ true };
+    static std::atomic<int>       s_loadBudgetMs{ 8 };
     static std::atomic<bool> s_renderDead{ false };  // latched on any init failure
     static PresentFn         s_origPresent = nullptr;
 
@@ -307,8 +328,9 @@ namespace Magelight {
     static std::atomic<int> s_cursorPosX{ 0 };
     static std::atomic<int> s_cursorPosY{ 0 };
     // The cursor a page asks for (MlView::pageCursor, from ViewListener::OnChangeCursor) picks the drawn cursor's
-    // state; the left button's state (input sink, game thread) its press.
-    enum class PageCursor : int { Arrow = 0, Clickable = 1, Text = 2 };
+    // state; the left button's state (input sink, game thread) its press. None = CSS cursor: none (the page draws
+    // its own pointer), Custom = cursor: url(...) with an image that loaded (the view's own arrow image, if any).
+    enum class PageCursor : int { Arrow = 0, Clickable = 1, Text = 2, None = 3, Custom = 4 };
     static std::atomic<bool> s_mouseDown{ false };
     // Backbuffer size for the cursor clamp (render thread writes, input sink reads).
     static std::atomic<int> s_backbufferW{ 0 }, s_backbufferH{ 0 };
@@ -342,6 +364,18 @@ namespace Magelight {
     // Upscaler, Community Shaders' and Open Shaders' upscaling, whose frame generation drops what is drawn at
     // Present), never on VR. See UiPassActive.
     static std::string s_compositeMode = "auto";
+    // Magelight.json "freezeWorld" (0.31.0, default true): false turns SetViewFreezeWorld off for every mod
+    // (QueryCapability("freezeworld") answers 0). "freezeWorldSkipCapture" (default true) keeps MagelightOverlay out
+    // of the frame the engine captures as the frozen background, so a translucent page cannot ghost over itself.
+    static std::atomic<bool> s_freezeWorldCfg{ true };
+    static std::atomic<bool> s_freezeSkipCapture{ true };
+    // Magelight.json "consoleLog" (0.31.0): which page console messages are written to Magelight.log. A page logs
+    // whatever it likes (one wrote its config, an API key included), so by default only warnings and errors go in.
+    // The ConsoleMessage event reaches the owning mod whatever this says. -1 = unset: All in devMode, else Warnings.
+    enum ConsoleLog : int { kConsoleLogNone = 0, kConsoleLogErrors = 1, kConsoleLogWarnings = 2, kConsoleLogAll = 3 };
+    static std::atomic<int> s_consoleLogCfg{ -1 };
+    static constexpr std::size_t   kConsoleLineMaxBytes = 2048;   // a logged message is cut here (UTF-8 safe)
+    static constexpr std::uint32_t kConsoleLinesPerSec = 20;      // per view; the rest are counted, not logged
 
     // Read Magelight.json from the runtime dir (see the settings block at the
     // top of the file for the schema). Missing/corrupt file = defaults.
@@ -378,12 +412,29 @@ namespace Magelight {
                 s_presentHookMode = HotkeyNames::Lower(it->get<std::string>());
             if (auto it = j.find("composite"); it != j.end() && it->is_string())
                 s_compositeMode = HotkeyNames::Lower(it->get<std::string>());
+            if (auto it = j.find("freezeWorld"); it != j.end() && it->is_boolean())
+                s_freezeWorldCfg.store(it->get<bool>());
+            if (auto it = j.find("freezeWorldSkipCapture"); it != j.end() && it->is_boolean())
+                s_freezeSkipCapture.store(it->get<bool>());
             if (auto it = j.find("devMode"); it != j.end() && it->is_boolean())
                 s_devMode.store(it->get<bool>());
+            if (auto it = j.find("consoleLog"); it != j.end() && it->is_string()) {
+                const std::string c = HotkeyNames::Lower(it->get<std::string>());
+                const int lvl = c == "none" ? kConsoleLogNone : c == "errors" ? kConsoleLogErrors
+                              : c == "warnings" ? kConsoleLogWarnings : c == "all" ? kConsoleLogAll : -1;
+                if (lvl < 0) SKSE::log::warn("Magelight: consoleLog '{}' ignored (none, errors, warnings or all)", c);
+                else s_consoleLogCfg.store(lvl);
+            }
             if (auto it = j.find("fontHinting"); it != j.end() && it->is_string())
                 s_fontHinting = HotkeyNames::Lower(it->get<std::string>());
             if (auto it = j.find("fontGamma"); it != j.end() && it->is_number())
                 s_fontGamma = std::clamp(it->get<double>(), 1.0, 3.0);
+            // Any JSON number: some editors write 8.0 for 8, and a skipped key would silently keep 4x.
+            if (auto it = j.find("msaa"); it != j.end() && it->is_number()) {
+                const double asked = it->get<double>();
+                s_msaa = asked >= 8 ? 8 : asked >= 4 ? 4 : asked >= 2 ? 2 : 1;
+                if (asked != s_msaa) SKSE::log::warn("Magelight: msaa {} is not 1, 2, 4 or 8 - using {}", asked, s_msaa);
+            }
             if (auto it = j.find("logLevel"); it != j.end() && it->is_string()) {
                 const std::string l = HotkeyNames::Lower(it->get<std::string>());
                 const auto lvl = l == "trace" ? spdlog::level::trace : l == "debug" ? spdlog::level::debug
@@ -447,6 +498,10 @@ namespace Magelight {
                 s_stallWatchdog.store(it->get<bool>());
             if (auto it = j.find("stallThresholdMs"); it != j.end() && it->is_number())
                 s_stallThresholdMs.store(std::clamp(it->get<int>(), 250, 60000));
+            if (auto it = j.find("loadStagger"); it != j.end() && it->is_boolean())
+                s_loadStagger.store(it->get<bool>());
+            if (auto it = j.find("loadBudgetMs"); it != j.end() && it->is_number())
+                s_loadBudgetMs.store(std::clamp(it->get<int>(), 1, 100));
             if (auto it = j.find("cursorFile"); it != j.end() && it->is_string())
                 s_cursorFile = it->get<std::string>();
             if (auto it = j.find("cursorHeight"); it != j.end() && it->is_number())
@@ -455,8 +510,15 @@ namespace Magelight {
                 s_cursorHotX = std::clamp(it->get<float>(), 0.0f, 1.0f);
             if (auto it = j.find("cursorHotspotY"); it != j.end() && it->is_number())
                 s_cursorHotY = std::clamp(it->get<float>(), 0.0f, 1.0f);
-            SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={})",
-                s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load());
+            if (auto it = j.find("cursorForce"); it != j.end() && it->is_boolean())
+                s_cursorForce.store(it->get<bool>());
+            if (auto it = j.find("modCursors"); it != j.end() && it->is_boolean())
+                s_modCursors.store(it->get<bool>());
+            static constexpr const char* kConsoleLogNames[] = { "none", "errors", "warnings", "all" };
+            SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
+                            "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={})",
+                s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
+                s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa);
         } catch (...) {
             SKSE::log::warn("Magelight: Magelight.json unreadable — defaults in effect");
         }
@@ -472,6 +534,7 @@ namespace Magelight {
     using MgGpuHasFn      = int (*)(void*);
     using MgGpuDrawFn     = void (*)(void*);
     using MgGpuSrvFn      = void* (*)(void*, std::uint32_t);
+    using MgGpuSamplesFn  = int (*)(void*, int);   // optional (MSAA); absent = no MSAA
     // External textures (ImageSource) — optional exports; absent = images unsupported.
     using MgGpuRegExtFn   = std::uint32_t (*)(void*, ID3D11ShaderResourceView*);
     using MgGpuSetExtFn   = int (*)(void*, std::uint32_t, ID3D11ShaderResourceView*);
@@ -483,6 +546,7 @@ namespace Magelight {
     static MgGpuHasFn     s_gpuHas = nullptr;
     static MgGpuDrawFn    s_gpuDraw = nullptr;
     static MgGpuSrvFn     s_gpuSrv = nullptr;
+    static MgGpuSamplesFn s_gpuSamples = nullptr;
     static MgGpuRegExtFn   s_gpuRegExt = nullptr;
     static MgGpuSetExtFn   s_gpuSetExtSrv = nullptr;
     static MgGpuUnregExtFn s_gpuUnregExt = nullptr;
@@ -511,6 +575,26 @@ namespace Magelight {
     static std::string MlJsonQuote(const std::string& in);
     static std::string PathToFileUrl(const std::filesystem::path& p);
     struct PendingEval { std::string script; JsResultFnInternal fn; void* user; };
+    // Per-view budget for console lines written to the log: kConsoleLinesPerSec a second, the rest counted.
+    struct ConsoleRate {
+        std::uint64_t windowStart = 0;
+        std::uint32_t lines = 0;
+        std::uint32_t suppressed = 0;
+        // True when this line may be logged; `dropped` = the lines refused in the window that just closed.
+        bool Admit(std::uint64_t now, std::uint32_t& dropped)
+        {
+            if (now - windowStart >= 1000) {
+                dropped = suppressed;
+                suppressed = 0;
+                lines = 0;
+                windowStart = now;
+            }
+            if (lines >= kConsoleLinesPerSec) { ++suppressed; return false; }
+            ++lines;
+            return true;
+        }
+    };
+
     struct MlView {
         ViewId id = 0;
         std::string htmlPath;   // relative to the runtime dir; "" = inline banner
@@ -530,6 +614,9 @@ namespace Magelight {
         std::uint64_t hiddenSince = 0;  // GetTickCount64 at the last hide (0 = visible / never hidden)
         bool dormant = false;           // hibernated: no View until shown again
         bool domReady = false;          // main frame reached DOM ready since its last load
+        bool loadNow = false;           // shown before its first load: skips the load queue (MaterializeViews)
+        bool loadFailed = false;        // main frame failed to load since its last load (the load queue's settle test)
+        bool loadOnShow = false;        // 0.31.0 SetViewLoadOnShow: no first load until the view is shown
         bool fullscreen = false;    // w/h track the backbuffer (0,0 at CreateView)
         // Ultralight device scale: CSS px -> view px. The page lays out and
         // rasterizes at this scale (real DPI — sharp), instead of a consumer
@@ -551,14 +638,19 @@ namespace Magelight {
         int layer = 1;
         std::uint64_t order = 0;
         bool escapeCapture = false;   // 0.28.0: the page owns Escape (delivered as a key, no UI-mode exit)
+        bool freezeWorld = false;     // 0.31.0: freeze the world behind this view while it holds UI mode paused
         NetLevel netLevel = NetLevel::File;   // the owning mod's NetworkPolicy; File when no mod owns the view
         int  scrollStep = 40;         // 0.28.0: px per wheel notch
         std::string soundOpen, soundClose;   // 0.29.0: host-played on UI-mode enter/exit for this view ("" = none)
+        CursorSet cursorOwn;            // 0.31.0: the view's own cursor (SetViewCursor / SetCursor / manifest view)
+        CursorSet cursorMod;            // 0.31.0: its mod's manifest default, used while cursorOwn is empty
+        CursorTintSet cursorTint;       // 0.31.1: the drawn cursor's colours over this view (SetViewCursorTint)
         bool destroyPending = false;
         bool reloadPending = false;
         bool reloadedFlag = false;      // tag the next DOM-ready as a ViewReloaded
         std::string navigateUrl;        // non-empty = LoadURL next frame
         std::string sessionName;        // "" = default session; else a per-mod persistent session
+        ConsoleRate consoleRate;        // 0.31.0: console lines written to the log (s_viewsMutex)
         // Render-thread-owned:
         ultralight::RefPtr<ultralight::View> ul;
         ID3D11Texture2D* tex = nullptr;             // CPU-surface path only
@@ -655,23 +747,6 @@ namespace Magelight {
         for (const auto& v : s_views)
             if (v->visible) return true;
         return false;
-    }
-
-    // The cursor the page under (x, y) asks for: the topmost visible interactive view there, else the UI-mode view
-    // (DrainInputQueue's hit order, so it is the page the mouse events go to).
-    static PageCursor PageCursorAt(int x, int y, float bw, float bh)
-    {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
-        for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
-            const MlView& v = **it;
-            if (!v.ul || !v.visible || v.clickThrough) continue;
-            float ex = 0, ey = 0;
-            EffectivePos(v, bw, bh, ex, ey);
-            if (x >= ex && y >= ey && x < ex + v.w && y < ey + v.h) return static_cast<PageCursor>(v.pageCursor);
-        }
-        if (const MlView* u = FindViewLocked(static_cast<ViewId>(s_uiModeView.load())))
-            return static_cast<PageCursor>(u->pageCursor);
-        return PageCursor::Arrow;
     }
 
     // A visible view the player can click: the UI-pass carrier opens only for one of these (see
@@ -1115,7 +1190,7 @@ namespace Magelight {
             ViewId id = 0;
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
-                if (MlView* v = FindViewByUlLocked(caller)) id = v->id;
+                if (MlView* v = FindViewByUlLocked(caller)) { id = v->id; v->loadFailed = true; }
             }
             const std::string detail = std::string(url.utf8().data()) + ": " + description.utf8().data() +
                 " (" + error_domain.utf8().data() + ":" + std::to_string(error_code) + ")";
@@ -1286,6 +1361,7 @@ namespace Magelight {
     static bool PathIsUnder(const std::filesystem::path& p, const std::filesystem::path& base);   // fwd (below)
     static void CursorMenuWatchdog();                                                   // fwd (below)
     static std::atomic<bool> s_focusMenuPause{ false };   // flag for the NEXT open
+    static std::atomic<bool> s_focusMenuFreeze{ false };  // the UI-mode view wants the world freeze (see ApplyFreezeWorld)
     static bool              s_focusMenuRegistered = false;
 
     class MagelightFocusMenu final : public RE::IMenu
@@ -1301,6 +1377,14 @@ namespace Magelight {
             menuFlags.set(F::kUsesCursor, F::kUsesMenuContext, F::kDontHideCursorWhenTopmost,
                           F::kCustomRendering, F::kAllowSaving);
             if (s_focusMenuPause.load()) menuFlags.set(F::kPausesGame);
+            // The world freeze opens with the pause it depends on, as the Journal's does. Never
+            // kTopmostRenderedMenu: it stops the menus below this one drawing, and MagelightOverlay's
+            // PostDisplay is the UI-pass composite (the page would fall back to Present, which frame
+            // generation drops).
+            if (s_focusMenuPause.load() && s_focusMenuFreeze.load()) {
+                menuFlags.set(F::kFreezeFrameBackground);
+                SKSE::log::info("Magelight: world freeze ON (focus menu open)");
+            }
             if (auto* sm = RE::BSScaleformManager::GetSingleton()) {
                 sm->LoadMovie(this, uiMovie, "magelightfocus");
             }
@@ -1436,6 +1520,11 @@ namespace Magelight {
             using F = RE::UI_MENU_FLAGS;
             depthPriority = 9;  // over the game's menus (3) and HUD, under the focus menu (10), which stays topmost
             menuFlags.set(F::kAllowSaving);
+            // Out of the capture the world freeze shows as its background, or a translucent page would show
+            // its own stale copy under itself. Only while the freeze is enabled: "freezeWorld": false gives
+            // back 0.30.6's carrier flags.
+            if (s_freezeWorldCfg.load() && s_freezeSkipCapture.load())
+                menuFlags.set(F::kSkipRenderDuringFreezeFrameScreenshot);
             if (auto* sm = RE::BSScaleformManager::GetSingleton()) {
                 sm->LoadMovie(this, uiMovie, "magelightfocus");
             }
@@ -1539,6 +1628,39 @@ namespace Magelight {
         }
     }
 
+    // Present thread, UI-pass composite only. Logs when the carrier is open over a visible interactive view
+    // but its PostDisplay stopped running (the views fall back to Present, which frame generation drops),
+    // and when it comes back, with the world freeze's state: the one signal that the freeze silenced the
+    // carrier. Debounced over 10 composites; at most 20 stop lines a session (the console's tm causes them too).
+    static void NoteUiPassState(bool defer, bool interactiveVisible)
+    {
+        if (!s_overlayMenuRegistered || !s_uiPassSeen.load() || s_uiPassBroken.load()) return;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui) return;
+        static bool s_logged = true;   // last logged state: drawing in the UI pass
+        static int  s_streak = 0, s_stops = 0;
+        const bool carrierUp = interactiveVisible && ui->IsMenuOpen(MagelightOverlayMenu::MENU_NAME);
+        const bool state = defer || !carrierUp;   // only a silent carrier counts as stopped
+        if (state == s_logged) { s_streak = 0; return; }
+        if (++s_streak < 10) return;
+        s_streak = 0;
+        s_logged = state;
+        bool frozen = false;
+        if (s_focusMenuRegistered) {
+            if (const auto m = ui->GetMenu(MagelightFocusMenu::MENU_NAME))
+                frozen = m->menuFlags.all(RE::UI_MENU_FLAGS::kFreezeFrameBackground);
+        }
+        if (s_stops > 20) return;   // capped: the state still tracks, silently
+        if (!state) {
+            if (++s_stops > 20) { SKSE::log::info("Magelight: UI pass stop lines capped for this session"); return; }
+            SKSE::log::info("Magelight: UI pass stopped drawing (no PostDisplay for {} composites) - views draw at "
+                            "Present; world freeze {}", s_compositeFrames.load() - s_lastUiPassFrame.load(),
+                            frozen ? "ON" : "off");
+        } else {
+            SKSE::log::info("Magelight: UI pass drawing again; world freeze {}", frozen ? "ON" : "off");
+        }
+    }
+
     static void QueueInput(UINT msg, WPARAM w, LPARAM l)
     {
         std::lock_guard<std::mutex> lk(s_inputMutex);
@@ -1561,17 +1683,44 @@ namespace Magelight {
     //
     // Modifier state comes from GetAsyncKeyState, which is global and does not
     // need window focus. Called from the input sink (game thread).
-    static void QueueScancodeAsText(std::uint32_t scan, bool down)
+    //
+    // DirectInput puts an E0-prefixed key at its make code + 0x80 (DIK_UP 0xC8
+    // is E0 48), which MapVirtualKeyW does not know: it gets the E0 form and the
+    // message gets lParam bit 24, as the window's would. Pause (DIK 0xC5) is
+    // E1 1D 45, not E0 45 (NumLock or nothing to MapVirtualKeyW), so it is
+    // mapped by hand. The window delivers the side-neutral VK_SHIFT, VK_CONTROL
+    // and VK_MENU, and VK_NUMPAD0-9 / VK_DECIMAL for the keypad with NumLock on;
+    // MapVirtualKeyW gives the side-specific codes and the navigation keys, so
+    // both are folded here.
+    enum class KeyPhase { Down, Repeat, Up };
+    static void QueueScancodeAsText(std::uint32_t scan, KeyPhase phase)
     {
         if (scan == 0 || scan > 0xFF) return;
-        const UINT vk = MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
+        constexpr std::uint32_t kDikPause = 0xC5;
+        const bool extended = scan >= 0x80 && scan != kDikPause;
+        const std::uint32_t make = scan & 0x7F;
+        UINT vk = scan == kDikPause ? VK_PAUSE
+                : MapVirtualKeyW(extended ? (0xE000u | make) : scan, MAPVK_VSC_TO_VK_EX);
         if (!vk) return;
-        const LPARAM base = static_cast<LPARAM>(scan) << 16;
-        if (!down) {
+        switch (vk) {
+        case VK_LSHIFT:   case VK_RSHIFT:   vk = VK_SHIFT;   break;
+        case VK_LCONTROL: case VK_RCONTROL: vk = VK_CONTROL; break;
+        case VK_LMENU:    case VK_RMENU:    vk = VK_MENU;    break;
+        default: break;
+        }
+        if (!extended && make >= 0x47 && make <= 0x53 && (GetKeyState(VK_NUMLOCK) & 1)) {
+            // Keypad 7 8 9 - 4 5 6 + 1 2 3 0 . ; minus and plus keep their own codes.
+            static constexpr UINT kPad[13] = { VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, 0, VK_NUMPAD4, VK_NUMPAD5,
+                VK_NUMPAD6, 0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD0, VK_DECIMAL };
+            if (const UINT pad = kPad[make - 0x47]) vk = pad;
+        }
+        const LPARAM base = (static_cast<LPARAM>(make) << 16) | (extended ? (static_cast<LPARAM>(1) << 24) : 0);
+        if (phase == KeyPhase::Up) {
             QueueInput(WM_KEYUP, vk, base | (1 << 30) | (1 << 31));
             return;
         }
-        QueueInput(WM_KEYDOWN, vk, base);
+        // Repeat count 1 in both; a repeat sets bit 30 (the key was already down).
+        QueueInput(WM_KEYDOWN, vk, base | 1 | (phase == KeyPhase::Repeat ? (1 << 30) : 0));
         // Printable? Ask the active layout, with the live modifier state.
         BYTE ks[256]{};
         if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
@@ -1579,15 +1728,43 @@ namespace Magelight {
         if (GetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
         if (GetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
         wchar_t buf[8]{};
-        const int n = ToUnicode(vk, scan, ks, buf, 7, 0);
+        const int n = ToUnicode(vk, make, ks, buf, 7, 0);
         for (int i = 0; i < n && i < 7; ++i) {
             const wchar_t ch = buf[i];
             if (ch >= 0x20 || ch == L'\t' || ch == L'\r')
                 QueueInput(WM_CHAR, static_cast<WPARAM>(ch), 0);
         }
         static std::atomic<int> s_typeLog{ 0 };
-        if (s_typeLog.fetch_add(1) < 12)
+        if (phase == KeyPhase::Down && s_typeLog.fetch_add(1) < 12)
             SKSE::log::info("Magelight: VR typing — scancode 0x{:02X} -> vk 0x{:02X}, {} char(s)", scan, vk, n);
+    }
+
+    // The engine's keyboard device sends a held key every frame with its held time and never a repeat, so the
+    // window's auto-repeat is rebuilt from the player's Windows keyboard delay and rate. Only a key whose press the
+    // page got repeats. Game thread (the input sink).
+    static std::array<int, 256> s_vrKeyRepeats{};       // repeats sent since the press; -1 = press not delivered
+    static void NoteVrKeyPress(std::uint32_t scan, bool delivered)
+    {
+        if (scan < s_vrKeyRepeats.size()) s_vrKeyRepeats[scan] = delivered ? 0 : -1;
+    }
+    static bool VrKeyRepeatDue(std::uint32_t scan, float heldSecs)
+    {
+        if (scan >= s_vrKeyRepeats.size() || s_vrKeyRepeats[scan] < 0) return false;
+        static const float s_delay = []() {
+            int d = 1;   // 0..3 = 250..1000 ms
+            SystemParametersInfoW(SPI_GETKEYBOARDDELAY, 0, &d, 0);
+            return 0.25f * static_cast<float>(std::clamp(d, 0, 3) + 1);
+        }();
+        static const float s_rate = []() {
+            DWORD r = 31;   // 0..31 = about 2.5..30 per second
+            SystemParametersInfoW(SPI_GETKEYBOARDSPEED, 0, &r, 0);
+            return 2.5f + 27.5f * static_cast<float>(std::min<DWORD>(r, 31)) / 31.0f;
+        }();
+        if (heldSecs < s_delay) return false;
+        const int due = 1 + static_cast<int>((heldSecs - s_delay) * s_rate);
+        if (due <= s_vrKeyRepeats[scan]) return false;
+        s_vrKeyRepeats[scan] = due;   // one message a frame at most; a slow frame does not queue a burst
+        return true;
     }
 
     // Public bridge (declared in Magelight.h with stdint types): the VR laser
@@ -1605,14 +1782,17 @@ namespace Magelight {
     // owns input (SA's Free Look).
     // Game thread. The CursorMenu stays OPEN while UI mode is on (it drives the MenuCursor position) but its sprite
     // must not draw: at Present it lands under the overlay, but in the UI pass the CursorMenu draws after us, on top.
-    // SetCursorVisibility only hides the Windows cursor; the sprite is drawn by the menu's movie. Its root is made
-    // transparent (flat only: VR keeps its own pointer path): the engine re-shows the movie itself every frame, which
-    // made GFxMovieView::SetVisible blink, but never touches the root's own _alpha/_visible, and a reskinned cursor
-    // movie hides the same way. FrameWork re-asserts this shortly after entry and every second (the movie only exists
-    // once the menu's show has processed); exit restores both.
+    // The sprite is the menu's movie, whose root is made transparent (flat only: VR keeps its own pointer path): the
+    // engine re-shows the movie itself every frame, which made GFxMovieView::SetVisible blink, but never touches the
+    // root's own _alpha/_visible, and a reskinned cursor movie hides the same way. FrameWork re-asserts this shortly
+    // after entry and every second (the movie only exists once the menu's show has processed); exit restores the root.
+    // The Windows cursor is left to the engine, which keeps it hidden over the game (a minimize and restore hides a
+    // stray one again). Never call MenuCursor::SetCursorVisibility here: its show is a forced ShowCursor(TRUE) loop
+    // until the count is >= 0, not a restore of the earlier state, so the Windows cursor stayed up beside the game's
+    // after a page closed. Whether ShowCursor's per-thread count also played a part is suspected, not verified;
+    // SampleCursorState logs the threads.
     static void HideVanillaCursor(bool hide)
     {
-        if (auto* mc = RE::MenuCursor::GetSingleton()) mc->SetCursorVisibility(!hide);
         if (REL::Module::IsVR()) return;
         if (auto* ui = RE::UI::GetSingleton()) {
             if (const auto menu = ui->GetMenu(RE::CursorMenu::MENU_NAME); menu && menu->uiMovie) {
@@ -1620,6 +1800,96 @@ namespace Magelight {
                 menu->uiMovie->SetVariable("_root._visible", RE::GFxValue(!hide));
             }
         }
+    }
+
+    // Diagnostics for a stray Windows cursor. Game thread, run from a task FrameWork posts about 30 frames after a
+    // UI-mode switch, so the queued CursorMenu and focus-menu messages have been processed. Logs whether Windows
+    // shows the cursor and whether it is over the game's client area with the game window in front, the sampling
+    // thread against the window's own thread, the engine's MenuCursor showCursorCount and the mouse's mode. The first
+    // entry and exit of a session are logged, then up to five later exits that leave the cursor over the game.
+    static void SampleCursorState(bool on)
+    {
+        CURSORINFO ci{};
+        ci.cbSize = sizeof(ci);
+        const bool showing = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
+        bool overGame = false;
+        if (showing && s_hwnd && GetForegroundWindow() == s_hwnd) {
+            RECT rc{};
+            POINT origin{ 0, 0 };
+            if (GetClientRect(s_hwnd, &rc) && ClientToScreen(s_hwnd, &origin)) {
+                OffsetRect(&rc, origin.x, origin.y);
+                overGame = PtInRect(&rc, ci.ptScreenPos) != 0;
+            }
+        }
+        static std::atomic<bool> s_logged[2]{};
+        static std::atomic<int> s_strayLogged{ 0 };
+        const bool first = !s_logged[on ? 1 : 0].exchange(true);
+        const bool stray = !first && !on && overGame && s_strayLogged.fetch_add(1) < 5;
+        if (!first && !stray) return;
+        const auto* mc = RE::MenuCursor::GetSingleton();
+        const int showCount = mc ? mc->GetRuntimeData().showCursorCount : INT_MIN;
+        const DWORD windowTid = s_hwnd ? GetWindowThreadProcessId(s_hwnd, nullptr) : 0;
+        auto* devices = RE::BSInputDeviceManager::GetSingleton();
+        const bool nonExclusive = devices && devices->IsMouseBackground();
+        SKSE::log::info("Magelight: cursor after UI mode {}{}: thread {} (window thread {}), showCursorCount {}, "
+                        "Windows cursor {}, mouse {}",
+            on ? "entry" : "exit", stray ? " (later exit, cursor over the game)" : "", GetCurrentThreadId(), windowTid,
+            showCount, showing ? (overGame ? "showing over the game" : "showing, not over the game") : "hidden",
+            nonExclusive ? "non-exclusive (bBackgroundMouse)" : "exclusive");
+    }
+
+    // ── World freeze (0.31.0) ─────────────────────────────────────────────
+    // kFreezeFrameBackground on the focus menu: the engine shows a frozen frame instead of rendering the 3D
+    // world. A freeze over a running game deadlocks or pins a stale frame, so it is set only while OUR menu
+    // carries kPausesGame and the game is paused, and dropped BEFORE the pause on every retarget. It rides
+    // the menu that holds the pause, so an engine-forced close takes both together. Never on VR: untested
+    // there, excluded as a precaution (the freeze frame may never be rendered in the headset).
+
+    // The UI-mode view asks for the freeze (its preference only). Any thread; takes s_viewsMutex.
+    static bool UiViewWantsFreeze()
+    {
+        if (!FreezeWorldAvailable() || !s_focused.load()) return false;
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        const MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+        return v && v->freezeWorld;
+    }
+
+    // Game thread.
+    static void DropFreezeWorld(RE::IMenu* menu, const char* why)
+    {
+        using F = RE::UI_MENU_FLAGS;
+        if (menu && menu->menuFlags.all(F::kFreezeFrameBackground)) {
+            menu->menuFlags.reset(F::kFreezeFrameBackground);
+            SKSE::log::info("Magelight: world freeze OFF ({})", why);
+        }
+    }
+
+    // Game thread. Makes the live focus menu's flag match what the UI-mode view wants and the pause allows.
+    static void ApplyFreezeWorld(const char* why)
+    {
+        const bool want = UiViewWantsFreeze();
+        s_focusMenuFreeze.store(want);   // a focus menu shown later (the watchdog's re-show) starts with it
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || !s_focusMenuRegistered) return;
+        const auto menu = ui->GetMenu(MagelightFocusMenu::MENU_NAME);
+        if (!menu) return;
+        using F = RE::UI_MENU_FLAGS;
+        const bool paused = menu->menuFlags.all(F::kPausesGame) && ui->GameIsPaused();
+        const bool has = menu->menuFlags.all(F::kFreezeFrameBackground);
+        if (want && paused) {
+            if (!has) {
+                menu->menuFlags.set(F::kFreezeFrameBackground);
+                SKSE::log::info("Magelight: world freeze ON (view {}, {})", s_uiModeView.load(), why);
+            }
+            return;
+        }
+        if (has && want) {
+            static std::atomic<bool> s_warned{ false };
+            if (!s_warned.exchange(true))
+                SKSE::log::warn("Magelight: the game is running under the world freeze (another mod cleared the "
+                                "pause?) - freeze dropped; it returns with the pause");
+        }
+        DropFreezeWorld(menu.get(), why);
     }
 
     static void SetUIModeImpl(bool on, bool hideView, bool pauseGame, bool noTextEntry)
@@ -1660,7 +1930,12 @@ namespace Magelight {
             // Our engine menu rides the same queue; pause is decided per open
             // (the flag is read by the menu's constructor on show).
             if (s_focusMenuRegistered) {
-                if (on) s_focusMenuPause.store(pauseGame);
+                if (on) {
+                    s_focusMenuPause.store(pauseGame);
+                    s_focusMenuFreeze.store(UiViewWantsFreeze());
+                } else {
+                    ApplyFreezeWorld("UI mode exit");   // s_focused is already off: drops the flag before the hide
+                }
                 queue->AddMessage(MagelightFocusMenu::MENU_NAME,
                     on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
             }
@@ -2311,6 +2586,7 @@ namespace Magelight {
             s_gpuHas       = reinterpret_cast<MgGpuHasFn>(GetProcAddress(gpu, "MgGpu_HasCommandsPending"));
             s_gpuDraw      = reinterpret_cast<MgGpuDrawFn>(GetProcAddress(gpu, "MgGpu_DrawCommandList"));
             s_gpuSrv       = reinterpret_cast<MgGpuSrvFn>(GetProcAddress(gpu, "MgGpu_GetTextureSRV"));
+            s_gpuSamples   = reinterpret_cast<MgGpuSamplesFn>(GetProcAddress(gpu, "MgGpu_SetSampleCount"));
             s_gpuRegExt    = reinterpret_cast<MgGpuRegExtFn>(GetProcAddress(gpu, "MgGpu_RegisterExternalTexture"));
             s_gpuSetExtSrv = reinterpret_cast<MgGpuSetExtFn>(GetProcAddress(gpu, "MgGpu_SetExternalTextureSRV"));
             s_gpuUnregExt  = reinterpret_cast<MgGpuUnregExtFn>(GetProcAddress(gpu, "MgGpu_UnregisterExternalTexture"));
@@ -2687,6 +2963,15 @@ namespace Magelight {
         return JsonQuote(in);   // shared with the Api4 layer (Magelight.h)
     }
 
+    // `in` cut to at most maxBytes on a UTF-8 character boundary, with an ellipsis and the original length.
+    static std::string CapLogText(const std::string& in, std::size_t maxBytes)
+    {
+        if (in.size() <= maxBytes) return in;
+        std::size_t cut = maxBytes;
+        while (cut > 0 && (static_cast<unsigned char>(in[cut]) & 0xC0) == 0x80) --cut;
+        return in.substr(0, cut) + "\xE2\x80\xA6 [" + std::to_string(in.size()) + " bytes]";
+    }
+
     // devMode: a JS error paints a banner on the page itself, so a broken
     // handler is seen where it happened instead of only in the log. Fixed,
     // click-through, self-removing; the page's own DOM is untouched.
@@ -2723,6 +3008,14 @@ namespace Magelight {
             case ultralight::kCursor_VerticalText:
                 kind = PageCursor::Text;
                 break;
+            // Probed against the 1.4 core: cursor: none reports kCursor_None, and cursor: url(x) reports
+            // kCursor_Custom only once its image loaded (a missing one falls to the next keyword in the list).
+            case ultralight::kCursor_None:
+                kind = PageCursor::None;
+                break;
+            case ultralight::kCursor_Custom:
+                kind = PageCursor::Custom;
+                break;
             default:
                 break;
             }
@@ -2740,14 +3033,25 @@ namespace Magelight {
         void OnAddConsoleMessage(ultralight::View* caller,
             const ultralight::ConsoleMessage& msg) override
         {
+            const auto level = msg.level();
+            const int lvlNum = (level == ultralight::kMessageLevel_Error) ? 2
+                : (level == ultralight::kMessageLevel_Warning) ? 1 : 0;
+            const int cfg = ConsoleLogLevel();
+            const bool wanted = cfg == kConsoleLogAll || (cfg == kConsoleLogWarnings && lvlNum >= 1)
+                || (cfg == kConsoleLogErrors && lvlNum == 2);
             ViewId id = 0;
+            bool logIt = false;
+            std::uint32_t dropped = 0;
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
-                if (MlView* v = FindViewByUlLocked(caller)) id = v->id;
+                MlView* v = FindViewByUlLocked(caller);
+                if (v) id = v->id;
+                if (wanted) {
+                    // A page outside the registry (its View dropping after the erase) shares one budget.
+                    static ConsoleRate s_unownedRate;
+                    logIt = (v ? v->consoleRate : s_unownedRate).Admit(GetTickCount64(), dropped);
+                }
             }
-            const auto level = msg.level();
-            const char* lvl = (level == ultralight::kMessageLevel_Error) ? "ERROR"
-                : (level == ultralight::kMessageLevel_Warning) ? "warn" : "log";
             // Every console argument, not just the first: console.log('x', obj)
             // used to reach the log as "x". Objects come out as JSON.
             std::string text;
@@ -2765,9 +3069,18 @@ namespace Magelight {
                 text = msg.message().utf8().data();
             }
             const std::string source = msg.source_id().utf8().data();
-            SKSE::log::info("Magelight: [view {} console/{}] {} ({}:{})", id, lvl, text, source, msg.line_number());
-            const int lvlNum = (level == ultralight::kMessageLevel_Error) ? 2
-                : (level == ultralight::kMessageLevel_Warning) ? 1 : 0;
+            if (dropped)
+                SKSE::log::info("Magelight: [view {} console] {} lines not logged (over {} a second)",
+                    id, dropped, kConsoleLinesPerSec);
+            if (logIt) {
+                const char* lvl = level == ultralight::kMessageLevel_Error ? "ERROR"
+                    : level == ultralight::kMessageLevel_Warning ? "warn"
+                    : level == ultralight::kMessageLevel_Info ? "info"
+                    : level == ultralight::kMessageLevel_Debug ? "debug" : "log";
+                SKSE::log::info("Magelight: [view {} console/{}] {} ({}:{})", id, lvl,
+                    CapLogText(text, kConsoleLineMaxBytes), CapLogText(source, 512), msg.line_number());
+            }
+            // The owning mod's event and the devMode banner get the whole message, whatever consoleLog says.
             Emit(HostEvent::ConsoleMessage, id, lvlNum, static_cast<int>(msg.line_number()), text.c_str());
             if (lvlNum == 2 && s_devMode.load() && id) ShowDevErrorOverlay(id, text, source, msg.line_number());
         }
@@ -2849,27 +3162,31 @@ float4 ps_straight(VSOut i) : SV_Target {
         return SUCCEEDED(s_device->CreateShaderResourceView(s_cursorTex, nullptr, &s_cursorSrv));
     }
 
-    // Decode a PNG (any WIC-readable image) into a premultiplied-BGRA
-    // immutable texture — the same encoding the baked arrow and every
-    // Ultralight surface use, so the compositor's ONE/INV_SRC_ALPHA blend
-    // applies unchanged. Capped at 512² (a cursor, not a wallpaper).
     // The VR laser-end pointer: a small white disc with a dark rim, alpha
     // antialiased, hotspot at the centre. An arrow made sense as a desktop
     // cursor; at the end of a laser it read as a big distracting sprite
     // (field 2026-09-06). 32x32 so it stays crisp when drawn at 8-16px.
     static constexpr int kDotSize = 32;
-    static bool CreateDotTexture()
+    // A core over a rim, both 0xRRGGBB; the default is white over black. Premultiplied, like every mark the VR copy
+    // pass draws (ps_straight divides it out again).
+    static bool MakeDotTexture(std::uint32_t coreRgb, std::uint32_t rimRgb, ID3D11Texture2D*& tex,
+                               ID3D11ShaderResourceView*& srv)
     {
         std::uint32_t px[kDotSize * kDotSize];
         const float c = (kDotSize - 1) * 0.5f, rCore = 9.0f, rRim = 12.0f;
+        const auto chan = [](std::uint32_t rgb, int shift) { return static_cast<float>((rgb >> shift) & 0xFF); };
         for (int y = 0; y < kDotSize; ++y) {
             for (int x = 0; x < kDotSize; ++x) {
                 const float d = std::sqrt((x - c) * (x - c) + (y - c) * (y - c));
                 float a = std::clamp(rRim + 0.5f - d, 0.0f, 1.0f);          // outer edge, antialiased
-                const float core = std::clamp(rCore + 0.5f - d, 0.0f, 1.0f);  // white core over the dark rim
-                const std::uint8_t A = static_cast<std::uint8_t>(a * 255.0f + 0.5f);
-                const std::uint8_t V = static_cast<std::uint8_t>(core * 255.0f + 0.5f);   // 0 = rim (black), 255 = core
-                px[y * kDotSize + x] = (static_cast<std::uint32_t>(A) << 24) | (V << 16) | (V << 8) | V;
+                const float core = std::clamp(rCore + 0.5f - d, 0.0f, 1.0f);  // the core over the rim (a is 1 here)
+                const std::uint32_t A = static_cast<std::uint32_t>(a * 255.0f + 0.5f);
+                std::uint32_t rgb = 0;
+                for (int shift = 16; shift >= 0; shift -= 8) {
+                    const float v = chan(rimRgb, shift) + (chan(coreRgb, shift) - chan(rimRgb, shift)) * core;
+                    rgb |= static_cast<std::uint32_t>(v * a + 0.5f) << shift;
+                }
+                px[y * kDotSize + x] = (A << 24) | rgb;
             }
         }
         D3D11_TEXTURE2D_DESC td{};
@@ -2880,55 +3197,90 @@ float4 ps_straight(VSOut i) : SV_Target {
         td.Usage = D3D11_USAGE_IMMUTABLE;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         D3D11_SUBRESOURCE_DATA sub{ px, kDotSize * sizeof(std::uint32_t), 0 };
-        if (FAILED(s_device->CreateTexture2D(&td, &sub, &s_dotTex))) return false;
-        return SUCCEEDED(s_device->CreateShaderResourceView(s_dotTex, nullptr, &s_dotSrv));
+        if (FAILED(s_device->CreateTexture2D(&td, &sub, &tex))) return false;
+        if (FAILED(s_device->CreateShaderResourceView(tex, nullptr, &srv))) {
+            tex->Release();
+            tex = nullptr;
+            return false;
+        }
+        return true;
     }
+    static bool CreateDotTexture() { return MakeDotTexture(0xFFFFFF, 0x000000, s_dotTex, s_dotSrv); }
 
-    static bool LoadCursorImage(const std::filesystem::path& path,
-                                ID3D11Texture2D** outTex, ID3D11ShaderResourceView** outSrv,
-                                int& outW, int& outH)
+    // Decode an image file (any WIC-readable format) into premultiplied BGRA rows of at most maxPx x maxPx. No
+    // device work, so any thread with COM initialized may call it.
+    static bool DecodeImagePixels(const std::filesystem::path& path, UINT maxPx, std::vector<std::uint8_t>& px,
+                                  int& outW, int& outH, std::string* why)
     {
         using Microsoft::WRL::ComPtr;
-        // The game already initialized COM on this (main) thread; S_FALSE /
-        // RPC_E_CHANGED_MODE are both fine and we never uninitialize.
-        (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const auto fail = [why](const std::string& w) { if (why) *why = w; return false; };
         ComPtr<IWICImagingFactory> factory;
         if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                     IID_PPV_ARGS(&factory))))
-            return false;
+            return fail("the image decoder is unavailable");
         ComPtr<IWICBitmapDecoder> decoder;
         if (FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
                                                       WICDecodeMetadataCacheOnLoad, &decoder)))
-            return false;
+            return fail("not an image Windows can read");
         ComPtr<IWICBitmapFrameDecode> frame;
-        if (FAILED(decoder->GetFrame(0, &frame))) return false;
+        if (FAILED(decoder->GetFrame(0, &frame))) return fail("no image frame");
         ComPtr<IWICFormatConverter> conv;
-        if (FAILED(factory->CreateFormatConverter(&conv))) return false;
+        if (FAILED(factory->CreateFormatConverter(&conv))) return fail("the image decoder is unavailable");
         if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA,
                                     WICBitmapDitherTypeNone, nullptr, 0.0,
                                     WICBitmapPaletteTypeCustom)))
-            return false;
+            return fail("the pixel format cannot be converted");
         UINT w = 0, h = 0;
-        if (FAILED(conv->GetSize(&w, &h)) || !w || !h || w > 512 || h > 512) return false;
-        std::vector<std::uint8_t> px(static_cast<size_t>(w) * h * 4);
+        if (FAILED(conv->GetSize(&w, &h)) || !w || !h) return fail("the image is empty");
+        if (w > maxPx || h > maxPx)
+            return fail("larger than " + std::to_string(maxPx) + "x" + std::to_string(maxPx) + " (" + std::to_string(w) +
+                        "x" + std::to_string(h) + ")");
+        px.assign(static_cast<size_t>(w) * h * 4, 0);
         if (FAILED(conv->CopyPixels(nullptr, w * 4, static_cast<UINT>(px.size()), px.data())))
-            return false;
+            return fail("the pixels could not be read");
+        outW = static_cast<int>(w);
+        outH = static_cast<int>(h);
+        return true;
+    }
+
+    // Premultiplied BGRA rows into an immutable texture: the encoding the baked arrow and every Ultralight surface
+    // use, so the compositor's ONE/INV_SRC_ALPHA blend applies unchanged. Render thread (device work).
+    static bool UploadPixels(const std::vector<std::uint8_t>& px, int w, int h,
+                             ID3D11Texture2D** outTex, ID3D11ShaderResourceView** outSrv)
+    {
+        using Microsoft::WRL::ComPtr;
+        if (!s_device || w <= 0 || h <= 0 || px.size() < static_cast<size_t>(w) * h * 4) return false;
         D3D11_TEXTURE2D_DESC td{};
-        td.Width = w; td.Height = h;
+        td.Width = static_cast<UINT>(w); td.Height = static_cast<UINT>(h);
         td.MipLevels = 1; td.ArraySize = 1;
         td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_IMMUTABLE;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA sub{ px.data(), w * 4, 0 };
+        D3D11_SUBRESOURCE_DATA sub{ px.data(), static_cast<UINT>(w) * 4, 0 };
         ComPtr<ID3D11Texture2D> tex;
         if (FAILED(s_device->CreateTexture2D(&td, &sub, &tex))) return false;
         ComPtr<ID3D11ShaderResourceView> srv;
         if (FAILED(s_device->CreateShaderResourceView(tex.Get(), nullptr, &srv))) return false;
         *outTex = tex.Detach();
         *outSrv = srv.Detach();
-        outW = static_cast<int>(w);
-        outH = static_cast<int>(h);
+        return true;
+    }
+
+    // The player's cursorFile: decoded and uploaded at device init. Capped at 512² (a cursor, not a wallpaper).
+    static bool LoadCursorImage(const std::filesystem::path& path,
+                                ID3D11Texture2D** outTex, ID3D11ShaderResourceView** outSrv,
+                                int& outW, int& outH)
+    {
+        // The game already initialized COM on this (main) thread; S_FALSE /
+        // RPC_E_CHANGED_MODE are both fine and we never uninitialize.
+        (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::vector<std::uint8_t> px;
+        int w = 0, h = 0;
+        if (!DecodeImagePixels(path, 512, px, w, h, nullptr)) return false;
+        if (!UploadPixels(px, w, h, outTex, outSrv)) return false;
+        outW = w;
+        outH = h;
         return true;
     }
 
@@ -2963,6 +3315,282 @@ float4 ps_straight(VSOut i) : SV_Target {
             p.string(), w, h, s_cursorHotX, s_cursorHotY, s_cursorHeight);
     }
 
+    // ── Per-view cursors (0.31.0) ───────────────────────────────────────────
+    // A mod's own cursor images (Magelight.h). An image decodes on a thread-pool thread the first time the render
+    // thread asks for it, uploads on the render thread the next time it is asked for, and lives as long as a view
+    // (or a mod default) holds it. Never decoded inside Present: a mod may set its cursor from a JS listener, which
+    // runs there. Until an image is ready, and if it fails, the host cursor shows.
+    static constexpr UINT kViewCursorMaxPx = 256;
+
+    struct CursorImage {
+        enum : int { kIdle, kDecoding, kDecoded, kReady, kFailed };
+        std::filesystem::path file;
+        float hotX = 0, hotY = 0;   // image pixels
+        float height = 0;           // px at 1080p; 0 = the image's own height
+        bool press = false;
+        std::atomic<int> state{ kIdle };
+        // Written by the decode thread before it stores kDecoded; read by the render thread once it sees it.
+        std::vector<std::uint8_t> px;
+        int w = 0, h = 0;
+        // Render thread from kReady on. Released with the last reference, on whichever thread drops it: D3D11
+        // Release is free-threaded, and a quad deferred to the UI pass holds its own reference.
+        ID3D11Texture2D* tex = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        ~CursorImage()
+        {
+            if (srv) srv->Release();
+            if (tex) tex->Release();
+        }
+    };
+
+    static constexpr const char* kCursorStateNames[kCursorStates] = { "arrow", "pointer", "text" };
+    static std::mutex s_cursorImagesMutex;
+    static std::map<std::string, std::weak_ptr<CursorImage>> s_cursorImages;   // by file, hotspot, height, press
+
+    std::shared_ptr<CursorImage> MakeCursorImage(const std::filesystem::path& file, float hotX, float hotY,
+                                                 float height, bool press, std::string* why)
+    {
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(file, ec)) {
+            if (why) *why = "no file at " + file.string();
+            return nullptr;
+        }
+        const auto finite = [](float v) { return v == v && v > -1e30f && v < 1e30f; };
+        hotX = finite(hotX) ? std::clamp(hotX, 0.0f, static_cast<float>(kViewCursorMaxPx)) : 0.0f;
+        hotY = finite(hotY) ? std::clamp(hotY, 0.0f, static_cast<float>(kViewCursorMaxPx)) : 0.0f;
+        height = (finite(height) && height > 0.0f) ? std::clamp(height, 8.0f, 256.0f) : 0.0f;
+        const std::filesystem::path norm = file.lexically_normal();
+        std::string key = norm.string();
+        for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        key += "|" + std::to_string(hotX) + "|" + std::to_string(hotY) + "|" + std::to_string(height) + (press ? "|p" : "|-");
+        std::lock_guard<std::mutex> lk(s_cursorImagesMutex);
+        if (auto it = s_cursorImages.find(key); it != s_cursorImages.end()) {
+            if (auto live = it->second.lock()) return live;
+        }
+        for (auto it = s_cursorImages.begin(); it != s_cursorImages.end();)
+            it = it->second.expired() ? s_cursorImages.erase(it) : std::next(it);
+        auto img = std::make_shared<CursorImage>();
+        img->file = norm;
+        img->hotX = hotX;
+        img->hotY = hotY;
+        img->height = height;
+        img->press = press;
+        s_cursorImages[key] = img;
+        return img;
+    }
+
+    // Thread pool. ctx is a heap shared_ptr that keeps the image alive for the decode.
+    static void CALLBACK DecodeCursorImage(PTP_CALLBACK_INSTANCE, void* ctx)
+    {
+        const std::unique_ptr<std::shared_ptr<CursorImage>> hold(static_cast<std::shared_ptr<CursorImage>*>(ctx));
+        CursorImage& img = **hold;
+        std::string why;
+        bool ok = false;
+        const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        try {
+            ok = DecodeImagePixels(img.file, kViewCursorMaxPx, img.px, img.w, img.h, &why);
+        } catch (...) {
+            why = "out of memory";
+        }
+        if (SUCCEEDED(co)) CoUninitialize();
+        if (!ok) {
+            std::vector<std::uint8_t>().swap(img.px);
+            SKSE::log::warn("Magelight: cursor image {} - {}; the host cursor shows instead", img.file.string(), why);
+            img.state.store(CursorImage::kFailed);
+            return;
+        }
+        img.state.store(CursorImage::kDecoded, std::memory_order_release);
+    }
+
+    // Render thread. The image's texture; nullptr while it decodes or after it failed (the host cursor shows).
+    static ID3D11ShaderResourceView* CursorImageSrv(const std::shared_ptr<CursorImage>& img)
+    {
+        const int st = img->state.load(std::memory_order_acquire);
+        if (st == CursorImage::kReady) return img->srv;
+        if (st == CursorImage::kIdle) {
+            img->state.store(CursorImage::kDecoding);   // only this thread leaves kIdle
+            auto* hold = new std::shared_ptr<CursorImage>(img);
+            if (!TrySubmitThreadpoolCallback(&DecodeCursorImage, hold, nullptr)) {
+                delete hold;
+                SKSE::log::warn("Magelight: cursor image {} - could not queue its decode; the host cursor shows instead",
+                                img->file.string());
+                img->state.store(CursorImage::kFailed);
+            }
+            return nullptr;
+        }
+        if (st != CursorImage::kDecoded) return nullptr;
+        const bool ok = UploadPixels(img->px, img->w, img->h, &img->tex, &img->srv);
+        std::vector<std::uint8_t>().swap(img->px);
+        if (!ok) {
+            SKSE::log::warn("Magelight: cursor image {} - texture creation failed; the host cursor shows instead",
+                            img->file.string());
+            img->state.store(CursorImage::kFailed);
+            return nullptr;
+        }
+        SKSE::log::info("Magelight: cursor image {} ({}x{}, hotspot {:.0f},{:.0f}, {}{})", img->file.string(), img->w,
+                        img->h, img->hotX, img->hotY,
+                        img->height > 0 ? std::to_string(static_cast<int>(img->height)) + "px at 1080p" : "own height",
+                        img->press ? ", press shrink" : "");
+        img->state.store(CursorImage::kReady);
+        return img->srv;
+    }
+
+    static std::string DescribeCursorSet(const CursorSet& set)
+    {
+        if (set.none) return "none (the page draws its own)";
+        std::string out;
+        for (int i = 0; i < kCursorStates; ++i) {
+            if (!set.image[i]) continue;
+            if (!out.empty()) out += ", ";
+            out += std::string(kCursorStateNames[i]) + "=" + set.image[i]->file.string();
+        }
+        return out.empty() ? "the host cursor" : out;
+    }
+
+    bool ResolveViewFile(ViewId view, const std::string& path, bool absoluteOk, std::filesystem::path& out,
+                         std::string* why)
+    {
+        const auto fail = [why](const char* w) { if (why) *why = w; return false; };
+        if (path.empty() || path.size() > 260) return fail("the path is empty or longer than 260 characters");
+        const bool absolute = path.size() > 1 && path[1] == ':';
+        if (absolute) {
+            if (!absoluteOk) return fail("the path must be relative to the mod folder");
+            out = std::filesystem::path(path).lexically_normal();
+            return true;
+        }
+        if (path[0] == '/' || path[0] == '\\' || path.find("..") != std::string::npos)
+            return fail("the path must stay inside the mod folder (relative, no '..')");
+        std::filesystem::path root;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            const MlView* v = FindViewLocked(view);
+            if (!v) return fail("the view is gone");
+            root = v->root;
+        }
+        if (root.empty()) root = s_runtimeDir;
+        out = (root / std::filesystem::path(path).make_preferred()).lexically_normal();
+        return true;
+    }
+
+    bool SetViewCursorSet(ViewId view, bool modDefault, const CursorSet& set)
+    {
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending) return false;
+            (modDefault ? v->cursorMod : v->cursorOwn) = set;
+        }
+        SKSE::log::info("Magelight: view {} {}cursor: {}", view, modDefault ? "mod default " : "", DescribeCursorSet(set));
+        return true;
+    }
+
+    bool SetViewCursorState(ViewId view, int state, std::shared_ptr<CursorImage> image)
+    {
+        if (state < 0 || state >= kCursorStates) return false;
+        std::string desc;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending) return false;
+            if (image || state == 0) v->cursorOwn.none = false;   // "none" is set through the arrow state
+            v->cursorOwn.image[state] = std::move(image);
+            desc = DescribeCursorSet(v->cursorOwn);
+        }
+        SKSE::log::info("Magelight: view {} cursor: {}", view, desc);
+        return true;
+    }
+
+    bool SetViewCursorNone(ViewId view)
+    {
+        CursorSet none;
+        none.none = true;
+        return SetViewCursorSet(view, false, none);
+    }
+
+    bool SetViewCursorTint(ViewId view, const CursorTintSet& tint)
+    {
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending) return false;
+            v->cursorTint = tint;
+        }
+        if (tint.Empty())
+            SKSE::log::info("Magelight: view {} cursor tint: none (the host's colours)", view);
+        else
+            SKSE::log::info("Magelight: view {} cursor tint: lit {:08X} shade {:08X} ink {:08X} glow {:08X} ibeam {:08X}",
+                            view, tint.lit, tint.shade, tint.ink, tint.glow, tint.ibeam);
+        return true;
+    }
+
+    // What the flat cursor draws at the pointer.
+    struct CursorPick {
+        PageCursor kind = PageCursor::Arrow;   // for the host cursor (None and Custom read as Arrow)
+        bool hide = false;                     // the page under the pointer draws its own
+        std::shared_ptr<CursorImage> image;    // the view's image for the state; null = the host cursor
+        CursorTintSet tint;                    // the drawn cursor's colours (0.31.1); empty = the host's
+    };
+
+    // The page at (x, y): the topmost visible interactive view there, else the UI-mode view (DrainInputQueue's hit
+    // order, so it is the page the mouse events go to). Hiding needs the pointer INSIDE that page: outside every
+    // view the host cursor always draws, so a stale "none" never leaves the player without a pointer. Precedence:
+    // cursorForce > the view's own set > its mod's default > the host cursor; modCursors false drops the images and
+    // the tint.
+    static CursorPick PickCursorAt(int x, int y, float bw, float bh)
+    {
+        CursorPick pick;
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        const MlView* view = nullptr;
+        bool inside = false;
+        for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
+            const MlView& v = **it;
+            if (!v.ul || !v.visible || v.clickThrough) continue;
+            float ex = 0, ey = 0;
+            EffectivePos(v, bw, bh, ex, ey);
+            if (x >= ex && y >= ey && x < ex + v.w && y < ey + v.h) { view = &v; inside = true; break; }
+        }
+        if (!view) view = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+        if (!view) return pick;
+        const PageCursor kind = static_cast<PageCursor>(view->pageCursor);
+        pick.kind = (kind == PageCursor::None || kind == PageCursor::Custom) ? PageCursor::Arrow : kind;
+        if (s_cursorForce.load()) return pick;
+        const CursorSet& set = view->cursorOwn.Empty() ? view->cursorMod : view->cursorOwn;
+        if (inside && (kind == PageCursor::None || set.none)) {
+            pick.hide = true;
+            return pick;
+        }
+        if (!s_modCursors.load()) return pick;
+        pick.tint = view->cursorTint;
+        if (set.none) return pick;
+        const int state = kind == PageCursor::Clickable ? 1 : kind == PageCursor::Text ? 2 : 0;
+        pick.image = set.image[state];
+        if (!pick.image && state == 1) pick.image = set.image[0];   // text keeps the host I-beam: the caret hint matters
+        return pick;
+    }
+
+    // VR laser end with vr.cursorDot false: the view's image for its page state, never "none" (the laser has to
+    // show where it points). Text falls back to the arrow image: VR has no I-beam art. Any thread.
+    static std::shared_ptr<CursorImage> VrCursorImageFor(ViewId id)
+    {
+        if (s_cursorForce.load() || !s_modCursors.load()) return nullptr;
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        const MlView* v = FindViewLocked(id);
+        if (!v) return nullptr;
+        const CursorSet& set = v->cursorOwn.Empty() ? v->cursorMod : v->cursorOwn;
+        const PageCursor kind = static_cast<PageCursor>(v->pageCursor);
+        const int state = kind == PageCursor::Clickable ? 1 : kind == PageCursor::Text ? 2 : 0;
+        return set.image[state] ? set.image[state] : set.image[0];
+    }
+
+    // The VR laser dot's tint for a view (0.31.1): empty under "cursorForce" or "modCursors": false. Any thread.
+    static CursorTintSet VrCursorTintFor(ViewId id)
+    {
+        if (s_cursorForce.load() || !s_modCursors.load()) return {};
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        const MlView* v = FindViewLocked(id);
+        return v ? v->cursorTint : CursorTintSet{};
+    }
+
     // ── The drawn cursor (MagelightCursorArt.h) ─────────────────────────────
     // Built on the render thread at the pixel height it is drawn at, and rebuilt when that height changes (a
     // resolution change). kArtGlowSteps arrow textures share one size and hotspot: the hover glow fades by stepping
@@ -2975,10 +3603,50 @@ float4 ps_straight(VSOut i) : SV_Target {
         int w = 0, h = 0;
         float hotX = 0, hotY = 0;
     };
-    static CursorArtTex s_artArrow[kArtGlowSteps];
-    static CursorArtTex s_artIBeam;
-    static int          s_artHeight = 0;     // the pixel height the textures were built for; 0 = none
-    static bool         s_artFailed = false; // a texture creation failed: the baked arrow draws instead
+    // One set per tint in use (the host's own colours are one), at most kArtSets: the set drawn least recently gives
+    // its slot to a new tint. A height change (a resolution change) rebuilds a set when it is next drawn.
+    struct CursorArtSet
+    {
+        std::uint64_t key = 0;               // TintKey; 0 = the host's colours
+        int height = 0;                      // the pixel height the textures were built for; 0 = an empty slot
+        std::uint64_t used = 0;              // s_artStamp at the last draw
+        CursorArtTex arrow[kArtGlowSteps];
+        CursorArtTex ibeam;
+    };
+    static constexpr int kArtSets = 4;
+    static CursorArtSet  s_artSets[kArtSets];
+    static std::uint64_t s_artStamp = 0;
+    static bool          s_artFailed = false; // a texture creation failed: the baked arrow draws instead
+
+    // The tint's identity: 0 for the host's colours, else a hash of the colours it sets (alpha 0 = unset).
+    static std::uint64_t TintKey(const CursorTintSet& t)
+    {
+        if (t.Empty()) return 0;
+        std::uint64_t h = 1469598103934665603ull;
+        for (std::uint32_t c : { t.lit, t.shade, t.ink, t.glow, t.ibeam }) {
+            const std::uint32_t v = (c & 0xFF000000u) ? (c | 0xFF000000u) : 0u;
+            for (int i = 0; i < 4; ++i) {
+                h ^= (v >> (8 * i)) & 0xFF;
+                h *= 1099511628211ull;
+            }
+        }
+        return h ? h : 1;
+    }
+
+    static CursorArt::Palette PaletteFor(const CursorTintSet& t)
+    {
+        CursorArt::Palette p;
+        const auto apply = [](std::uint32_t argb, CursorArt::Rgb& c) {
+            if (!(argb & 0xFF000000u)) return;
+            c = { ((argb >> 16) & 0xFF) / 255.0f, ((argb >> 8) & 0xFF) / 255.0f, (argb & 0xFF) / 255.0f };
+        };
+        apply(t.lit, p.lit);
+        apply(t.shade, p.shade);
+        apply(t.ink, p.ink);
+        apply(t.glow, p.glow);
+        apply(t.ibeam, p.ibeam);
+        return p;
+    }
 
     static bool UploadCursorArt(const CursorArt::Image& img, CursorArtTex& out)
     {
@@ -3002,22 +3670,73 @@ float4 ps_straight(VSOut i) : SV_Target {
         return true;
     }
 
-    // Render thread. True when the drawn cursor is ready at `height` pixels.
-    static bool EnsureCursorArt(int height)
+    // Render thread. The drawn cursor in `tint`'s colours at `height` pixels; nullptr when it cannot be built.
+    static const CursorArtSet* EnsureCursorArt(int height, const CursorTintSet& tint)
     {
-        if (s_artFailed || !s_device) return false;
-        if (height == s_artHeight) return true;
-        bool ok = UploadCursorArt(CursorArt::IBeam(height), s_artIBeam);
+        if (s_artFailed || !s_device) return nullptr;
+        const std::uint64_t key = TintKey(tint);
+        CursorArtSet* slot = nullptr;
+        for (auto& set : s_artSets) {
+            if (set.height != 0 && set.key == key) { slot = &set; break; }
+        }
+        if (!slot) {
+            slot = &s_artSets[0];
+            for (auto& set : s_artSets) {
+                if (set.height == 0) { slot = &set; break; }
+                if (set.used < slot->used) slot = &set;
+            }
+            slot->height = 0;   // rebuilt below: UploadCursorArt releases the old textures
+        }
+        slot->used = ++s_artStamp;
+        if (slot->height == height) return slot;
+        const CursorArt::Palette pal = PaletteFor(tint);
+        bool ok = UploadCursorArt(CursorArt::IBeam(height, pal), slot->ibeam);
         for (int i = 0; ok && i < kArtGlowSteps; ++i)
-            ok = UploadCursorArt(CursorArt::Arrow(height, static_cast<float>(i) / (kArtGlowSteps - 1)), s_artArrow[i]);
+            ok = UploadCursorArt(CursorArt::Arrow(height, static_cast<float>(i) / (kArtGlowSteps - 1), pal), slot->arrow[i]);
         if (!ok) {
             s_artFailed = true;
             SKSE::log::error("Magelight: drawn cursor - texture creation failed at {}px; the baked arrow draws instead", height);
-            return false;
+            return nullptr;
         }
-        s_artHeight = height;
-        SKSE::log::info("Magelight: drawn cursor built at {}px", height);
-        return true;
+        slot->key = key;
+        slot->height = height;
+        SKSE::log::info("Magelight: drawn cursor built at {}px{}", height, key ? " (tinted)" : "");
+        return slot;
+    }
+
+    // Render thread. The VR laser dot in a tint's colours (lit core over an ink rim); the default dot for no tint.
+    // Up to kDotSets tinted dots are kept, the least recently used replaced; the default dot when one cannot be made
+    // (and for the rest of the session after a creation failure).
+    static constexpr int kDotSets = 4;
+    struct DotTex { std::uint64_t key = 0; std::uint64_t used = 0; ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; };
+    static DotTex s_dotSets[kDotSets];
+    static bool   s_dotTintFailed = false;
+    static ID3D11ShaderResourceView* DotSrvFor(const CursorTintSet& tint)
+    {
+        const bool core = (tint.lit & 0xFF000000u) != 0, rim = (tint.ink & 0xFF000000u) != 0;
+        if ((!core && !rim) || s_dotTintFailed) return s_dotSrv;
+        const std::uint32_t coreRgb = core ? (tint.lit & 0xFFFFFFu) : 0xFFFFFFu;
+        const std::uint32_t rimRgb = rim ? (tint.ink & 0xFFFFFFu) : 0x000000u;
+        const std::uint64_t key = (static_cast<std::uint64_t>(coreRgb) << 32) | rimRgb | (1ull << 63);
+        DotTex* slot = nullptr;
+        for (auto& d : s_dotSets) {
+            if (d.srv && d.key == key) { d.used = ++s_artStamp; return d.srv; }
+        }
+        slot = &s_dotSets[0];
+        for (auto& d : s_dotSets) {
+            if (!d.srv) { slot = &d; break; }
+            if (d.used < slot->used) slot = &d;
+        }
+        if (slot->srv) { slot->srv->Release(); slot->srv = nullptr; }
+        if (slot->tex) { slot->tex->Release(); slot->tex = nullptr; }
+        if (!MakeDotTexture(coreRgb, rimRgb, slot->tex, slot->srv)) {
+            s_dotTintFailed = true;
+            SKSE::log::error("Magelight: tinted VR dot - texture creation failed; the default dot draws instead");
+            return s_dotSrv;
+        }
+        slot->key = key;
+        slot->used = ++s_artStamp;
+        return slot->srv;
     }
 
     // The device the game renders with (BSGraphics renderer data), for a swapchain that will not hand one out.
@@ -3213,6 +3932,15 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_gpu = s_gpuCreate(s_device, s_context, &GpuLogBridge);
             if (s_gpu) {
                 if (auto* drv = static_cast<ultralight::GPUDriver*>(s_gpuGetDriver(s_gpu))) {
+                    // The sample count applies to targets created from now on, so it is set before the renderer
+                    // exists: no view (staggered or not) can have made one yet.
+                    if (s_gpuSamples) {
+                        const int got = s_gpuSamples(s_gpu, s_msaa);
+                        if (got == s_msaa) SKSE::log::info("Magelight: MSAA {}x", got);
+                        else SKSE::log::info("Magelight: MSAA {}x (Magelight.json asks {}x, which this graphics card cannot do for page targets)", got, s_msaa);
+                    } else {
+                        SKSE::log::info("Magelight: the GPU backend predates MSAA — page shapes draw without anti-aliasing");
+                    }
                     ultralight::Platform::instance().set_gpu_driver(drv);
                     s_gpuActive = true;
                 }
@@ -3271,55 +3999,151 @@ float4 ps_straight(VSOut i) : SV_Target {
         return session;
     }
 
+    // A view's first load (or its wake from hibernation): create the View and start the page. s_viewsMutex held:
+    // LoadURL runs OnBeginLoading synchronously inside it (invariant 16). False = CreateView failed.
+    static bool LoadViewLocked(MlView& v)
+    {
+        const bool waking = v.dormant;
+        v.dormant = false;
+        v.domReady = false;
+        v.loadFailed = false;
+        ultralight::ViewConfig vc;
+        vc.is_accelerated = s_gpuActive;
+        vc.is_transparent = true;
+        vc.initial_device_scale = v.deviceScale;
+        v.pageCursor = 0;   // a new View has reported nothing yet
+        v.ul = s_ulRenderer->CreateView(
+            static_cast<std::uint32_t>(v.w), static_cast<std::uint32_t>(v.h), vc,
+            GetOrCreateSession(v.sessionName));
+        if (!v.ul) {
+            SKSE::log::error("Magelight: CreateView failed for view {}", v.id);
+            return false;
+        }
+        v.loadNow = false;
+        v.ul->set_load_listener(&s_loadListener);
+        v.ul->set_view_listener(&s_viewListener);
+        v.ul->set_network_listener(&s_networkListener);
+        // Prefer the on-disk page (the path the React frontend ships
+        // through). Relative paths resolve against s_runtimeDir via the
+        // platform file system; a drive-letter path loads as-is (SA's
+        // HTML lives in SA's own mod folder). Inline banner fallback.
+        const bool absolute = v.htmlPath.size() > 1 && v.htmlPath[1] == ':';
+        const std::filesystem::path onDisk =
+            absolute ? std::filesystem::path(v.htmlPath) : (s_runtimeDir / v.htmlPath);
+        if (!v.htmlPath.empty() && std::filesystem::exists(onDisk)) {
+            SKSE::log::info("Magelight: view {} loading from disk ({})", v.id, v.htmlPath);
+            const std::string url =
+                absolute ? PathToFileUrl(onDisk) : ("file:///" + v.htmlPath);
+            v.ul->LoadURL(url.c_str());
+        } else {
+            SKSE::log::warn("Magelight: view {} page '{}' missing — inline banner fallback",
+                v.id, v.htmlPath);
+            v.ul->LoadHTML(kBannerHTML);
+        }
+        if (waking) SKSE::log::info("Magelight: view {} woke from hibernation", v.id);
+        // The UI-mode target loading late (a wake, or an entry while it waited in the queue): the focus marker ran
+        // against a null View, so re-run it for keys to reach the new page.
+        if (s_focused.load() && v.id == static_cast<ViewId>(s_uiModeView.load())) QueueInput(0, 1, 0);
+        return true;
+    }
+
+    // Staggered first loads (render thread only). A page's parse and first script run land in the following frames'
+    // Renderer::Update, so loading every registered view at world ready stacked them all into the first frames after a
+    // save loads. The queue starts one waiting view per frame, and the next only once the previous one reached DOM
+    // ready or failed (or kStaggerMaxWaitMs passed) and the last frame's Update ran under loadBudgetMs. Both caps are
+    // wall time, not frames, so a slow post-load frame rate cannot stretch the queue: a batch older than
+    // kStaggerBatchMaxMs starts everything still waiting, which keeps consumers that wait for DOM ready before they
+    // show a view (SeverActions' popups and wheel) close to the 0.30.x readiness.
+    static constexpr double kStaggerMaxWaitMs = 100.0;
+    static constexpr double kStaggerBatchMaxMs = 1000.0;
+    struct LoadStagger {
+        ViewId last = 0;                 // the latest view loaded; the queue waits for it to settle
+        std::chrono::steady_clock::time_point lastLoadAt{};   // epoch = nothing loaded yet (never waits)
+        bool   batch = false;            // views have been waiting since batchStart
+        int    batchQueued = 0, batchAtOnce = 0, batchFrames = 0, batchAtCap = 0;
+        double batchWorstUpdateMs = 0.0;
+        std::chrono::steady_clock::time_point batchStart{};
+    };
+    static LoadStagger s_stagger;
+    static double s_lastUlUpdateMs = 0.0;   // the previous frame's Renderer::Update, ms (FrameWork)
+
+    // Render thread: give every view that should have a page its View. Without staggering (Magelight.json
+    // "loadStagger": false) every waiting view loads in this frame, as before 0.31.0. With it, a view loads at once
+    // when it is shown before its load (startVisible or ShowView(true)), is the UI-mode target or wakes from
+    // hibernation; the others wait in a queue in registration order, at most kStaggerBatchMaxMs. Hibernated and
+    // load-on-show views wait for ShowView(true). Pre-load calls (listeners, InteropCall, EvalJS, InvokeJS) stay queued on the view and
+    // are delivered after its DOM ready, exactly as for a view created before the world loaded.
     static void MaterializeViews()
     {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
+        const bool stagger = s_loadStagger.load();
+        const ViewId uiView = s_focused.load() ? static_cast<ViewId>(s_uiModeView.load()) : 0;
+        const auto nowT = std::chrono::steady_clock::now();
+        std::vector<MlView*> queued;
+        int atOnce = 0;
         for (auto& vp : s_views) {
             MlView& v = *vp;
-            if (v.ul || v.w <= 0 || v.h <= 0) continue;
-            if (v.dormant && !v.visible) continue;   // hibernated: wakes on ShowView(true)
-            const bool waking = v.dormant;
-            v.dormant = false;
-            v.domReady = false;
-            ultralight::ViewConfig vc;
-            vc.is_accelerated = s_gpuActive;
-            vc.is_transparent = true;
-            vc.initial_device_scale = v.deviceScale;
-            v.pageCursor = 0;   // a new View has reported nothing yet
-            v.ul = s_ulRenderer->CreateView(
-                static_cast<std::uint32_t>(v.w), static_cast<std::uint32_t>(v.h), vc,
-                GetOrCreateSession(v.sessionName));
-            if (!v.ul) {
-                SKSE::log::error("Magelight: CreateView failed for view {}", v.id);
-                continue;
-            }
-            v.ul->set_load_listener(&s_loadListener);
-            v.ul->set_view_listener(&s_viewListener);
-            v.ul->set_network_listener(&s_networkListener);
-            // Prefer the on-disk page (the path the React frontend ships
-            // through). Relative paths resolve against s_runtimeDir via the
-            // platform file system; a drive-letter path loads as-is (SA's
-            // HTML lives in SA's own mod folder). Inline banner fallback.
-            const bool absolute = v.htmlPath.size() > 1 && v.htmlPath[1] == ':';
-            const std::filesystem::path onDisk =
-                absolute ? std::filesystem::path(v.htmlPath) : (s_runtimeDir / v.htmlPath);
-            if (!v.htmlPath.empty() && std::filesystem::exists(onDisk)) {
-                SKSE::log::info("Magelight: view {} loading from disk ({})", v.id, v.htmlPath);
-                const std::string url =
-                    absolute ? PathToFileUrl(onDisk) : ("file:///" + v.htmlPath);
-                v.ul->LoadURL(url.c_str());
-            } else {
-                SKSE::log::warn("Magelight: view {} page '{}' missing — inline banner fallback",
-                    v.id, v.htmlPath);
-                v.ul->LoadHTML(kBannerHTML);
-            }
-            if (waking) {
-                SKSE::log::info("Magelight: view {} woke from hibernation", v.id);
-                // If it is the UI-mode target, the focus marker ran against
-                // a null View — re-run it so keys reach the new page.
-                if (s_focused.load() && v.id == static_cast<ViewId>(s_uiModeView.load())) QueueInput(0, 1, 0);
+            if (v.ul || v.w <= 0 || v.h <= 0 || v.destroyPending) continue;
+            if ((v.dormant || v.loadOnShow) && !v.visible) continue;   // wakes / first loads on ShowView(true)
+            const bool now = !stagger || v.dormant || v.loadNow || v.loadOnShow || v.id == uiView;
+            if (!now) { queued.push_back(&v); continue; }
+            if (LoadViewLocked(v)) {
+                ++atOnce;
+                s_stagger.last = v.id;
+                s_stagger.lastLoadAt = nowT;
             }
         }
+        if (queued.empty() && !s_stagger.batch) return;
+        if (!s_stagger.batch) {
+            s_stagger.batch = true;
+            s_stagger.batchQueued = 0;
+            s_stagger.batchAtOnce = 0;
+            s_stagger.batchFrames = 0;
+            s_stagger.batchAtCap = 0;
+            s_stagger.batchWorstUpdateMs = 0.0;
+            s_stagger.batchStart = nowT;
+        }
+        ++s_stagger.batchFrames;
+        s_stagger.batchAtOnce += atOnce;
+        s_stagger.batchWorstUpdateMs = std::max(s_stagger.batchWorstUpdateMs, s_lastUlUpdateMs);
+        const auto msSince = [&](std::chrono::steady_clock::time_point t) {
+            return std::chrono::duration<double, std::milli>(nowT - t).count();
+        };
+        if (!queued.empty() && msSince(s_stagger.batchStart) >= kStaggerBatchMaxMs) {
+            // The batch ran past its wall-time cap: start everything still waiting now.
+            std::vector<MlView*> retry;
+            for (MlView* v : queued) {
+                if (!LoadViewLocked(*v)) { retry.push_back(v); continue; }   // CreateView failed: a later frame
+                ++s_stagger.batchAtCap;
+                s_stagger.last = v->id;
+                s_stagger.lastLoadAt = nowT;
+            }
+            queued.swap(retry);
+        } else if (!queued.empty() && atOnce == 0) {
+            bool settled = true;   // the latest load reached DOM ready or failed, or its view is gone or released
+            if (MlView* prev = FindViewLocked(s_stagger.last))
+                settled = prev->domReady || prev->loadFailed || !prev->ul || prev->destroyPending;
+            const bool due = msSince(s_stagger.lastLoadAt) >= kStaggerMaxWaitMs;
+            if (due || (settled && s_lastUlUpdateMs < static_cast<double>(s_loadBudgetMs.load()))) {
+                std::sort(queued.begin(), queued.end(), [](const MlView* a, const MlView* b) { return a->id < b->id; });
+                for (auto it = queued.begin(); it != queued.end(); ++it) {
+                    if (!LoadViewLocked(**it)) continue;   // CreateView failed: retried on a later frame, the next goes now
+                    ++s_stagger.batchQueued;
+                    s_stagger.last = (*it)->id;
+                    s_stagger.lastLoadAt = nowT;
+                    queued.erase(it);
+                    break;
+                }
+            }
+        }
+        if (!queued.empty()) return;
+        const int views = s_stagger.batchQueued + s_stagger.batchAtOnce + s_stagger.batchAtCap;
+        if (views > 1)
+            SKSE::log::info("Magelight: staggered load - {} views over {} frames in {:.0f} ms ({} at once for a show or "
+                            "UI mode, {} together at the {:.0f} ms cap; worst Update {:.1f} ms)",
+                views, s_stagger.batchFrames, msSince(s_stagger.batchStart), s_stagger.batchAtOnce,
+                s_stagger.batchAtCap, kStaggerBatchMaxMs, s_stagger.batchWorstUpdateMs);
+        s_stagger.batch = false;
     }
 
     // Render thread, before MaterializeViews: release the View + texture of
@@ -3407,6 +4231,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                     if (v.tex) { v.tex->Release(); v.tex = nullptr; }
                     for (auto& e : v.evals) orphanEvals.emplace_back(id, std::move(e));
                     v.evals.clear();
+                    if (v.consoleRate.suppressed)
+                        SKSE::log::info("Magelight: [view {} console] {} more lines not logged (over {} a second)",
+                            id, v.consoleRate.suppressed, kConsoleLinesPerSec);
                     destroyed.emplace_back(id, std::move(v.ul));   // released after the erase, outside the lock
                     it = s_views.erase(it);
                     continue;
@@ -4056,8 +4883,17 @@ float4 ps_straight(VSOut i) : SV_Target {
                 const bool dot = VR::CursorDot() && s_dotSrv;
                 const float ch = std::clamp(static_cast<float>(h) * VR::CursorScale(), dot ? 4.0f : 8.0f, 32.0f);
                 float cw = ch, hotX = 0.0f, hotY = 0.0f;
+                ID3D11ShaderResourceView* markSrv = dot ? DotSrvFor(VrCursorTintFor(pv.id)) : s_cursorSrv;
+                // 0.31.0: the view's own image (sized like the arrow, from the panel; its hotspot kept).
+                const std::shared_ptr<CursorImage> viewImg = dot ? nullptr : VrCursorImageFor(pv.id);
+                ID3D11ShaderResourceView* viewSrv = viewImg ? CursorImageSrv(viewImg) : nullptr;
                 if (dot) {
                     hotX = hotY = 0.5f;
+                } else if (viewSrv) {
+                    cw = ch * (static_cast<float>(viewImg->w) / viewImg->h);
+                    hotX = viewImg->hotX / viewImg->w;
+                    hotY = viewImg->hotY / viewImg->h;
+                    markSrv = viewSrv;
                 } else if (s_cursorCustom && s_cursorImgH > 0) {
                     cw = ch * (static_cast<float>(s_cursorImgW) / s_cursorImgH);
                     hotX = s_cursorHotX; hotY = s_cursorHotY;
@@ -4066,7 +4902,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
                 const FLOAT bf[4] = { 0, 0, 0, 0 };
                 s_context->OMSetBlendState((straightAlpha && s_blendStraight) ? s_blendStraight : s_blend, bf, 0xFFFFFFFF);
-                s_context->PSSetShaderResources(0, 1, dot ? &s_dotSrv : &s_cursorSrv);
+                s_context->PSSetShaderResources(0, 1, &markSrv);
                 if (SUCCEEDED(s_context->Map(s_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &cm))) {
                     std::memcpy(cm.pData, none, sizeof(none));
                     s_context->Unmap(s_cb, 0);
@@ -4443,13 +5279,18 @@ float4 ps_straight(VSOut i) : SV_Target {
         DrainBridgeQueues();
         // The CursorMenu's kShow processes a frame or two after SetUIMode, and its movie only exists once it has:
         // hide the vanilla cursor again just after and once the menu has settled.
+        // About 30 frames after an entry or exit, sample the Windows cursor (SampleCursorState).
         static int uiFrames = 0;
+        static int offFrames = -1;   // frames since the last exit; -1 = no exit sample pending
         if (s_focused.load()) {
             ++uiFrames;
+            offFrames = -1;
             if (uiFrames == 3 || uiFrames == 30) {
-                GameTask::Post([]() {
-                    if (!s_focused.load()) return;   // an exit landed first and restored the cursor
+                const bool sample = uiFrames == 30;
+                GameTask::Post([sample]() {
+                    if (!s_focused.load()) return;   // an exit landed first and restored the cursor movie
                     HideVanillaCursor(true);
+                    if (sample) SampleCursorState(true);
                 });
             }
             // Every ~second: the menus we depend on are still up and the vanilla cursor still hidden (see
@@ -4457,8 +5298,26 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (uiFrames > 30 && (uiFrames % 60) == 0) {
                 GameTask::Post([]() { CursorMenuWatchdog(); });
             }
+            // A few times a second: drop the world freeze if the game runs under it (another mod cleared
+            // the pause) and put it back once the pause returns.
+            if ((uiFrames % 15) == 0 && FreezeWorldAvailable()) {
+                GameTask::Post([]() { if (s_focused.load()) ApplyFreezeWorld("reconcile"); });
+            }
         } else {
+            if (uiFrames > 0) {
+                offFrames = 0;
+                // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
+                // every page's cursor; each reports again on the first mouse move (the core re-sends it per move).
+                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                for (auto& vp : s_views) vp->pageCursor = 0;
+            }
             uiFrames = 0;
+            if (offFrames >= 0 && ++offFrames == 30) {
+                offFrames = -1;
+                GameTask::Post([]() {
+                    if (!s_focused.load()) SampleCursorState(false);
+                });
+            }
         }
         // Texture images: repaint the probe (if on), then register/re-point/
         // invalidate — BEFORE Update() so this frame's Render() sees them.
@@ -4491,13 +5350,16 @@ float4 ps_straight(VSOut i) : SV_Target {
         // freezes without this call. Our views all ride default display 0.
         s_ulRenderer->RefreshDisplay(0);
         const auto stageAfterUpdate = ClockT::now();
+        s_lastUlUpdateMs = stageMs(stageT0, stageAfterUpdate);   // the next frame's load-queue budget (MaterializeViews)
         double frameUlRender = 0.0;   // THIS frame's render, for the composite subtraction
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
         // While the UI pass is live the composite records its quads for it instead of drawing them over the
         // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
-        SyncOverlayMenu(AnyInteractiveViewVisible());
+        const bool interactiveVisible = AnyInteractiveViewVisible();
+        SyncOverlayMenu(interactiveVisible);
         s_compositeFrames.fetch_add(1);
         const bool defer = s_engineComposite.load() || (s_overlayMenuRegistered && UiPassActive());
+        if (!s_engineComposite.load()) NoteUiPassState(defer, interactiveVisible);
         // The first deferred frame also draws here: the UI pass already ran this frame with nothing queued. Never in
         // engine mode, where Present is not ours to draw into.
         static bool s_deferredLast = false;
@@ -4587,6 +5449,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                     }
                     if (s_gpuActive) {
                         const auto rt = v.ul->render_target();
+                        // This call resolves the MSAA target, so it is what makes this frame visible:
+                        // call it every frame after the draw, never cache the result.
                         auto* srv = static_cast<ID3D11ShaderResourceView*>(
                             s_gpuSrv(s_gpu, rt.texture_id));
                         if (cutPtr) mapCut(rt.uv_coords.left, rt.uv_coords.top, rt.uv_coords.right, rt.uv_coords.bottom);
@@ -4617,24 +5481,41 @@ float4 ps_straight(VSOut i) : SV_Target {
                 const float px = static_cast<float>(s_cursorPosX.load());
                 const float py = static_cast<float>(s_cursorPosY.load());
                 const int artHeight = static_cast<int>(std::lround(s_cursorHeight * (bh / 1080.0f)));
-                if (!(s_cursorCustom && s_cursorImgH > 0) && EnsureCursorArt(artHeight)) {
-                    // The drawn cursor: the glow fades in over a clickable element and a press shrinks the arrow
-                    // about its tip. At rest it sits on whole pixels (1:1 with its texture when the target is the back buffer).
-                    static float glow = 0.0f, press = 0.0f;
-                    static auto last = std::chrono::steady_clock::now();
-                    const auto now = std::chrono::steady_clock::now();
-                    const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
-                    last = now;
-                    const auto approach = [dt](float v, float target, float seconds) {
-                        const float step = dt / seconds;
-                        return target > v ? std::min(target, v + step) : std::max(target, v - step);
-                    };
-                    const PageCursor kind = PageCursorAt(static_cast<int>(px), static_cast<int>(py), bw, bh);
-                    glow  = approach(glow, kind == PageCursor::Clickable ? 1.0f : 0.0f, 0.12f);
-                    press = approach(press, s_mouseDown.load() ? 1.0f : 0.0f, 0.06f);
+                // The glow fades in over a clickable element (the drawn art) and a press shrinks the cursor about its
+                // hotspot (the drawn arrow, and a mod image that asked for it).
+                static float glow = 0.0f, press = 0.0f;
+                static auto last = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
+                const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
+                last = now;
+                const auto approach = [dt](float v, float target, float seconds) {
+                    const float step = dt / seconds;
+                    return target > v ? std::min(target, v + step) : std::max(target, v - step);
+                };
+                const CursorPick pick = PickCursorAt(static_cast<int>(px), static_cast<int>(py), bw, bh);
+                const PageCursor kind = pick.kind;
+                glow  = approach(glow, kind == PageCursor::Clickable ? 1.0f : 0.0f, 0.12f);
+                press = approach(press, s_mouseDown.load() ? 1.0f : 0.0f, 0.06f);
+                ID3D11ShaderResourceView* modSrv = (!pick.hide && pick.image) ? CursorImageSrv(pick.image) : nullptr;
+                if (pick.hide) {
+                    // The page under the pointer draws its own (CSS cursor: none, or its view's "none").
+                } else if (modSrv) {
+                    // A mod's image: its height at 1080p (else its own) scaled with the backbuffer, aspect kept, the
+                    // hotspot pixel on the cursor position.
+                    const CursorImage& ci = *pick.image;
+                    const float h = (ci.height > 0.0f ? ci.height : static_cast<float>(ci.h)) * (bh / 1080.0f);
+                    const float w = h * (static_cast<float>(ci.w) / static_cast<float>(ci.h));
+                    const float scale = ci.press ? 1.0f - 0.14f * press : 1.0f;
+                    float x = px - ci.hotX * (w / ci.w) * scale, y = py - ci.hotY * (h / ci.h) * scale;
+                    if (scale == 1.0f) { x = std::round(x); y = std::round(y); }
+                    emit(modSrv, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w * scale, h * scale, nullptr);
+                } else if (const CursorArtSet* art = (s_cursorCustom && s_cursorImgH > 0) ? nullptr
+                                                          : EnsureCursorArt(artHeight, pick.tint)) {
+                    // The drawn cursor, in the view's tint. At rest it sits on whole pixels (1:1 with its texture
+                    // when the target is the back buffer).
                     const bool text = kind == PageCursor::Text;
-                    const CursorArtTex& t = text ? s_artIBeam
-                        : s_artArrow[std::clamp(static_cast<int>(std::lround(glow * (kArtGlowSteps - 1))), 0, kArtGlowSteps - 1)];
+                    const CursorArtTex& t = text ? art->ibeam
+                        : art->arrow[std::clamp(static_cast<int>(std::lround(glow * (kArtGlowSteps - 1))), 0, kArtGlowSteps - 1)];
                     const float scale = text ? 1.0f : 1.0f - 0.14f * press;
                     float x = px - t.hotX * scale, y = py - t.hotY * scale;
                     if (scale == 1.0f) { x = std::round(x); y = std::round(y); }
@@ -5532,8 +6413,20 @@ float4 ps_straight(VSOut i) : SV_Target {
                         // VR only: the window gets no key messages, so the page
                         // is typed from the engine device instead. On flat the
                         // window proc already does this — never both.
-                        if (focused && !consumed && VR::IsLive())
-                            QueueScancodeAsText(code, b->IsDown());
+                        // Presses and releases are noted outside UI mode too, so a key held
+                        // across an entry never repeats into a page that did not get its press.
+                        if (VR::IsLive()) {
+                            const bool deliver = focused && !consumed;
+                            if (b->IsDown()) {
+                                NoteVrKeyPress(code, deliver);
+                                if (deliver) QueueScancodeAsText(code, KeyPhase::Down);
+                            } else if (!b->IsPressed()) {
+                                NoteVrKeyPress(code, false);
+                                if (deliver) QueueScancodeAsText(code, KeyPhase::Up);
+                            } else if (deliver && VrKeyRepeatDue(code, b->HeldDuration())) {
+                                QueueScancodeAsText(code, KeyPhase::Repeat);
+                            }
+                        }
                         if (focused) {
                             // unlink: keys typed into a page stay in the page
                             if (prev) prev->next = next;
@@ -5659,7 +6552,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // Game thread. If the engine dropped the CursorMenu under us while UI
     // mode is on, put it back (and say so) — without it the MenuCursor
     // position never updates and our cursor sprite stands still. Also keeps
-    // the vanilla cursor hidden (HideVanillaCursor).
+    // the vanilla cursor sprite hidden (HideVanillaCursor).
     static void CursorMenuWatchdog()
     {
         if (!s_focused.load()) return;
@@ -5938,10 +6831,12 @@ float4 ps_straight(VSOut i) : SV_Target {
                 menu->menuFlags.set(F::kPausesGame);
                 ++ui->numPausesGame;
             } else if (!pause && has) {
+                DropFreezeWorld(menu.get(), "pause off");   // never a freeze over a running game
                 menu->menuFlags.reset(F::kPausesGame);
                 if (ui->numPausesGame > 0) --ui->numPausesGame;
             }
             SKSE::log::info("Magelight: UI mode pause -> {} in place (numPausesGame={})", pause, ui->numPausesGame);
+            if (pause) ApplyFreezeWorld("pause on");
         });
     }
 
@@ -5967,6 +6862,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             const ViewId old = static_cast<ViewId>(s_uiModeView.load());
             if (old == view) { Emit(HostEvent::UIModeSwitched, view); return; }
             s_uiModeView.store(view);
+            ApplyFreezeWorld("view switch");   // follows the new view's preference (the inspector has none)
             ShowView(view, true);
             QueueInput(0, 1, 0);   // re-run the focus marker: key focus follows s_uiModeView
             InvokeJS(old, "window.magelight&&window.magelight._dispatch('__uimode','0');");
@@ -6012,6 +6908,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         v->x = x; v->y = y; v->w = w; v->h = h;
         v->fullscreen = fullscreen;
         v->visible = startVisible;
+        v->loadNow = startVisible;   // visible at creation counts as shown: skips the load queue
         v->clickThrough = clickThrough;
         v->onDomReady = onDomReady;
         v->sessionName = sessionName ? sessionName : "";
@@ -6045,6 +6942,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (MlView* v = FindViewLocked(view)) {
             if (v->visible != show) v->hiddenSince = show ? 0 : GetTickCount64();
             v->visible = show;
+            if (!v->ul) v->loadNow = show;   // an open never waits behind the load queue
             if (!show) v->pageCursor = 0;   // reopened, the page reports again on the first mouse move
         }
     }
@@ -6207,6 +7105,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->reloadPending = true;
         v->domReady = false;   // hold outbound calls for the new page
+        v->loadFailed = false;
         return true;
     }
 
@@ -6223,6 +7122,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->navigateUrl = u;
         v->domReady = false;   // hold outbound calls for the new page
+        v->loadFailed = false;
         return true;
     }
 
@@ -6241,6 +7141,52 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) v->escapeCapture = capture;
+    }
+
+    // ── 0.31.0 ──
+    bool FreezeWorldAvailable()
+    {
+        return !REL::Module::IsVR() && s_freezeWorldCfg.load();
+    }
+    int ConsoleLogLevel()
+    {
+        const int cfg = s_consoleLogCfg.load();
+        return cfg >= 0 ? cfg : (s_devMode.load() ? kConsoleLogAll : kConsoleLogWarnings);
+    }
+    void SetViewFreezeWorld(ViewId view, bool freeze)
+    {
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->freezeWorld == freeze) return;
+            v->freezeWorld = freeze;
+        }
+        SKSE::log::info("Magelight: view {} world freeze {}", view, freeze ? "requested" : "withdrawn");
+        if (s_focused.load() && static_cast<ViewId>(s_uiModeView.load()) == view)
+            GameTask::Post([]() { ApplyFreezeWorld("view preference"); });
+    }
+    bool LoadStaggerEnabled()
+    {
+        return s_loadStagger.load();
+    }
+    bool SetViewLoadOnShow(ViewId view, bool onShow)
+    {
+        bool started = false;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending) return false;
+            if (v->loadOnShow == onShow) return true;
+            v->loadOnShow = onShow;
+            started = v->ul || v->dormant;   // a page already loaded (a hibernated one wakes on show anyway)
+        }
+        if (started)
+            SKSE::log::info("Magelight: view {} load-on-show {} - its page already loaded, nothing changes", view,
+                            onShow ? "set" : "cleared");
+        else
+            SKSE::log::info("Magelight: view {} load-on-show {}", view,
+                            onShow ? "set - first load waits for a show" : "cleared");
+        return true;
     }
     void SetViewNetworkLevel(ViewId view, NetLevel level)
     {
