@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 0.31.0 | 3100 | `SetViewFreezeWorld(view, freeze)` — the game skips its 3D world render behind a paused page (flat only); Papyrus `SetFreezeWorld`; `QueryCapability("freezeworld")` |
 | 0.30.1 | 3001 | `PostGameTask(fn, user)` — post game-thread work from any thread; from a callback inside a frame it never waits on SKSE's task lock |
 | 0.30.0 | 3000 | `NetworkPolicy::FileOnly` (the new default), manifest `"network": "file" \| "loopback"`, Papyrus `SetNetworkPolicy(modId, policy)`; the Papyrus tier acts only on script-owned mods |
 | 0.29.0 | 2900 | `PlayUISound(view, name)`, `SetViewSounds(view, open, close)`; page `magelight.sound()` / `__sound`, `data-ml-sound` markup, manifest `sounds`, Papyrus `PlaySound`; `QueryCapability("sound")` |
@@ -36,6 +37,34 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 0.31.0
+
+- **The world can stop rendering behind a fullscreen page.** A mod calls
+  `SetViewFreezeWorld(view, true)` once for a view; whenever that view holds
+  UI mode with the game paused (`kUIModeFlagPause`), the game is expected to
+  show a frozen frame instead of drawing its 3D world. This is the Journal's
+  freeze flag without the Journal's `kTopmostRenderedMenu`, which would stop
+  Magelight's UI-pass drawing; the flag alone has not been run in game yet.
+  How much frame time it gives back is to be measured. The host puts the
+  freeze on and takes it off itself: it starts with the pause, and it stops
+  before the pause does when the view is unpaused in place, another view
+  takes UI mode (the inspector included), UI mode closes, a load starts, or
+  another mod lets the game run. The HUD is expected to keep drawing under
+  the page, so use it for opaque pages. Papyrus: `SetFreezeWorld(view,
+  freeze)`. `QueryCapability("freezeworld")` is 1 on flat Skyrim; on VR the
+  call returns `Unsupported` (untested there, so excluded as a precaution). A
+  player can turn it off for every mod with `"freezeWorld": false` in
+  `Magelight.json`, which also gives back 0.30.6's menu flags.
+- `Magelight.json` `freezeWorldSkipCapture` (default `true`): in UI-pass
+  composite, meant to keep Magelight's drawing out of the frame the game
+  captures as the frozen background, so a translucent page cannot show a
+  stale copy of itself underneath. Set it to `false` if a page flickers when
+  the freeze starts. No effect with composite `present` or `engine`, or when
+  `freezeWorld` is `false`.
+- `Magelight.log` notes when the UI pass stops drawing while a page is open
+  (its views then draw at Present, which frame generation drops) and when it
+  comes back, with the world freeze's state.
 
 ## 0.30.6
 
