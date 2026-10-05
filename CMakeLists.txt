@@ -10,7 +10,7 @@ endif()
 
 project(
     Magelight
-    VERSION 0.31.2
+    VERSION 0.31.3
     LANGUAGES CXX
 )
 
@@ -73,6 +73,8 @@ add_library(${PROJECT_NAME} SHARED
     src/MagelightDevWatch.cpp
     src/MagelightPapyrus.cpp
     src/MagelightVR.cpp          # Skyrim VR presenter (docs/VR_PRESENTER.md); runtime-gated, no openvr link
+    src/MagelightFonts.cpp       # the font loader whose last resort always loads
+    src/MagelightFonts.rc        # the bundled fallback font (src/fonts/DejaVuSans.ttf)
     ${CMAKE_CURRENT_BINARY_DIR}/version.rc
 )
 

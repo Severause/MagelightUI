@@ -42,6 +42,29 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 0.31.3
+
+- **A PC whose last-resort font cannot be loaded no longer turns the UI off.** When none of the
+  fonts a page asks for loads, Ultralight falls back to the font loader's last resort (Arial) and
+  uses it without checking that it loaded, so on a PC where Arial is missing or cannot be read the
+  first such page crashed inside Ultralight. Magelight caught the crash and switched its overlay
+  off for the rest of the session (`SEH exception ... (MgWCore.dll +0xFB7F77) in frame work`),
+  which players saw as the UI randomly turning off. Magelight now checks at startup that the last
+  resort loads (Arial, then Segoe UI, Tahoma, Verdana, Calibri, Microsoft Sans Serif, Times New
+  Roman) and otherwise uses DejaVu Sans, which `Magelight.dll` carries (about 740 KB), so text
+  always has a font. The log names the font in use (`fonts: last-resort font 'Arial'`) and says
+  why when Arial had to be replaced.
+- **A font in a folder with a non-ASCII name loads.** Ultralight opens font files through the
+  ANSI code page, so a font stored under such a name (one installed for a Windows user whose name
+  is not ASCII, for example) never loaded. Magelight now reads those files itself.
+- **An installed font that cannot be loaded is logged**, once per family (`fonts: '<family>' is
+  installed but cannot be loaded`). A family a page names that the PC does not have stays out of
+  the log, as before.
+- `tools/font-test` runs the stock loader and Magelight's against a page on imitations of broken
+  systems (no fonts at all, unreadable font files, a font in a non-ASCII folder). The stock loader
+  crashes at the field log's offset (`WebCore.dll +0xFB7F77`); Magelight's draws every page, and
+  on a normal system it measures the same text the same as the stock one.
+
 ## 0.31.2
 
 - **`toggleKey` takes a key name.** `Magelight.json` `"toggleKey"` now accepts the same names as

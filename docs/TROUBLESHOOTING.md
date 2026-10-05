@@ -6,7 +6,7 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v0.31.2 loading`).
+version (`Magelight v0.31.3 loading`).
 
 ## Nothing from any Magelight mod appears
 
@@ -203,6 +203,16 @@ fields), `runtimeKeyboard` (`false`), `beam` (`true`) and `beamAlpha` (0.55) for
 `cursorScale` (0.012) and `cursorDot` (`true`) for its pointer, `suppressRuntimeLaser` (`true`:
 hide OpenComposite's own menu laser over Magelight pages), `aimUseTip` (`true`) and
 `aimPitchDeg` (-35) for the controller's aim.
+
+## The UI stopped working partway through a session
+
+`Magelight: SEH exception ... in frame work — overlay disabled, UI mode will drop` means Ultralight
+crashed inside a frame. Magelight caught the crash so the game keeps running, and turned its
+overlay off for the rest of the session: restart the game to bring the UI back (loading a save does
+not). Post the whole log with the report; the module and offset in that line (`MgWCore.dll
++0x...`) say where Ultralight crashed. A crash at `MgWCore.dll +0xFB7F77` before 0.31.3 was a PC
+where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near the top of the log name the
+last-resort font the session uses and, when Arial could not be used, why.
 
 ## "Magelight VEH" and "Magelight stall" lines
 

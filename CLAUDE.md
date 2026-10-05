@@ -20,6 +20,7 @@ src/MagelightApiExport.cpp  the exported C ABI tables (v1..v4) — ORDER = struc
 src/MagelightManifest.cpp   Data/Magelight/<ModId>/manifest.json loader (docs/MANIFEST.md)
 src/MagelightPapyrus.cpp    the Papyrus tier natives (papyrus/Magelight.psc, docs/PAPYRUS.md)
 src/MagelightDevWatch.cpp   devMode hot reload (folder watchers -> ReloadView)
+src/MagelightFonts.cpp      the font loader: the platform's, with a last resort that always loads (src/fonts: DejaVu Sans, an RCDATA resource)
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -29,6 +30,7 @@ extern/ultralight/          vendored 1.4.0b SDK (dev CDN); extern/appcore-ref/ =
 frontend/, views/           React demo (Vite, es2022) + probe/badge pages (dev surfaces)
 assets/, interface/         loose runtime files, the blank focus-menu SWF (the cursor is drawn in code: src/MagelightCursorArt.h)
 tools/desktop-harness/      run our driver (or AppCore's) on the desktop — no game needed
+tools/font-test/            the stock font loader vs ours on imitated broken systems (build.bat builds and runs it)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
 build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <that>\stage (namespaced runtime patch)
 ```
@@ -139,3 +141,11 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     The flag-only freeze, the HUD drawing under it and skip-capture are inferred
     from the engine and the PrismaUI recipe, not yet run in game: the UI-pass
     stop/resume log lines (`NoteUiPassState`) are how a test confirms them.
+19. **The last-resort font must load.** WebCore's `lastResortFallbackFont`
+    dereferences the font of `FontLoader::fallback_font()` without a null check,
+    so a family that fails to load there is an access violation inside a frame,
+    and the overlay is off for the session (0.31.2 field log, `MgWCore.dll
+    +0xFB7F77`, a PC where Arial could not be loaded). The font loader is
+    `MagelightFonts::CreateLoader`'s, never the bare platform one: it checks the
+    last resort at startup and serves the bundled DejaVu Sans when nothing else
+    loads. `tools/font-test` reproduces the crash on the stock loader.
