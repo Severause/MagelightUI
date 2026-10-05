@@ -210,16 +210,18 @@ namespace
 
             RefPtr<FontFile> file = platform_->Load(family, weight, italic);
             // The last-resort family is read and checked here because WebCore dereferences it unchecked;
-            // any other family is read here only when its path is not ASCII (see ReadWhole).
+            // any other family is read and checked here only when its path is not ASCII (see ReadWhole).
             const bool last = SameFamily(name, lastW_);
+            bool readHere = false;
             if (file && !file->is_in_memory()) {
                 const String path = file->filepath();
                 if (last || !IsAscii(Wide(path))) {
                     const RefPtr<Buffer> bytes = ReadWhole(path);
                     file = bytes ? FontFile::Create(bytes) : nullptr;
+                    readHere = true;
                 }
             }
-            if (file && last && !IsLoadableFont(file->buffer())) file = nullptr;
+            if (file && (last || readHere) && !IsLoadableFont(file->buffer())) file = nullptr;
 
             if (!file) {
                 NoteMiss(family);
