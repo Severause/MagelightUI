@@ -16,6 +16,7 @@ namespace MagelightFonts
     // Wraps `platform` so the family Ultralight falls back to last always loads: WebCore
     // dereferences that font without a null check, so a system where it cannot be loaded
     // crashes the page. Also reads a font file whose path is not ASCII itself, and logs an
-    // installed family that cannot be loaded. The loader lives for the process.
+    // installed family the system loader returns nothing for, or whose file this loader read
+    // and could not use. The loader lives for the process.
     ultralight::FontLoader* CreateLoader(ultralight::FontLoader* platform, LogFn log);
 }

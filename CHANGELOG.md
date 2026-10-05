@@ -48,8 +48,9 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   fonts a page asks for loads, Ultralight falls back to the font loader's last resort (Arial) and
   uses it without checking that it loaded, so on a PC where Arial is missing or cannot be read the
   first such page crashed inside Ultralight. Magelight caught the crash and switched its overlay
-  off for the rest of the session (`SEH exception ... (MgWCore.dll +0xFB7F77) in frame work`),
-  which players saw as the UI randomly turning off. Magelight now checks at startup that the last
+  off for the rest of the session, which players saw as the UI randomly turning off. The log shows
+  it as `Magelight VEH: exception 0xC0000005 ... (module MgWCore.dll +0xFB7F77)` followed by
+  `SEH exception ... in frame work — overlay disabled`. Magelight now checks at startup that the last
   resort loads (Arial, then Segoe UI, Tahoma, Verdana, Calibri, Microsoft Sans Serif, Times New
   Roman) and otherwise uses DejaVu Sans, which `Magelight.dll` carries (about 740 KB), so text
   always has a font. The log names the font in use (`fonts: last-resort font 'Arial'`) and says
@@ -58,12 +59,13 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   ANSI code page, so a font stored under such a name (one installed for a Windows user whose name
   is not ASCII, for example) never loaded. Magelight now reads those files itself.
 - **An installed font that cannot be loaded is logged**, once per family (`fonts: '<family>' is
-  installed but cannot be loaded`). A family a page names that the PC does not have stays out of
-  the log, as before.
+  installed but cannot be loaded`): when Windows' font loader hands nothing over for it, or when
+  Magelight read its file itself (the last-resort font, a non-ASCII path) and could not use it. A
+  family a page names that the PC does not have stays out of the log, as before.
 - `tools/font-test` runs the stock loader and Magelight's against a page on imitations of broken
   systems (no fonts at all, unreadable font files, a font in a non-ASCII folder). The stock loader
-  crashes at the field log's offset (`WebCore.dll +0xFB7F77`); Magelight's draws every page, and
-  on a normal system it measures the same text the same as the stock one.
+  crashes at the field log's offset (`WebCore.dll +0xFB7F77`, checked); Magelight's draws every
+  page, and on a normal system it measures the same text the same as the stock one.
 
 ## 0.31.2
 

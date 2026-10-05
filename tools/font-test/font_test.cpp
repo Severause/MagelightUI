@@ -2,7 +2,8 @@
 // under a font loader that imitates a broken system, with and without MagelightFonts' wrapper.
 //
 //   font_test.exe            runs every scenario as a child process and checks the results
-//   font_test.exe <name>     runs one scenario; prints "widths a,b,c,d" and exits 0, or dies
+//   font_test.exe <name>     runs one scenario; prints "widths a,b,c,d,e" and exits 0 (3 when the
+//                            measuring script throws), or dies naming the faulting module and offset
 //
 // Each child prints the rendered widths of five spans (see kPage); the parent compares them.
 #include <windows.h>
@@ -143,6 +144,8 @@ namespace
         return exception.empty() ? 0 : 3;
     }
 
+    constexpr DWORD kTimedOut = 0xDEAD0001;   // the exit code a child killed after 60 s gets
+
     struct Result
     {
         DWORD code = 0;
@@ -155,7 +158,9 @@ namespace
         Result r;
         SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
         HANDLE rd = nullptr, wr = nullptr;
-        CreatePipe(&rd, &wr, &sa, 0);
+        // A child writes a few hundred bytes; the buffer holds them all, so the parent can wait for
+        // the child (with a timeout) before reading.
+        CreatePipe(&rd, &wr, &sa, 1 << 16);
         SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
         STARTUPINFOA si{};
         si.cb = sizeof(si);
@@ -170,11 +175,14 @@ namespace
             return r;
         }
         CloseHandle(wr);
+        if (WaitForSingleObject(pi.hProcess, 60000) == WAIT_TIMEOUT) {
+            TerminateProcess(pi.hProcess, kTimedOut);
+            WaitForSingleObject(pi.hProcess, 5000);
+        }
+        GetExitCodeProcess(pi.hProcess, &r.code);
         char buf[4096];
         DWORD got = 0;
         while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got) r.out.append(buf, got);
-        WaitForSingleObject(pi.hProcess, 60000);
-        GetExitCodeProcess(pi.hProcess, &r.code);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
         CloseHandle(rd);
@@ -190,6 +198,12 @@ namespace
     }
 
     bool Near(double a, double b) { return std::fabs(a - b) < 0.5; }
+
+    // The field log's crash: lastResortFallbackFont dereferencing a null font (Ultralight 1.4.0b.081c48b).
+    bool FieldCrash(const Result& r)
+    {
+        return r.code == EXCEPTION_ACCESS_VIOLATION && r.out.find("at WebCore.dll +0xFB7F77") != std::string::npos;
+    }
 }
 
 int main(int argc, char** argv)
@@ -232,11 +246,11 @@ int main(int argc, char** argv)
               "normal system: an unknown family, Times New Roman and Arial measure the same wrapped and stock");
         check(!Near(safeNormal.w[1], safeNormal.w[3]), "normal system: 'Magelight Fallback' is a font of its own when wrapped");
     }
-    check(stockStripped.code == EXCEPTION_ACCESS_VIOLATION, "no fonts at all: the stock loader crashes (the field report)");
+    check(FieldCrash(stockStripped), "no fonts at all: the stock loader crashes at the field log's WebCore.dll +0xFB7F77");
     check(safeStripped.code == 0 && safeStripped.w.size() == 5, "no fonts at all: the wrapped loader renders");
     if (safeStripped.w.size() == 5 && safeNormal.w.size() == 5)
         check(Near(safeStripped.w[0], safeNormal.w[1]), "no fonts at all: text falls back to the bundled font");
-    check(stockBadpath.code == EXCEPTION_ACCESS_VIOLATION, "unreadable font files: the stock loader crashes");
+    check(FieldCrash(stockBadpath), "unreadable font files: the stock loader crashes at WebCore.dll +0xFB7F77");
     check(safeBadpath.code == 0 && safeBadpath.w.size() == 5, "unreadable font files: the wrapped loader renders");
     if (safeBadpath.w.size() == 5 && safeNormal.w.size() == 5)
         check(Near(safeBadpath.w[0], safeNormal.w[1]), "unreadable font files: text falls back to the bundled font");

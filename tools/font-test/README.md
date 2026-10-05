@@ -11,16 +11,18 @@ with the platform font loader as Magelight 0.31.2 used it and once with `Magelig
 | `badpath` | every family names a file that does not exist |
 | `nonascii` | the family `PathTest` is DejaVu Sans in a folder named `fönts-テスト` |
 
-Each scenario runs in a child process, so a crash is a result rather than the end of the run; the
-child names the faulting module and offset. The page measures five spans (an unknown family, the
-bundled family's name, `PathTest`, Times New Roman, Arial), and the parent checks:
+Each scenario runs in a child process (killed after 60 s), so a crash is a result rather than the
+end of the run; the child names the faulting module and offset. The page measures five spans (an
+unknown family, the bundled family's name, `PathTest`, Times New Roman, Arial), and the parent
+checks:
 
 - on a normal system both loaders measure the same text the same, so nothing changes there;
-- `stripped` and `badpath` crash the stock loader at `WebCore.dll +0xFB7F77`, the offset of the
-  field log's `MgWCore.dll +0xFB7F77` (MgWCore.dll is the renamed WebCore.dll), and Magelight's
-  loader draws them in the bundled font;
-- `nonascii`: the stock loader cannot open the font (unless the PC's ANSI code page is UTF-8), and
-  Magelight's loader can.
+- `stripped` and `badpath` crash the stock loader with an access violation at `WebCore.dll
+  +0xFB7F77`, the offset of the field log's `MgWCore.dll +0xFB7F77` (MgWCore.dll is the renamed
+  WebCore.dll; the offset belongs to the pinned SDK build), and Magelight's loader draws them in
+  the bundled font;
+- `nonascii`: Magelight's loader loads the font. Whether the stock loader can is printed as
+  information: it cannot unless the PC's ANSI code page is UTF-8.
 
 ## Build and run
 

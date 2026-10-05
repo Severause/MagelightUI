@@ -206,13 +206,15 @@ hide OpenComposite's own menu laser over Magelight pages), `aimUseTip` (`true`) 
 
 ## The UI stopped working partway through a session
 
-`Magelight: SEH exception ... in frame work — overlay disabled, UI mode will drop` means Ultralight
-crashed inside a frame. Magelight caught the crash so the game keeps running, and turned its
-overlay off for the rest of the session: restart the game to bring the UI back (loading a save does
-not). Post the whole log with the report; the module and offset in that line (`MgWCore.dll
-+0x...`) say where Ultralight crashed. A crash at `MgWCore.dll +0xFB7F77` before 0.31.3 was a PC
-where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near the top of the log name the
-last-resort font the session uses and, when Arial could not be used, why.
+`Magelight: SEH exception ... in frame work — overlay disabled, UI mode will drop` means something
+crashed inside a frame, in Ultralight or in Magelight's own frame code. Magelight caught the crash so
+the game keeps running, and turned its overlay off for the rest of the session: restart the game to
+bring the UI back (loading a save does not). Post the whole log with the report. The
+`Magelight VEH: exception ... (module <dll> +0x...)` line just before it names the module and
+offset: `MgWCore.dll` is Ultralight's web engine (see the VEH section below; the VEH line is
+missing when the session already logged eight exceptions). `MgWCore.dll +0xFB7F77` before 0.31.3
+was a PC where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near the top of the log
+name the last-resort font the session uses and, when Arial could not be used, why.
 
 ## "Magelight VEH" and "Magelight stall" lines
 

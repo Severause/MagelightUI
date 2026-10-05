@@ -78,6 +78,10 @@ add_library(${PROJECT_NAME} SHARED
     ${CMAKE_CURRENT_BINARY_DIR}/version.rc
 )
 
+# rc's dependency scan sees #include only, not an RCDATA file: name the font, or a swap never relinks.
+set_source_files_properties(src/MagelightFonts.rc PROPERTIES
+    OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/DejaVuSans.ttf)
+
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${ULTRALIGHT_DIR}/include

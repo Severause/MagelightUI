@@ -60,7 +60,8 @@ namespace
     std::uint32_t Be32(const std::uint8_t* p) { return std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]; }
     std::uint16_t Be16(const std::uint8_t* p) { return std::uint16_t(p[0] << 8 | p[1]); }
 
-    // A TrueType / OpenType font at `at` whose table directory lies inside the data and names cmap and head.
+    // A TrueType / OpenType font at `at` whose table directory lies inside the data and has the tables
+    // FreeType will not open a face without (cmap, hhea, hmtx, maxp, and a full head with a sane unitsPerEm).
     bool SfntAt(const std::uint8_t* d, std::size_t n, std::size_t at)
     {
         if (at > n || n - at < 12) return false;
@@ -68,15 +69,23 @@ namespace
         if (version != 0x00010000 && version != 0x74727565 /*true*/ && version != 0x4F54544F /*OTTO*/) return false;
         const std::uint16_t tables = Be16(d + at + 4);
         if (tables == 0 || (n - at - 12) / 16 < tables) return false;
-        bool cmap = false, head = false;
+        unsigned found = 0;
         for (std::uint16_t i = 0; i < tables; ++i) {
             const std::uint8_t* r = d + at + 12 + std::size_t(i) * 16;
             const std::uint32_t tag = Be32(r), off = Be32(r + 8), len = Be32(r + 12);
             if (off > n || len > n - off) return false;
-            cmap |= tag == 0x636D6170;   // cmap
-            head |= tag == 0x68656164;   // head
+            switch (tag) {
+            case 0x636D6170: found |= 1; break;   // cmap
+            case 0x68686561: found |= 2; break;   // hhea
+            case 0x686D7478: found |= 4; break;   // hmtx
+            case 0x6D617870: found |= 8; break;   // maxp
+            case 0x68656164:                      // head: 54 bytes, unitsPerEm at 18
+                if (len >= 54 && Be16(d + off + 18) >= 16 && Be16(d + off + 18) <= 16384) found |= 16;
+                break;
+            default: break;
+            }
         }
-        return cmap && head;
+        return found == 31;
     }
 
     // Ultralight hands the bytes to FreeType as face 0, so a collection is checked at its first font.
@@ -246,7 +255,9 @@ namespace
                 if (noted_.size() >= kMaxNoted || !noted_.insert(key).second) return;
             }
             if (Installed(family))
-                Log(1, "fonts: '" + Utf8(family) + "' is installed but cannot be loaded; text that asks for it uses the next font in its list");
+                Log(1, "fonts: '" + Utf8(family) + "' is installed but cannot be loaded; " +
+                           (SameFamily(Wide(family), lastW_) ? std::string("the bundled font stands in for it")
+                                                             : std::string("text that asks for it uses the next font in its list")));
         }
 
         ultralight::FontLoader* platform_;
