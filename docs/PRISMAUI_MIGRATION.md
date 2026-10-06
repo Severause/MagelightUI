@@ -6,17 +6,18 @@ and, because the two hosts coexist, they never have to choose (see
 
 A note on framing before anything technical: PrismaUI proved that web-stack UI belongs in
 Skyrim modding and built the market this project serves. Magelight exists because
-SeverActions needed things PrismaUI doesn't do — GPU rendering, lifecycle control, VR — not
-because the model was wrong. If your mod works on PrismaUI today and needs nothing listed
+SeverActions needed things PrismaUI doesn't do — GPU rendering, lifecycle control, VR on
+SteamVR itself — not because the model was wrong. If your mod works on PrismaUI today and needs nothing listed
 below, staying is a legitimate choice; this page is for the day it isn't.
 
 ## Why mods move (and why some shouldn't)
 
 **You might move for:** GPU rendering through a D3D11 driver on the game's own device, view
 lifecycle beyond create/destroy (`ReloadView`, `Navigate`, hibernation of hidden views), view
-bounds/anchors/layers (PrismaUI views are implicit fullscreen), a Papyrus API, hot reload in devMode, per-mod storage isolation, VR support
-(SteamVR-native *and* OpenComposite), and a `minHost` version gate that tells users what to
-install instead of rendering a blank page.
+bounds, anchors and named layers (PrismaUI views are fullscreen; it has a stacking order but no
+bounds), a Papyrus API, hot reload in devMode, per-mod storage isolation, VR on SteamVR directly
+as well as through OpenComposite (PrismaUI's VR build runs through OpenComposite Unleashed only),
+and a `minHost` version gate that tells users what to install instead of rendering a blank page.
 
 **You might stay for:** PrismaUI is installed by every one of your current users and its
 CPU path is fine for a light page; your page does nothing PrismaUI can't do; you don't want
@@ -35,8 +36,8 @@ both hosts are present — neither host sees the other's focused view.
 ## What carries over
 
 Both hosts embed Ultralight (WebKit), so **your pages carry over almost unchanged** — this
-is measured, not aspirational: SeverActions ported 13 long-lived views across 10 HTML
-entries with the frontend essentially untouched.
+is measured, not aspirational: SeverActions ported every view (14 views over 9 pages in 4.2)
+with the frontend essentially untouched.
 
 - **Page → host:** PrismaUI registers C++ listeners as page globals (`window.castSpell(...)`).
   Magelight's `RegisterJSListener(view, name, cb)` installs the same `window.<name>(arg)`
@@ -47,9 +48,11 @@ entries with the frontend essentially untouched.
   `window.magelight.on(channel, fn)` with pre-mount replay instead of hand-rolled
   ready-handshakes (Magelight buffers sends that arrive before your app mounts).
 - **Marshalling:** pass raw JSON as one string arg, no extra escaping — same rule on both.
-- **Text focus:** Magelight detects text-field focus automatically (`focusin`/`focusout`
-  on real inputs), so PrismaUI's `__prismaNativeImeFocusChanged` signal is not needed —
-  delete any calls to it.
+- **Text input and IME:** Magelight detects text-field focus itself (`focusin`/`focusout`
+  on real inputs) and uses the Windows IME: the candidate list opens at the caret and the
+  composition shows inline in the field. PrismaUI's IME is the `prismaIME_state` page event, with
+  the page drawing its own composition and candidate overlay; on Magelight delete that listener
+  and overlay. For an "IME active" indicator, listen for `magelight:ime` ([CPP.md](CPP.md), "IME").
 - **UI sounds (Magelight-only gain, 0.29.0):** neither host's pages can play audio (Ultralight has no
   media stack — the recurring "can I add a click sound to PrismaUI buttons?" question). On Magelight
   put `data-ml-sound="click"` on a button, or call `magelight.sound('click')`, and the host plays the
@@ -59,11 +62,12 @@ entries with the frontend essentially untouched.
   SDK's `host.sound`, which is a no-op off Magelight.
 - **Network:** Magelight pages are file-only by default (0.30.0): they read their own files and
   nothing over the network. If your page fetches a local server, your DLL calls
-  `SetNetworkPolicy(mod, NetworkPolicy::LoopbackOnly)`; for the internet, `NetworkPolicy::Any`
-  ([CPP.md](CPP.md)).
+  `SetNetworkPolicy(mod, NetworkPolicy::LoopbackOnly)` (or the manifest says
+  `"network": "loopback"`, or Papyrus calls `SetNetworkPolicy`); for the internet,
+  `NetworkPolicy::Any` from C++ ([CPP.md](CPP.md)).
 - **localStorage:** persists on both hosts. Note: Magelight's cache is a different folder,
-  and sessions are isolated per mod by default (`sessionName: "default"` opts back into a
-  shared jar). User data stored under PrismaUI does **not** move — if that matters for your
+  and sessions are isolated per mod by default (`"default"` opts back into a shared jar: the
+  `sessionName` field from C++, the `"session"` key in a manifest). User data stored under PrismaUI does **not** move — if that matters for your
   mod, migrate it through your own save data.
 - **Frontend build:** strip `crossorigin` from module tags and set `base: './'` — required
   over `file:///` on Magelight, tolerated-but-pointless on PrismaUI. If you targeted es2019
@@ -73,20 +77,27 @@ entries with the frontend essentially untouched.
 ## The C++ mapping
 
 Magelight's header is the same acquisition pattern (`Magelight_RequestApi(n)`, versioned
-function-pointer struct, null = host absent). The calls SA used map one-to-one:
+function-pointer struct, null = host absent). Every PrismaUI
+call maps like this:
 
 | PrismaUI | Magelight | Note |
 |---|---|---|
 | `CreateView(path, onDomReady)` | `CreateViewEx(mod, &desc, &out)` | fullscreen via `ViewDesc::fullscreen`, or give real bounds/anchor |
 | `Show` / `Hide` | `ShowView(view, bool)` | identical |
-| `Focus(view, pauseGame)` | `RequestUIMode(view, flags)` | returns a `Result` — someone else may own UI mode; queue or refuse |
+| `Focus(view, pauseGame, disableFocusMenu)` | `RequestUIMode(view, flags)` | returns a `Result` — someone else may own UI mode; queue or refuse. There is no focus menu to disable: the host's own `MagelightFocus` menu is managed for you |
 | `Unfocus(view)` | `ReleaseUIMode(mod)` | never hides the view — same as Unfocus |
+| `IsHidden(view)` | — | no query; track what you showed |
 | `IsValid(view)` | `IsViewValid(view)` | |
+| `HasFocus(view)` | `GetUIModeOwner()` | answers per mod, not per view |
 | `HasAnyActiveFocus()` | `IsUIModeActive()` | per-host — see [Running both](#running-both) |
-| `Invoke(view, js)` | `InvokeJS(view, js)` / `EvalJS` | EvalJS also returns result/exception |
+| `Invoke(view, js, callback)` | `InvokeJS(view, js)` / `EvalJS` | `EvalJS` returns the result like PrismaUI's callback, plus any exception |
 | `InteropCall` / `RegisterJSListener` | same names | `RegisterJSListenerEx` adds a `void* user` |
 | `kFreezeFrameBackground` / `kTopmostRenderedMenu` on `PrismaUI_FocusMenu` | `SetViewFreezeWorld(view, true)` (0.31.0) | once per view; the host applies it while the view holds UI mode paused and drops it before the pause. Never set flags on `MagelightFocus` yourself |
 | FocusMenu close polling | **delete it** | `onEvent` gets `UIModeExited` on *every* exit path — no Escape poller, no orphaned FocusMenu |
+| `SetOrder` / `GetOrder` | `SetViewOrder` / `GetViewOrder`, `RaiseView` | order within the view's layer; the layer itself is set at creation |
+| `SetScrollingPixelSize` / `GetScrollingPixelSize` | `SetScrollStep(view, px)` | pixels per wheel notch (default 40) |
+| `CreateInspectorView` / `SetInspectorVisibility` / `IsInspectorVisible` | `ShowInspector` / `IsInspectorVisible` | no inspector bounds to set |
+| `RegisterConsoleCallback` (V2) | the `ConsoleMessage` host event | every console message in full, whatever `Magelight.log` records |
 | Destroy (unused by most) | `DestroyView(view)` | async; views can also `ReloadView`/`Navigate` |
 
 Five behavioral differences to design around:
@@ -125,7 +136,8 @@ Your FOMOD's dependency line changes from PrismaUI to Magelight; pages move from
 namespace — see [MANIFEST.md](MANIFEST.md)). Declare `minHost` and the host itself renders
 the "needs Magelight a.b.c" panel for users on an older host. Bundle-versus-require and the
 licensing your mod inherits are covered in [DISTRIBUTION.md](DISTRIBUTION.md) — both hosts
-ship the same Ultralight free-tier runtime, so nothing about your license posture changes.
+ship the Ultralight 1.4 free tier (PrismaUI 1.4.1-dev, Magelight 1.4.0b), so nothing about your
+license posture changes.
 
 If your mod is Papyrus-only, you were never on PrismaUI — start at
 [PAPYRUS.md](PAPYRUS.md) instead; there is nothing to unlearn.
