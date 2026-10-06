@@ -10,7 +10,7 @@ endif()
 
 project(
     Magelight
-    VERSION 0.31.2
+    VERSION 0.31.3
     LANGUAGES CXX
 )
 
@@ -73,8 +73,14 @@ add_library(${PROJECT_NAME} SHARED
     src/MagelightDevWatch.cpp
     src/MagelightPapyrus.cpp
     src/MagelightVR.cpp          # Skyrim VR presenter (docs/VR_PRESENTER.md); runtime-gated, no openvr link
+    src/MagelightFonts.cpp       # the font loader whose last resort always loads
+    src/MagelightFonts.rc        # the bundled fallback font (src/fonts/DejaVuSans.ttf)
     ${CMAKE_CURRENT_BINARY_DIR}/version.rc
 )
+
+# rc's dependency scan sees #include only, not an RCDATA file: name the font, or a swap never relinks.
+set_source_files_properties(src/MagelightFonts.rc PROPERTIES
+    OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/DejaVuSans.ttf)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

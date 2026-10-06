@@ -158,11 +158,12 @@ download and are installed beside the runtime under `SKSE/Plugins/Magelight/lice
   itself ([docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)).
 - **MagelightGPU.dll** — LGPL-2.1, derived from Ultralight's AppCore D3D11 driver and isolated in
   its own DLL behind a C ABI; its corresponding source is the `gpu/` folder of this repository
-  at each release's tag (`v0.31.2` for 0.31.2).
+  at each release's tag (`v0.31.3` for 0.31.3).
 - **Web Inspector** (staged by `build.ps1`, not in the player download) — Apple BSD.
 - Compiled into `Magelight.dll`: CommonLibVR (MinLL's MIT continuation of CommonLibSSE-NG),
   {fmt}, spdlog, nlohmann/json, DirectXMath and DirectXTK — MIT; rapidcsv, Xbyak and the
-  OpenVR headers — BSD 3-Clause. The example and test pages carry React (MIT).
+  OpenVR headers — BSD 3-Clause; the DejaVu Sans font (Bitstream Vera and Arev font licenses). The
+  example and test pages carry React (MIT).
 
 Ultralight (c) 2024 Ultralight, Inc. All rights reserved. Ultralight is a trademark of
 Ultralight, Inc. Please see the accompanying NOTICES.txt for full text.

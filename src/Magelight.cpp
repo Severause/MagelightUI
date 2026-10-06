@@ -8,6 +8,7 @@
 #include "MagelightManifest.h"
 #include "MagelightDevWatch.h"
 #include "MagelightCursorArt.h"
+#include "MagelightFonts.h"
 #include "HotkeyNames.h"
 
 #include <RE/Skyrim.h>
@@ -3900,6 +3901,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         return true;
     }
 
+    static void FontLog(int level, const char* message)
+    {
+        if (level) SKSE::log::warn("Magelight: {}", message);
+        else SKSE::log::info("Magelight: {}", message);
+    }
+
     static bool CreateUltralight()
     {
         ultralight::Config cfg;
@@ -3927,7 +3934,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         cfg.font_gamma = s_fontGamma;
         SKSE::log::info("Magelight: font hinting '{}', gamma {:.2f}", s_fontHinting, s_fontGamma);
         ultralight::Platform::instance().set_config(cfg);
-        ultralight::Platform::instance().set_font_loader(ultralight::GetPlatformFontLoader());
+        // The platform loader with a last resort that always loads (MagelightFonts.h): with Arial
+        // missing or unreadable, the stock one crashed the first page that needed it.
+        ultralight::Platform::instance().set_font_loader(
+            MagelightFonts::CreateLoader(ultralight::GetPlatformFontLoader(), &FontLog));
         // Our MlFileSystem, not AppCore's registry-MIME one — see the class
         // comment (module scripts silently refuse a non-JS MIME).
         ultralight::Platform::instance().set_file_system(&s_fileSystem);
