@@ -37,11 +37,12 @@ development. Neither the SDK nor React is required — the contract is the two g
 
 ## What a page can reach
 
-- **Files**: its own mod folder and the host's runtime dir, nothing else.
+- **Files**: the `Data/Magelight/` tree, registered page folders and the host's runtime dir, nothing
+  else; the host does not keep one mod's page out of another mod's folder.
 - **Network**: nothing by default (file-only, since 0.30.0; before that the default also let
   a page reach this machine). A mod opts in for itself: the manifest key `"network": "loopback"`,
   or Papyrus `SetNetworkPolicy(modId, "loopback")` for a mod scripts own, adds http(s) to this
-  machine (localhost, 127.x, ::1). Only a DLL can grant internet reach (C++
+  machine (`localhost`, `127.0.0.1`). Only a DLL can grant internet reach (C++
   `SetNetworkPolicy(mod, Any)`). A page that fetches from a local server needs one of these.
 - **Storage**: `localStorage`, IndexedDB and cookies are per mod by default (a mod that names
   a shared session, or `"default"`, shares that jar). They are not per save or per character,

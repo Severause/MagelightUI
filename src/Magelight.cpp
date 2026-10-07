@@ -120,6 +120,11 @@ namespace Magelight {
     // instead of a rebuild per guess.
     static std::string s_fontHinting = "normal";
     static double      s_fontGamma   = 1.8;
+    // Magelight.json "animationTimerDelay" (seconds): Ultralight's requestAnimationFrame timer. Its 1/60 default
+    // aliases against the per-Present pump (16.7 and 33.3 ms callback intervals alternate at 60 Hz: 40 callbacks a
+    // second, 48 at 144 Hz). Below the frame period rAF follows the frame rate; a few frames then run the callback
+    // twice. CSS animations and transitions step every pumped frame whatever this is.
+    static double      s_animTimerDelay = 0.001;
     // Magelight.json "msaa": the GPU driver's MSAA samples (1 off, 2, 4, 8). Ultralight fills SVG and other
     // non-rectangular shapes as plain triangles and leaves their edges to MSAA; boxes, rounded corners and text
     // smooth themselves. Each sample adds a copy of every render target in video memory: a page's own (2560x1440:
@@ -150,9 +155,10 @@ namespace Magelight {
     // Milestone-3 playground: hover styling, click counters, a text field, and
     // a scrollable list — one widget per input path (mouse move/down/up, key,
     // char, wheel). The clock keeps proving the JS engine ticks.
+    // Loaded with LoadHTML, so it carries its CSP itself (the file-only policy of CspFor, kept in step by hand).
     static constexpr const char* kBannerHTML = R"HTML(
 <!DOCTYPE html>
-<html><head><style>
+<html><head><meta http-equiv="Content-Security-Policy" content="default-src file: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src data: blob:; frame-src data:; form-action file:; object-src 'none'"><style>
   html, body { margin:0; background:transparent; overflow:hidden;
                font-family:Georgia,serif; color:#3a2d17; }
   .card {
@@ -440,6 +446,8 @@ namespace Magelight {
                 s_fontHinting = HotkeyNames::Lower(it->get<std::string>());
             if (auto it = j.find("fontGamma"); it != j.end() && it->is_number())
                 s_fontGamma = std::clamp(it->get<double>(), 1.0, 3.0);
+            if (auto it = j.find("animationTimerDelay"); it != j.end() && it->is_number())
+                s_animTimerDelay = std::clamp(it->get<double>(), 0.0, 1.0);
             // Any JSON number: some editors write 8.0 for 8, and a skipped key would silently keep 4x.
             if (auto it = j.find("msaa"); it != j.end() && it->is_number()) {
                 const double asked = it->get<double>();
@@ -611,10 +619,11 @@ namespace Magelight {
     struct MlView {
         ViewId id = 0;
         std::string htmlPath;   // relative to the runtime dir; "" = inline banner
-        // Host pinning: the ONE folder file:/// requests from this page may
-        // read (its mod folder under Data\Magelight\<Mod>, or the runtime
-        // dir for host pages). Everything else is refused in
-        // MlNetworkListener — see PageRootFor.
+        // The page's own folder (its mod folder under Data\Magelight\<Mod>, or
+        // the runtime dir for host pages): one of the roots MlFileSystem
+        // serves, and the key its network level is published under for the
+        // page's CSP (RootNetLevel). WebKit asks for files with no View in
+        // hand, so the file gate is the union of every root, not this one.
         std::filesystem::path root;
         int x = 0, y = 0;       // negative = anchored from right/bottom edge
         int w = 0, h = 0;
@@ -1152,18 +1161,39 @@ namespace Magelight {
         else SKSE::log::info("Magelight: {} JS listener shim(s) refreshed on view {}", count, v.id);
     }
 
+    // A page's own URL schemes: what a view may show and what the bridge is installed on.
+    static bool IsLocalPageUrl(const std::string& url)
+    {
+        return url.empty() || url.rfind("file:", 0) == 0 || url.rfind("about:", 0) == 0 || url.rfind("data:", 0) == 0;
+    }
+
     class MlLoadListener final : public ultralight::LoadListener {
     public:
-        // NOTE: no OnBeginLoading override. Ultralight fires it SYNCHRONOUSLY
-        // inside LoadURL, which MaterializeViews calls while holding
-        // s_viewsMutex — taking the lock there is a self-deadlock that the
-        // SEH guard turned into a dead overlay (0.16.0 field log). The
-        // domReady flag is cleared where loads are REQUESTED instead
-        // (MaterializeViews, ReloadView, NavigateView).
-        void OnWindowObjectReady(ultralight::View* caller, uint64_t, bool is_main_frame,
-            const ultralight::String&) override
+        // Ultralight fires OnBeginLoading SYNCHRONOUSLY inside LoadURL, which
+        // LoadViewLocked calls while holding s_viewsMutex — taking the lock
+        // here is a self-deadlock that the SEH guard turned into a dead
+        // overlay (0.16.0 field log). So this takes no lock: it only stops a
+        // main-frame navigation off the page's own schemes. A top-level
+        // navigation is outside the page's CSP, and a remote document would
+        // get the bridge and the mod's network reach; Stop() here keeps the
+        // request from being sent (a later LoadURL back leaked the requests
+        // of the page already loading). The domReady flag is cleared where
+        // loads are REQUESTED (MaterializeViews, ReloadView, NavigateView).
+        void OnBeginLoading(ultralight::View* caller, uint64_t, bool is_main_frame,
+            const ultralight::String& url) override
         {
             if (!is_main_frame) return;
+            const std::string u = url.utf8().data();
+            if (IsLocalPageUrl(u)) return;
+            caller->Stop();
+            static std::atomic<int> s_logged{ 0 };
+            if (s_logged.fetch_add(1) < 32)
+                SKSE::log::warn("Magelight: stopped a page navigating to {} - a view shows its own files only", u);
+        }
+        void OnWindowObjectReady(ultralight::View* caller, uint64_t, bool is_main_frame,
+            const ultralight::String& url) override
+        {
+            if (!is_main_frame || !IsLocalPageUrl(url.utf8().data())) return;
             MlView* v = nullptr;
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
@@ -1370,7 +1400,6 @@ namespace Magelight {
     static void SetUIMode(bool on, bool hideView = true, bool pauseGame = false, bool noTextEntry = false);   // fwd (below)
     static bool EscapeCapturedByUiView();                                               // fwd (below)
     static std::filesystem::path GameRoot();                                            // fwd (below)
-    static std::filesystem::path ResolveFileUrl(const std::string& url);                // fwd (below MlFileSystem)
     static bool PathIsUnder(const std::filesystem::path& p, const std::filesystem::path& base);   // fwd (below)
     static void CursorMenuWatchdog();                                                   // fwd (below)
     static std::atomic<bool> s_focusMenuPause{ false };   // flag for the NEXT open
@@ -2588,6 +2617,22 @@ namespace Magelight {
                 s_runtimeDir.string());
             return false;
         }
+        // The runtime must be the SDK this host was built against: a mod manager can pair Magelight.dll from
+        // one mod with the runtime DLLs of another, and a different Ultralight version means different vtables
+        // (a crash inside a frame), so a mismatch leaves the host inert instead.
+        if (HMODULE ul = GetModuleHandleW(L"Magelight1.dll")) {
+            using VersionFn = const char* (*)();
+            const auto ver = reinterpret_cast<VersionFn>(GetProcAddress(ul, "ulVersionString"));
+            const auto wk  = reinterpret_cast<VersionFn>(GetProcAddress(ul, "ulWebKitVersionString"));
+            const std::string have = ver ? ver() : "";
+            SKSE::log::info("Magelight: Ultralight {} (WebKit {})", have.empty() ? "?" : have, wk ? wk() : "?");
+            if (have != ULTRALIGHT_VERSION) {
+                SKSE::log::error("Magelight: the Ultralight runtime under {} is version '{}', but this Magelight.dll "
+                    "was built for {} - another mod's copy of the runtime is installed over this one",
+                    s_runtimeDir.string(), have, ULTRALIGHT_VERSION);
+                return false;
+            }
+        }
 
         // Optional GPU backend. Loaded AFTER the runtime so its (namespaced)
         // Ultralight imports bind to the modules already in the process.
@@ -2634,12 +2679,12 @@ namespace Magelight {
     };
     static SpdLogger s_ulLogger;
 
-    // Our own FileSystem instead of AppCore's: the stock Windows one resolves
-    // MIME types from the REGISTRY, where .js is frequently text/plain or
-    // absent — and MODULE scripts hard-require a JavaScript MIME (classic
+    // Our own FileSystem instead of AppCore's. The stock Windows one has no
+    // entry for .mjs, resolves nothing behind a query string and serves any
+    // path, and MODULE scripts hard-require a JavaScript MIME (classic
     // scripts don't care), so a Vite bundle loads as a fully transparent,
-    // silently-empty page (the 0.5.1 field report). A fixed extension table
-    // removes the machine-dependence entirely.
+    // silently-empty page (the 0.5.1 field report). Ours also serves only
+    // the page roots and injects each page's Content-Security-Policy.
     // Win32 clipboard for WebKit's editing commands (Ctrl+C/V/X, context
     // paste). Ultralight never sets one itself — without it every text field
     // silently ignores paste. Called on the render thread; OpenClipboard is
@@ -2725,43 +2770,20 @@ namespace Magelight {
         return host == "localhost" || host == "[::1]" || IsLoopbackV4(host);
     }
 
-    // OnNetworkRequest runs on a WebKit thread: it reads the view registry
-    // only under s_viewsMutex.
+    // The network gate behind the page's CSP (CspFor): Ultralight calls it for http(s) loads only. It never
+    // sees file:, data:, synchronous XHR or WebSocket requests, so the file gate is MlFileSystem's and the
+    // policy is what refuses the other two. Render thread; it reads the view registry only under s_viewsMutex.
     class MlNetworkListener final : public ultralight::NetworkListener {
     public:
         bool OnNetworkRequest(ultralight::View* caller, ultralight::NetworkRequest& req) override
         {
             const std::string proto = req.urlProtocol().utf8().data();
-            if (proto == "data" || proto == "about" || proto == "blob") return true;
-            if (proto == "file") {
-                // Host pinning: a page reads its OWN mod folder and the host
-                // runtime dir (resources, cursor, host pages), nothing else —
-                // no other mod's folder, no traversal out of Data, no
-                // arbitrary drive path. The idea is MeridianUI's mod:// scheme;
-                // Ultralight has no custom schemes, so the pin lives on the
-                // request instead of the URL (0.26.4).
-                std::filesystem::path root;
-                ViewId id = 0;
-                {
-                    std::lock_guard<std::mutex> lk(s_viewsMutex);
-                    if (MlView* v = FindViewByUlLocked(caller)) { root = v->root; id = v->id; }
-                }
-                const std::filesystem::path target = ResolveFileUrl(req.url().utf8().data());
-                const bool ok = !target.empty() &&
-                    (PathIsUnder(target, s_runtimeDir) || (!root.empty() && PathIsUnder(target, root)));
-                if (ok) return true;
-                static std::atomic<int> s_pinLogged{ 0 };
-                if (s_pinLogged.fetch_add(1) < 32) {
-                    SKSE::log::warn("Magelight: view {} refused file read outside its folder — {} (root '{}')",
-                        id, target.string(), root.string());
-                }
-                return false;
-            }
-            // Beyond files, the owning mod decides (SetNetworkPolicy or the
-            // manifest's "network"): Loopback lets a page talk to a server on
-            // this machine, which can itself relay anywhere, so it is an
-            // opt-in too; Any is for pages that talk to the internet, where a
-            // host allowlist would break with every new host.
+            if (proto == "data" || proto == "about" || proto == "blob" || proto == "file") return true;
+            // The owning mod decides (SetNetworkPolicy or the manifest's
+            // "network"): Loopback lets a page talk to a server on this
+            // machine, which can itself relay anywhere, so it is an opt-in
+            // too; Any is for pages that talk to the internet, where a host
+            // allowlist would break with every new host.
             NetLevel level = NetLevel::File;
             ViewId id = 0;
             {
@@ -2790,19 +2812,86 @@ namespace Magelight {
     // destroy. Own mutex, not s_viewsMutex: MlFileSystem::Resolve runs on
     // WebKit's worker threads while the game thread may hold s_viewsMutex.
     static std::mutex s_pageRootsMutex;
-    static std::vector<std::filesystem::path> s_pageRoots;
-    static void NotePageRoot(const std::filesystem::path& root)
+    // Each root carries the network level of the views that load from it: the
+    // page's CSP is chosen by the FILE's root, since the file system cannot
+    // tell which view asked (a mod's views all share its level).
+    struct PageRoot { std::filesystem::path path; NetLevel net = NetLevel::File; };
+    static std::vector<PageRoot> s_pageRoots;
+    static void NotePageRoot(const std::filesystem::path& root, NetLevel net)
     {
         if (root.empty()) return;
         std::lock_guard<std::mutex> lk(s_pageRootsMutex);
-        for (const auto& r : s_pageRoots) if (r == root) return;
-        s_pageRoots.push_back(root);
+        for (auto& r : s_pageRoots) if (r.path == root) { r.net = net; return; }
+        s_pageRoots.push_back({ root, net });
     }
     static bool IsUnderRegisteredPageRoot(const std::filesystem::path& p)
     {
         std::lock_guard<std::mutex> lk(s_pageRootsMutex);
-        for (const auto& r : s_pageRoots) if (PathIsUnder(p, r)) return true;
+        for (const auto& r : s_pageRoots) if (PathIsUnder(p, r.path)) return true;
         return false;
+    }
+    // The level a page at `p` gets: the deepest registered root containing it (a mod folder inside the mods
+    // root beats the mods root itself). Host pages and unknown paths are file-only.
+    static NetLevel RootNetLevel(const std::filesystem::path& p)
+    {
+        std::lock_guard<std::mutex> lk(s_pageRootsMutex);
+        NetLevel level = NetLevel::File;
+        std::size_t best = 0;
+        for (const auto& r : s_pageRoots) {
+            const std::size_t len = r.path.native().size();
+            if (len >= best && PathIsUnder(p, r.path)) { best = len; level = r.net; }
+        }
+        return level;
+    }
+
+    // The Content-Security-Policy MlFileSystem writes into every page, by its mod's NetworkPolicy. Ultralight
+    // routes file:, data:, synchronous XHR and WebSocket requests past NetworkListener, so the listener alone
+    // let a File page open a WebSocket, and a document's synchronous XHR read any file on disk; the policy is
+    // what closes them. Rules the probe matrix settled:
+    //  - connect-src never lists file: — a page cannot fetch its own files (Vite's modulepreload polyfill
+    //    logs one refusal; @magelight/vite-plugin turns the polyfill off), and the sync-XHR disk read is gone.
+    //  - frame-src never lists file: or http(s): every file:/// document shares one origin, so a frame of a
+    //    looser mod's page would lend that page its policy; object-src 'none' closes the <object> route.
+    //  - Loopback is http(s)/ws(s) to localhost and 127.0.0.1 only: CSP cannot express 127.0.0.0/8 or [::1].
+    //  - 'unsafe-inline' and 'unsafe-eval' stay: mod pages carry inline scripts.
+    // A top-level navigation is outside CSP (MlLoadListener::OnBeginLoading stops it), and <link rel=preload
+    // as=fetch> still sends one GET to any host: no 1.4 API reaches it.
+    static std::string CspFor(NetLevel level)
+    {
+        switch (level) {
+        case NetLevel::Loopback:
+            return "default-src file: data: blob: 'unsafe-inline' 'unsafe-eval'"
+                   " http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*;"
+                   " connect-src data: blob: http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*"
+                   " ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*;"
+                   " frame-src data:; form-action file: http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*;"
+                   " object-src 'none'";
+        case NetLevel::Any:
+            return "default-src * file: data: blob: 'unsafe-inline' 'unsafe-eval';"
+                   " connect-src http: https: ws: wss: data: blob:; frame-src * data:; form-action *; object-src 'none'";
+        default:
+            return "default-src file: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src data: blob:;"
+                   " frame-src data:; form-action file:; object-src 'none'";
+        }
+    }
+    static std::string CspMetaFor(NetLevel level)
+    {
+        return "<meta http-equiv=\"Content-Security-Policy\" content=\"" + CspFor(level) + "\">";
+    }
+    // Writes the policy into an HTML document right after its BOM, leading whitespace and doctype: no page
+    // byte that can run or load anything comes before it, and the doctype still decides the mode. Inserting
+    // after <head> was beaten by a script written before it (and by "<head>" inside a comment).
+    static void InjectCsp(std::string& html, NetLevel level)
+    {
+        std::size_t at = 0;
+        if (html.size() >= 3 && static_cast<unsigned char>(html[0]) == 0xEF &&
+            static_cast<unsigned char>(html[1]) == 0xBB && static_cast<unsigned char>(html[2]) == 0xBF) at = 3;
+        while (at < html.size() && std::isspace(static_cast<unsigned char>(html[at]))) ++at;
+        if (html.size() - at >= 9 && _strnicmp(html.data() + at, "<!doctype", 9) == 0) {
+            const std::size_t gt = html.find('>', at);
+            at = (gt == std::string::npos) ? at : gt + 1;
+        }
+        html.insert(at, CspMetaFor(level));
     }
 
     class MlFileSystem final : public ultralight::FileSystem {
@@ -2851,16 +2940,15 @@ namespace Magelight {
             std::filesystem::path out = (p.size() > 1 && p[1] == ':')
                 ? std::filesystem::path(p).make_preferred()
                 : (s_runtimeDir / std::filesystem::path(p).make_preferred());
-            // Defence in depth under the per-view pin: nothing outside the
-            // host runtime dir, Data\Magelight or a registered page's own
-            // root is ever served, and ".." is normalised away before the
-            // test so it cannot climb out. This layer is view-blind (WebKit
-            // asks for files from a worker thread with no View in hand), so
-            // it accepts the UNION of page roots — the per-view pin in
-            // MlNetworkListener is what keeps one page out of another's
-            // folder. 0.28.1: the union used to be just Data\Magelight,
-            // which refused every absolute page living elsewhere even though
-            // the pin above had already accepted it — SkyrimNet's dashboard
+            // The file gate: nothing outside the host runtime dir,
+            // Data\Magelight or a registered page's own root is ever served,
+            // and ".." is normalised away before the test so it cannot climb
+            // out. This layer is view-blind (WebKit asks for files from a
+            // worker thread with no View in hand), so it accepts the UNION of
+            // page roots; per-page isolation is not enforced (file: requests
+            // never reach NetworkListener, so no per-view check can exist).
+            // 0.28.1: the union used to be just Data\Magelight, which refused
+            // every absolute page living elsewhere — SkyrimNet's dashboard
             // under a folder outside Data\Magelight loaded as an empty view.
             out = out.lexically_normal();
             static const std::filesystem::path s_modsRoot = (GameRoot() / L"Data" / L"Magelight").lexically_normal();
@@ -2914,20 +3002,21 @@ namespace Magelight {
             }
             const std::streamsize size = f.tellg();
             f.seekg(0, std::ios::beg);
-            std::vector<char> data(static_cast<size_t>(size));
+            std::string data(static_cast<size_t>(size), '\0');
             if (size > 0 && !f.read(data.data(), size)) {
                 SKSE::log::warn("Magelight: OpenFile read failed: {}", path.string());
                 return nullptr;
             }
+            // Every page gets its mod's CSP (CspFor). The hosted Web Inspector is left as shipped: it is a
+            // dev surface served from the runtime dir, and its frontend was not written against a policy.
+            std::string ext = path.extension().string();
+            for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if ((ext == ".html" || ext == ".htm") && !PathIsUnder(path, s_runtimeDir / L"inspector"))
+                InjectCsp(data, RootNetLevel(path));
             return ultralight::Buffer::CreateFromCopy(data.data(), data.size());
         }
     };
     static MlFileSystem s_fileSystem;
-
-    static std::filesystem::path ResolveFileUrl(const std::string& url)
-    {
-        return s_fileSystem.Resolve(ultralight::String(url.c_str()));
-    }
 
     // Case-insensitive prefix test on normalised native paths (Windows). Pure
     // string work — safe on WebKit's thread, no filesystem calls.
@@ -3914,11 +4003,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         // platform file system's base dir — our runtime dir carries the ICU
         // data + cacert there.
         //
-        // cache_path: without one, WebKit keeps localStorage in memory and
-        // every session forgets it. SA's frontend stores real user data
-        // there (margin notes, UI scale, pins), so park it beside the SKSE
-        // logs — a writable, mod-manager-free location. Failure = empty
-        // path = the old in-memory behavior, never fatal.
+        // cache_path: without one, WebKit writes localStorage and IndexedDB
+        // under <cwd>\default\, the game root. SA's frontend stores real user
+        // data there (margin notes, UI scale, pins), so park it beside the
+        // SKSE logs — a writable, mod-manager-free location. Failure = empty
+        // path = the game-root fallback, never fatal.
         if (const auto cache = CacheDirPath(); !cache.empty()) {
             std::error_code ec;
             std::filesystem::create_directories(cache, ec);
@@ -3932,14 +4021,16 @@ float4 ps_straight(VSOut i) : SV_Target {
                          : s_fontHinting == "none"       ? ultralight::FontHinting::None
                                                          : ultralight::FontHinting::Normal;
         cfg.font_gamma = s_fontGamma;
-        SKSE::log::info("Magelight: font hinting '{}', gamma {:.2f}", s_fontHinting, s_fontGamma);
+        cfg.animation_timer_delay = s_animTimerDelay;
+        SKSE::log::info("Magelight: font hinting '{}', gamma {:.2f}, animation timer {:.4f} s", s_fontHinting,
+            s_fontGamma, s_animTimerDelay);
         ultralight::Platform::instance().set_config(cfg);
         // The platform loader with a last resort that always loads (MagelightFonts.h): with Arial
         // missing or unreadable, the stock one crashed the first page that needed it.
         ultralight::Platform::instance().set_font_loader(
             MagelightFonts::CreateLoader(ultralight::GetPlatformFontLoader(), &FontLog));
-        // Our MlFileSystem, not AppCore's registry-MIME one — see the class
-        // comment (module scripts silently refuse a non-JS MIME).
+        // Our MlFileSystem, not AppCore's — see the class comment (.mjs, query
+        // strings, page roots, the CSP).
         ultralight::Platform::instance().set_file_system(&s_fileSystem);
         ultralight::Platform::instance().set_logger(&s_ulLogger);
         ultralight::Platform::instance().set_clipboard(&s_clipboard);
@@ -4548,47 +4639,63 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // Everything we touch gets saved and restored — the game's renderer must
-    // never notice we were here.
+    // never notice we were here. The set is measured, not guessed: a
+    // sentinel-state harness run reported the slots that stayed wrong after
+    // Restore (the index buffer, PS SRVs 1-2, VS CB0, the input layout when
+    // Render created geometry before the capture, and the UAVs an 8-slot
+    // OMSetRenderTargets unbinds). Capture BEFORE Renderer::Render.
     struct StateBackup {
+        static constexpr UINT kSrvSlots = 4;   // PS t0-t2 and VS t0-t3 are what a driver binds (t3 in later SDKs)
         D3D11_PRIMITIVE_TOPOLOGY topo{};
         ID3D11InputLayout* layout = nullptr;
         ID3D11Buffer* vb = nullptr; UINT vbStride = 0, vbOffset = 0;
+        ID3D11Buffer* ib = nullptr; DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN; UINT ibOffset = 0;
         ID3D11VertexShader* vs = nullptr;
         ID3D11PixelShader* ps = nullptr;
         ID3D11GeometryShader* gs = nullptr;
         ID3D11HullShader* hs = nullptr;
         ID3D11DomainShader* ds = nullptr;
-        ID3D11ShaderResourceView* srv = nullptr;
+        ID3D11ShaderResourceView* psSrvs[kSrvSlots]{};
+        ID3D11ShaderResourceView* vsSrvs[kSrvSlots]{};
         ID3D11SamplerState* sampler = nullptr;
         ID3D11Buffer* psCb = nullptr;
+        ID3D11Buffer* vsCb = nullptr;
         ID3D11BlendState* blend = nullptr; FLOAT blendFactor[4]{}; UINT sampleMask = 0;
         ID3D11DepthStencilState* depth = nullptr; UINT stencilRef = 0;
         ID3D11RasterizerState* rs = nullptr;
         ID3D11RenderTargetView* rtvs[8]{}; ID3D11DepthStencilView* dsv = nullptr;
+        ID3D11UnorderedAccessView* uavs[D3D11_PS_CS_UAV_REGISTER_COUNT]{};
         ID3D11ComputeShader* cs = nullptr;
         ID3D11Buffer* soTargets[4]{};
         ID3D11Predicate* predicate = nullptr; BOOL predicateValue = FALSE;
         UINT vpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
         D3D11_VIEWPORT vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+        UINT scCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        D3D11_RECT scs[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
 
         void Capture(ID3D11DeviceContext* c)
         {
             c->IAGetPrimitiveTopology(&topo);
             c->IAGetInputLayout(&layout);
             c->IAGetVertexBuffers(0, 1, &vb, &vbStride, &vbOffset);
+            c->IAGetIndexBuffer(&ib, &ibFormat, &ibOffset);
             c->VSGetShader(&vs, nullptr, nullptr);
             c->PSGetShader(&ps, nullptr, nullptr);
             c->GSGetShader(&gs, nullptr, nullptr);
             c->HSGetShader(&hs, nullptr, nullptr);
             c->DSGetShader(&ds, nullptr, nullptr);
-            c->PSGetShaderResources(0, 1, &srv);
+            c->PSGetShaderResources(0, kSrvSlots, psSrvs);
+            c->VSGetShaderResources(0, kSrvSlots, vsSrvs);
             c->PSGetSamplers(0, 1, &sampler);
             c->PSGetConstantBuffers(0, 1, &psCb);
+            c->VSGetConstantBuffers(0, 1, &vsCb);
             c->OMGetBlendState(&blend, blendFactor, &sampleMask);
             c->OMGetDepthStencilState(&depth, &stencilRef);
             c->RSGetState(&rs);
             c->OMGetRenderTargets(8, rtvs, &dsv);
+            c->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs);
             c->RSGetViewports(&vpCount, vps);
+            c->RSGetScissorRects(&scCount, scs);
             c->CSGetShader(&cs, nullptr, nullptr);
             c->SOGetTargets(4, soTargets);
             c->GetPredication(&predicate, &predicateValue);
@@ -4618,14 +4725,17 @@ float4 ps_straight(VSOut i) : SV_Target {
             c->IASetPrimitiveTopology(topo);
             c->IASetInputLayout(layout);
             c->IASetVertexBuffers(0, 1, &vb, &vbStride, &vbOffset);
+            c->IASetIndexBuffer(ib, ibFormat, ibOffset);
             c->VSSetShader(vs, nullptr, 0);
             c->PSSetShader(ps, nullptr, 0);
             c->GSSetShader(gs, nullptr, 0);
             c->HSSetShader(hs, nullptr, 0);
             c->DSSetShader(ds, nullptr, 0);
-            c->PSSetShaderResources(0, 1, &srv);
+            c->PSSetShaderResources(0, kSrvSlots, psSrvs);
+            c->VSSetShaderResources(0, kSrvSlots, vsSrvs);
             c->PSSetSamplers(0, 1, &sampler);
             c->PSSetConstantBuffers(0, 1, &psCb);
+            c->VSSetConstantBuffers(0, 1, &vsCb);
             c->OMSetBlendState(blend, blendFactor, sampleMask);
             c->OMSetDepthStencilState(depth, stencilRef);
             c->RSSetState(rs);
@@ -4633,24 +4743,42 @@ float4 ps_straight(VSOut i) : SV_Target {
             UINT soOff[4] = {};
             c->SOSetTargets(4, soTargets, soOff);
             c->SetPredication(predicate, predicateValue);
-            c->OMSetRenderTargets(8, rtvs, dsv);
+            // A UAV sits in an OM slot above the render targets, and the 8-slot OMSetRenderTargets clears
+            // every UAV: with one bound, set the targets and the UAVs together (the UAV range must start past
+            // the last target, and the counters keep their values with -1).
+            UINT rtCount = 0, uavEnd = 0;
+            for (UINT i = 0; i < 8; ++i) if (rtvs[i]) rtCount = i + 1;
+            for (UINT i = 0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; ++i) if (uavs[i]) uavEnd = i + 1;
+            if (uavEnd > rtCount) {
+                UINT keep[D3D11_PS_CS_UAV_REGISTER_COUNT];
+                for (auto& k : keep) k = static_cast<UINT>(-1);
+                c->OMSetRenderTargetsAndUnorderedAccessViews(rtCount, rtvs, dsv, rtCount, uavEnd - rtCount,
+                                                             uavs + rtCount, keep);
+            } else {
+                c->OMSetRenderTargets(8, rtvs, dsv);
+            }
             if (vpCount) c->RSSetViewports(vpCount, vps);
+            if (scCount) c->RSSetScissorRects(scCount, scs);
             // Release the refs the Get* calls added.
             if (layout) layout->Release();
             if (vb) vb->Release();
+            if (ib) ib->Release();
             if (vs) vs->Release();
             if (ps) ps->Release();
             if (gs) gs->Release();
             if (hs) hs->Release();
             if (ds) ds->Release();
-            if (srv) srv->Release();
+            for (auto* r : psSrvs) if (r) r->Release();
+            for (auto* r : vsSrvs) if (r) r->Release();
             if (sampler) sampler->Release();
             if (psCb) psCb->Release();
+            if (vsCb) vsCb->Release();
             if (blend) blend->Release();
             if (depth) depth->Release();
             if (rs) rs->Release();
             for (auto* r : rtvs) if (r) r->Release();
             if (dsv) dsv->Release();
+            for (auto* u : uavs) if (u) u->Release();
             if (cs) cs->Release();
             for (auto* t : soTargets) if (t) t->Release();
             if (predicate) predicate->Release();
@@ -5418,14 +5546,15 @@ float4 ps_straight(VSOut i) : SV_Target {
                     if (paint) toRender.push_back(v.ul.get());
                 }
             }
-            if (!toRender.empty()) s_ulRenderer->RenderOnly(toRender.data(), toRender.size());
-            frameUlRender = stageMs(stageAfterUpdate, ClockT::now());
-            s_acc.ulRender += frameUlRender;
             // One state capture brackets everything we do to the pipeline this
-            // frame — the GPU driver's command list (which freely rebinds
+            // frame — Render (the driver creates geometry inside it, which
+            // binds an input layout), its command list (which freely rebinds
             // RTs/shaders/scissor) and every composite draw alike.
             StateBackup backup;
             backup.Capture(s_context);
+            if (!toRender.empty()) s_ulRenderer->RenderOnly(toRender.data(), toRender.size());
+            frameUlRender = stageMs(stageAfterUpdate, ClockT::now());
+            s_acc.ulRender += frameUlRender;
             StateBackup::Neutralize(s_context);
             if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
             // Composite visible views in z-order ((layer, order) — the
@@ -6926,7 +7055,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         v->id = s_nextViewId.fetch_add(1);
         v->htmlPath = htmlPath ? htmlPath : "";
         v->root = PageRootFor(v->htmlPath);
-        NotePageRoot(v->root);   // 0.28.1: MlFileSystem serves it too
+        NotePageRoot(v->root, netLevel);   // 0.28.1: MlFileSystem serves it too, and writes its CSP
         v->x = x; v->y = y; v->w = w; v->h = h;
         v->fullscreen = fullscreen;
         v->visible = startVisible;
@@ -7210,10 +7339,18 @@ float4 ps_straight(VSOut i) : SV_Target {
                             onShow ? "set - first load waits for a show" : "cleared");
         return true;
     }
+    // The page's CSP follows on its next load (ReloadView): a loaded document keeps the policy it was served.
     void SetViewNetworkLevel(ViewId view, NetLevel level)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
-        if (MlView* v = FindViewLocked(view)) v->netLevel = level;
+        std::filesystem::path root;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v) return;
+            v->netLevel = level;
+            root = v->root;
+        }
+        NotePageRoot(root, level);
     }
 
     void ShowInspectorFor(ViewId page, bool show)

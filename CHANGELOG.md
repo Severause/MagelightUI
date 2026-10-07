@@ -42,6 +42,41 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 0.31.5
+
+Found while testing Magelight against the Ultralight 2.0 beta; every item is a 1.4 fix.
+
+- **The network policy is a Content-Security-Policy now.** Ultralight 1.4 hands the host's request
+  hook only `http(s)` loads: synchronous XHR, WebSockets and `file:` reads never reach it, so a
+  file-only page could open a WebSocket, a document's synchronous XHR could read any file on the
+  disk, and the per-page file pin never ran. The host now writes the mod's policy into every page it
+  serves (`CspFor`), stops a main-frame navigation off the page's own files, and keeps the request
+  hook as the second line. Loopback is `localhost` and `127.0.0.1` over `http(s)` and `ws(s)`;
+  CSP cannot name `127.x.x.x` or `[::1]`. A page cannot `fetch()` its own files any more (a
+  Vite `modulePreload` polyfill logs one refusal; `@magelight/vite-plugin` turns it off), and
+  file: iframes between pages are refused: every `file:///` document shares one origin, so a
+  frame would lend a looser mod's policy. Known limit: `<link rel="preload" as="fetch">` still
+  sends one GET to any host. The docs now say that pages are not kept out of each other's
+  folders: the file system serves the union of the page roots and cannot tell which page asks.
+- **The game's pipeline state survives a Magelight frame.** `StateBackup` now saves and restores the
+  index buffer, pixel and vertex shader resource slots 0-3, the vertex constant buffer, the scissor
+  rects and the unordered-access views, and captures before `Render` (which creates geometry and
+  binds an input layout). A harness run with sentinel state had shown those slots left changed.
+- **A missing border segment at `msaa` 4.** The core can name the texture behind the bound render
+  target as a draw's source; binding it resolved the target mid-layer, so the layer's last draws
+  were lost. The driver skips such a bind.
+- **`requestAnimationFrame` runs at the frame rate.** Ultralight's rAF timer (1/60 s) aliased against
+  the per-frame pump: 40 callbacks a second on a 60 Hz game, 48 at 144 Hz, with alternating 17 and
+  33 ms gaps. `Magelight.json` `animationTimerDelay` (seconds, default `0.001`) sets it. CSS
+  animations and transitions were never affected.
+- **A runtime from another Ultralight version leaves the host inert** instead of crashing: a mod
+  manager can install `Magelight.dll` from one mod over the runtime DLLs of another. The log names
+  both versions.
+- Comments and docs corrected: Ultralight's own file system has a static MIME table (the registry
+  claim was wrong; `.mjs` and query strings are why Magelight has its own), the request hook runs on
+  the render thread, and with no `cache_path` WebKit writes page storage under the game root, not in
+  memory.
+
 ## 0.31.3
 
 - **A PC whose last-resort font cannot be loaded no longer turns the UI off.** When none of the

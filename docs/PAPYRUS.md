@@ -154,12 +154,12 @@ storage.
 
 ## Network
 
-A page loads from a file and, by default, reads only files under its own mod folder and the
-host's runtime folder: nothing over the network. A mod whose pages talk to a server on this
+A page loads from a file and, by default, reads only files under `Data\Magelight`, registered page
+folders and the host's runtime folder: nothing over the network. A mod whose pages talk to a server on this
 machine (a companion app, a local LLM server) opts in, once per load after `RegisterMod`:
 
 ```papyrus
-Magelight.SetNetworkPolicy("MyScriptMod", "loopback")   ; http(s) to localhost, 127.x and ::1
+Magelight.SetNetworkPolicy("MyScriptMod", "loopback")   ; http(s) and ws(s) to localhost and 127.0.0.1
 ```
 
 or with `"network": "loopback"` in its `manifest.json` ([MANIFEST.md](MANIFEST.md)). It applies
