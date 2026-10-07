@@ -435,7 +435,7 @@ namespace Magelight::VR {
         };
         HandInput s_hands[2];   // 0 = left, 1 = right (physical), resolved via IsLeftHandedMode at use
         // HeldButtonsNow: SubmitFrame writes the runtime half, NoteButton the engine half; each keeps the
-        // GetTickCount64 of every bit's last press for HeldButtonsPressedWithin.
+        // GetTickCount64 of every bit's last press for HeldButtonsPressedSince.
         std::atomic<std::uint32_t> s_runtimeHeldMask{ 0 };
         std::atomic<std::uint32_t> s_engineHeldMask{ 0 };
         std::atomic<std::uint64_t> s_runtimePressMs[12]{};
@@ -1365,16 +1365,15 @@ namespace Magelight::VR {
 
     HeldButtons HeldButtonsNow() { return { s_runtimeHeldMask.load(), s_engineHeldMask.load() }; }
 
-    HeldButtons HeldButtonsPressedWithin(std::uint64_t windowMs)
+    HeldButtons HeldButtonsPressedSince(std::uint64_t sinceTickMs)
     {
-        const std::uint64_t now = GetTickCount64();
-        auto recent = [&](std::uint32_t mask, const std::atomic<std::uint64_t>* pressMs) {
+        auto since = [&](std::uint32_t mask, const std::atomic<std::uint64_t>* pressMs) {
             std::uint32_t out = 0;
             for (int i = 0; i < 12; ++i)
-                if ((mask & (1u << i)) && now - pressMs[i].load() <= windowMs) out |= 1u << i;
+                if ((mask & (1u << i)) && pressMs[i].load() >= sinceTickMs) out |= 1u << i;
             return out;
         };
-        return { recent(s_runtimeHeldMask.load(), s_runtimePressMs), recent(s_engineHeldMask.load(), s_enginePressMs) };
+        return { since(s_runtimeHeldMask.load(), s_runtimePressMs), since(s_engineHeldMask.load(), s_enginePressMs) };
     }
 
     void SubmitFrame(const PresentedFrame& frame, bool uiModeOn, ViewId /*uiModeView*/)

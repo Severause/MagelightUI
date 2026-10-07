@@ -222,8 +222,9 @@ namespace Magelight::VR {
         bool Any() const { return (runtime | engine) != 0; }
     };
     HeldButtons HeldButtonsNow();
-    // The held buttons whose last press was within `windowMs`: a button resting down from before is left out.
-    HeldButtons HeldButtonsPressedWithin(std::uint64_t windowMs);
+    // The held buttons last pressed at or after `sinceTickMs` (GetTickCount64): one resting down from
+    // before is left out.
+    HeldButtons HeldButtonsPressedSince(std::uint64_t sinceTickMs);
 
     // ── Virtual keyboard (VR-4) ─────────────────────────────────────────────
     // The page bridge reports text-field focus (the reserved '__textfocus'

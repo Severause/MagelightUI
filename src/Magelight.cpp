@@ -1375,7 +1375,20 @@ namespace Magelight {
     static void CursorMenuWatchdog();                                                   // fwd (below)
     static std::atomic<bool> s_focusMenuPause{ false };   // flag for the NEXT open
     static std::atomic<bool> s_focusMenuFreeze{ false };  // the UI-mode view wants the world freeze (see ApplyFreezeWorld)
-    static std::atomic<bool> s_focusMenuHideSeen{ false };   // a kHide reached the menu while focused (FrameWork checks)
+    static std::atomic<bool> s_focusMenuHideSeen{ false };   // a kHide reached the menu while focused
+    static void CheckFocusMenuClosed();                       // fwd (below)
+
+    // The next main-thread FrameWork frame runs CheckFocusMenuClosed; this timer runs it too, for frames that
+    // never reach that point (a loading screen presenting from another thread, a dead renderer).
+    static void ArmFocusMenuCloseCheck()
+    {
+        try {
+            std::thread([]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                GameTask::Post([]() { CheckFocusMenuClosed(); });
+            }).detach();
+        } catch (...) {}   // FrameWork still checks
+    }
     static bool              s_focusMenuRegistered = false;
 
     class MagelightFocusMenu final : public RE::IMenu
@@ -1436,10 +1449,13 @@ namespace Magelight {
                     return RE::UI_MESSAGE_RESULTS::kHandled;
                 }
             } else if (msg.type == RE::UI_MESSAGE_TYPE::kHide) {
-                // Engine-initiated close (loading screen, force-close): UI mode must follow. FrameWork decides
-                // on the next frame, once the queue has run: a hide of our own while UI mode is on (the held
-                // menu closed before a re-entry's show) leaves the menu open again by then.
-                if (s_focused.load()) s_focusMenuHideSeen.store(true);
+                // Engine-initiated close (loading screen, force-close): UI mode must follow, decided once the
+                // queue has run (CheckFocusMenuClosed): a hide of our own while UI mode is on (the held menu
+                // closed before a re-entry's show) leaves the menu open again by then.
+                if (s_focused.load()) {
+                    s_focusMenuHideSeen.store(true);
+                    ArmFocusMenuCloseCheck();
+                }
             }
             return RE::IMenu::ProcessMessage(msg);
         }
@@ -1920,16 +1936,17 @@ namespace Magelight {
 
     // VR: UI mode closes on a controller button's PRESS (a chord, the B/Y Cancel), and the game acts on that
     // button (its release, or a press it reads as new) once the focus menu has gone and the controls are
-    // back. So a VR exit with a recently pressed button down keeps BOTH, the focus menu (menu context, which
-    // is what shields the opening press) and the suspended controls, until those buttons have been up
-    // kHeldReleaseSettleMs (FrameWork polls), or kHeldMaxMs at most (a timer that does not depend on
-    // FrameWork running). A button resting down from before, or pressed after the exit, does not count.
+    // back. So a VR exit with a button down that was pressed while the page was open keeps BOTH, the focus
+    // menu (menu context, which is what shields the opening press) and the suspended controls, until those
+    // buttons have been up kHeldReleaseSettleMs (FrameWork polls), or kHeldMaxMs at most (a timer that does
+    // not depend on FrameWork running). A button resting down from before the page opened, or pressed after
+    // the exit, does not count.
     static std::atomic<std::uint32_t> s_heldGen{ 0 };        // the hold in force; 0 = none
     static std::atomic<std::uint32_t> s_heldRuntime{ 0 };    // the VR::HeldButtons it waits for, by half
     static std::atomic<std::uint32_t> s_heldEngine{ 0 };
     static std::atomic<std::uint32_t> s_holdCounter{ 0 };
     static bool                       s_exitWithoutHold = false;   // game thread: ForceExitUIMode
-    static constexpr std::uint64_t    kHeldPressWindowMs = 1000;   // a chord is pressed within this of the exit
+    static std::atomic<std::uint64_t> s_uiModeEnteredMs{ 0 };      // GetTickCount64 of the last UI-mode entry
     static constexpr std::uint64_t    kHeldReleaseSettleMs = 100;  // a few frames: the engine reads the release first
     static constexpr std::uint32_t    kHeldMaxMs = 1500;
 
@@ -1979,6 +1996,8 @@ namespace Magelight {
         }
         SKSE::log::info("Magelight: SetUIMode({}{}) begin", on, (on && pauseGame) ? ", paused" : "");
         s_focused.store(on);
+        s_focusMenuHideSeen.store(false);   // a hide from an earlier session is no news about this one
+        if (on) s_uiModeEnteredMs.store(GetTickCount64());
         if (!on && s_hwnd) { s_imeCaretX.store(-1); PostMessageW(s_hwnd, kImeCtlMsg, 0, 0); }   // IME follows UI mode off
         // UI mode shows its target view; other views (HUD badges etc.) keep
         // their own visibility.
@@ -1998,7 +2017,7 @@ namespace Magelight {
         }
         // See s_heldGen. Entering again ends a pending hold here: its focus menu is still open.
         const VR::HeldButtons heldAtExit = (!on && !s_exitWithoutHold && VR::IsVRRuntime())
-            ? VR::HeldButtonsPressedWithin(kHeldPressWindowMs) : VR::HeldButtons{};
+            ? VR::HeldButtonsPressedSince(s_uiModeEnteredMs.load()) : VR::HeldButtons{};
         const bool holdForRelease = heldAtExit.Any() && ArmControlsHold(heldAtExit);
         const bool holdCancelled = on && s_heldGen.exchange(0) != 0;
 
@@ -2098,6 +2117,17 @@ namespace Magelight {
         } __except (LogSehAndDisable("SetUIMode", GetExceptionCode(),
                         (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
         }
+    }
+
+    // A kHide reached the focus menu while UI mode was on: if the menu is still closed once the queue has run,
+    // the game closed it and UI mode follows. Main thread (FrameWork) or a game task.
+    static void CheckFocusMenuClosed()
+    {
+        if (!s_focusMenuHideSeen.exchange(false) || !s_focused.load() || !s_focusMenuRegistered) return;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || ui->IsMenuOpen(MagelightFocusMenu::MENU_NAME)) return;
+        SKSE::log::info("Magelight: the focus menu was closed by the game - leaving UI mode");
+        GameTask::Post([]() { SetUIMode(false); });
     }
 
     // OpenComposite Unleashed's virtual keyboard posts every character to the
@@ -5366,13 +5396,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         static int uiFrames = 0;
         static int offFrames = -1;   // frames since the last exit; -1 = no exit sample pending
         if (s_focused.load()) {
-            if (s_focusMenuHideSeen.exchange(false) && s_focusMenuRegistered) {
-                auto* ui = RE::UI::GetSingleton();
-                if (ui && !ui->IsMenuOpen(MagelightFocusMenu::MENU_NAME)) {
-                    SKSE::log::info("Magelight: the focus menu was closed by the game - leaving UI mode");
-                    GameTask::Post([]() { SetUIMode(false); });
-                }
-            }
+            if (s_focusMenuHideSeen.load()) CheckFocusMenuClosed();
             ++uiFrames;
             offFrames = -1;
             if (uiFrames == 3 || uiFrames == 30) {
