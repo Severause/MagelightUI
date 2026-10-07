@@ -1327,6 +1327,21 @@ namespace Magelight::VR {
         }
     }
 
+    bool AnyButtonHeld()
+    {
+        if (GetState() != State::Live || !s_system) return false;
+        for (int hand = 0; hand < 2; ++hand) {
+            const auto role = (hand == 1) ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand;
+            const vr::TrackedDeviceIndex_t idx = s_system->GetTrackedDeviceIndexForControllerRole(role);
+            if (idx == vr::k_unTrackedDeviceIndexInvalid || idx >= vr::k_unMaxTrackedDeviceCount) continue;
+            vr::VRControllerState_t st{};
+            if (!s_system->GetControllerState(idx, &st, sizeof(st))) continue;
+            for (const std::uint32_t code : kEdgeCodes)
+                if (ButtonHeld(st, code)) return true;
+        }
+        return false;
+    }
+
     void SubmitFrame(const PresentedFrame& frame, bool uiModeOn, ViewId /*uiModeView*/)
     {
         // Frame time for the follow glide + scroll rate (present thread).

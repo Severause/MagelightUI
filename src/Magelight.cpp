@@ -1905,6 +1905,49 @@ namespace Magelight {
         DropFreezeWorld(menu.get(), why);
     }
 
+    // The game's controls UI mode turns off. storeState=false: a transient toggle that can never bake into
+    // a save. Console stays reachable as an escape hatch.
+    static void SetGameControlsSuspended(RE::ControlMap* cm, bool suspend)
+    {
+        using UEFlag = RE::ControlMap::UEFlag;
+        // Scoped enum without a free operator| — combine the bits directly.
+        const auto flags = static_cast<UEFlag>(
+            std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
+            std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
+            std::to_underlying(UEFlag::kFighting) | std::to_underlying(UEFlag::kPOVSwitch) |
+            std::to_underlying(UEFlag::kWheelZoom));
+        cm->ToggleControls(flags, !suspend, false);
+    }
+
+    // VR: UI mode closes on a controller button's press (a chord, the B/Y Cancel, a trigger click on a close
+    // button), and the game acts on that button once its controls are back. So an exit with a button held
+    // keeps the controls off until every button has been up kHeldReleaseSettleMs (FrameWork), or kHeldMaxMs
+    // at most (ArmControlsHold's timer, which does not depend on FrameWork running).
+    static std::atomic<bool>          s_controlsHeldForRelease{ false };
+    static std::atomic<std::uint32_t> s_controlsHoldGen{ 0 };
+    static constexpr std::uint64_t    kHeldReleaseSettleMs = 100;  // a few frames: the engine reads the release first
+    static constexpr std::uint32_t    kHeldMaxMs = 1500;
+
+    // `gen` is the hold the caller armed for, so a late restore cannot end a later hold early.
+    static void RestoreHeldControls(const char* why, std::uint32_t gen)
+    {
+        if (gen != s_controlsHoldGen.load()) return;
+        if (!s_controlsHeldForRelease.exchange(false)) return;
+        if (s_focused.load()) return;   // UI mode came back: it keeps the controls off itself
+        if (auto* cm = RE::ControlMap::GetSingleton()) SetGameControlsSuspended(cm, false);
+        SKSE::log::info("Magelight: controls restored ({})", why);
+    }
+
+    static void ArmControlsHold()
+    {
+        const std::uint32_t gen = s_controlsHoldGen.fetch_add(1) + 1;
+        s_controlsHeldForRelease.store(true);
+        std::thread([gen]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kHeldMaxMs));
+            GameTask::Post([gen]() { RestoreHeldControls("a controller button still held after 1.5 s", gen); });
+        }).detach();
+    }
+
     static void SetUIModeImpl(bool on, bool hideView, bool pauseGame, bool noTextEntry)
     {
         if (s_focused.load() == on) return;
@@ -1958,17 +2001,17 @@ namespace Magelight {
         // We draw our own cursor topmost; the show message above processes async, so FrameWork re-asserts this.
         HideVanillaCursor(on);
         if (!on) s_mouseDown.store(false);
+        bool controlsHeld = false;
         if (auto* cm = RE::ControlMap::GetSingleton()) {
-            using UEFlag = RE::ControlMap::UEFlag;
-            // Scoped enum without a free operator| — combine the bits directly.
-            const auto flags = static_cast<UEFlag>(
-                std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
-                std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
-                std::to_underlying(UEFlag::kFighting) | std::to_underlying(UEFlag::kPOVSwitch) |
-                std::to_underlying(UEFlag::kWheelZoom));
-            // storeState=false: a transient toggle that can never bake into a
-            // save. Console stays reachable as an escape hatch.
-            cm->ToggleControls(flags, !on, false);
+            if (on) {
+                s_controlsHeldForRelease.store(false);
+                SetGameControlsSuspended(cm, true);
+            } else if (VR::IsVRRuntime() && VR::AnyButtonHeld()) {
+                ArmControlsHold();
+                controlsHeld = true;
+            } else {
+                SetGameControlsSuspended(cm, false);
+            }
             // Text-entry flag while UI mode is on (the engine's own text
             // fields do the same through SkyUI's AllowTextInput). SKSE
             // suppresses Papyrus OnKeyDown while it is raised, and the
@@ -1990,7 +2033,8 @@ namespace Magelight {
                 s_textEntryRaised = false;
             }
         }
-        SKSE::log::info("Magelight: controls {}", on ? "suspended" : "restored");
+        SKSE::log::info("Magelight: controls {}", on ? "suspended"
+                        : controlsHeld ? "held off until the controller buttons are released" : "restored");
         // OpenComposite's own menu laser: its SKSE plugin sets the window
         // property OC_MENU_ACTIVE whenever an engine menu is open (ours
         // counts), and OCU draws a second beam over our panels. Clear it while
@@ -5326,6 +5370,21 @@ float4 ps_straight(VSOut i) : SV_Target {
                 GameTask::Post([]() { if (s_focused.load()) ApplyFreezeWorld("reconcile"); });
             }
         } else {
+            if (s_controlsHeldForRelease.load()) {
+                static std::uint32_t seenGen = 0, postedGen = 0;
+                static std::uint64_t upSinceMs = 0;   // 0 = a button is held
+                const std::uint32_t gen = s_controlsHoldGen.load();
+                if (gen != seenGen) { seenGen = gen; upSinceMs = 0; }
+                if (gen != postedGen) {
+                    const std::uint64_t now = GetTickCount64();
+                    if (VR::AnyButtonHeld()) upSinceMs = 0;
+                    else if (!upSinceMs) upSinceMs = now;
+                    if (upSinceMs && now - upSinceMs >= kHeldReleaseSettleMs) {
+                        postedGen = gen;
+                        GameTask::Post([gen]() { RestoreHeldControls("controller buttons released", gen); });
+                    }
+                }
+            }
             if (uiFrames > 0) {
                 offFrames = 0;
                 // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
