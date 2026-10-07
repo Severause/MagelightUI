@@ -434,8 +434,12 @@ namespace Magelight::VR {
             std::atomic<std::uint64_t> stickTick{ 0 };   // GetTickCount64 of the last stick event (staleness guard)
         };
         HandInput s_hands[2];   // 0 = left, 1 = right (physical), resolved via IsLeftHandedMode at use
-        std::atomic<std::uint32_t> s_runtimeHeldMask{ 0 };   // HeldButtonMask: SubmitFrame writes
-        std::atomic<std::uint32_t> s_engineHeldMask{ 0 };    // HeldButtonMask: NoteButton writes
+        // HeldButtonsNow: SubmitFrame writes the runtime half, NoteButton the engine half; each keeps the
+        // GetTickCount64 of every bit's last press for HeldButtonsPressedWithin.
+        std::atomic<std::uint32_t> s_runtimeHeldMask{ 0 };
+        std::atomic<std::uint32_t> s_engineHeldMask{ 0 };
+        std::atomic<std::uint64_t> s_runtimePressMs[12]{};
+        std::atomic<std::uint64_t> s_enginePressMs[12]{};
 
         int HandIndexForDevice(int device)
         {
@@ -456,12 +460,16 @@ namespace Magelight::VR {
         HandInput& hi = s_hands[h];
         constexpr float kPressLevel = 0.5f;   // analog axes: half travel = pressed
         const bool down = value > kPressLevel;
-        // HeldButtonMask's engine half: kHeldButtons index 0 grip, 1 trigger, 2 B/Y.
+        // HeldButtonsNow's engine half: kHeldButtons index 0 grip, 1 trigger, 2 B/Y.
         const int held = code == K::kTrigger ? 1 : (code == K::kGrip || code == K::kGripAlt) ? 0 : code == K::kBY ? 2 : -1;
         if (held >= 0) {
-            const std::uint32_t bit = 1u << (h * 6 + held);
-            if (down) s_engineHeldMask.fetch_or(bit);
-            else      s_engineHeldMask.fetch_and(~bit);
+            const int index = h * 6 + held;
+            const std::uint32_t bit = 1u << index;
+            if (down) {
+                if (!(s_engineHeldMask.fetch_or(bit) & bit)) s_enginePressMs[index].store(GetTickCount64());
+            } else {
+                s_engineHeldMask.fetch_and(~bit);
+            }
         }
         if (code == K::kTrigger) {
             hi.triggerDown.store(down);        // LEVEL; TickLaser derives the click edges
@@ -1355,7 +1363,19 @@ namespace Magelight::VR {
         }
     }
 
-    std::uint32_t HeldButtonMask() { return s_runtimeHeldMask.load() | s_engineHeldMask.load(); }
+    HeldButtons HeldButtonsNow() { return { s_runtimeHeldMask.load(), s_engineHeldMask.load() }; }
+
+    HeldButtons HeldButtonsPressedWithin(std::uint64_t windowMs)
+    {
+        const std::uint64_t now = GetTickCount64();
+        auto recent = [&](std::uint32_t mask, const std::atomic<std::uint64_t>* pressMs) {
+            std::uint32_t out = 0;
+            for (int i = 0; i < 12; ++i)
+                if ((mask & (1u << i)) && now - pressMs[i].load() <= windowMs) out |= 1u << i;
+            return out;
+        };
+        return { recent(s_runtimeHeldMask.load(), s_runtimePressMs), recent(s_engineHeldMask.load(), s_enginePressMs) };
+    }
 
     void SubmitFrame(const PresentedFrame& frame, bool uiModeOn, ViewId /*uiModeView*/)
     {
@@ -1383,7 +1403,15 @@ namespace Magelight::VR {
             return;
         }
         if (GetState() != State::Live) { s_runtimeHeldMask.store(0); return; }
-        s_runtimeHeldMask.store(PollHeldMask());
+        {
+            const std::uint32_t mask = PollHeldMask();
+            const std::uint32_t pressed = mask & ~s_runtimeHeldMask.exchange(mask);
+            if (pressed) {
+                const std::uint64_t now = GetTickCount64();
+                for (int i = 0; i < 12; ++i)
+                    if (pressed & (1u << i)) s_runtimePressMs[i].store(now);
+            }
+        }
         if (GetCurrentThreadId() != s_thread) {   // invariant 1, mirrored — and a VR-1 telemetry line
             static bool warned = false;
             if (!warned) {

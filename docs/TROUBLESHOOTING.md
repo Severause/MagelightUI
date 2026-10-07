@@ -73,7 +73,7 @@ UI mode = cursor up + game controls suspended + keyboard to the page. To leave i
 unless the page has taken Escape for itself (a dialog closing itself); the page's own hotkey,
 which always closes it; or the host toggle key (PageUp by default), which always leaves UI mode.
 On VR, B or Y leaves it unless the mod bound those buttons itself. On VR the game gets its
-controls back only once the buttons that closed the page are released (`controls held off until
+controls back only once the buttons pressed to close the page are released (`controls held off until
 the controller buttons are released`, then `controls restored (...)`, 1.5 s at most), so the
 closing press never reaches the game. Leaving UI mode does not hide
 a page by itself (a mod may want it visible, HUD-style); a hotkey close does hide. If controls
