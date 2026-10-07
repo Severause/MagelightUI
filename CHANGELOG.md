@@ -46,12 +46,14 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 - **VR: closing a page with a controller button no longer hands that button to the game.** A page
   closes on the press of the button that closes it (a mod's chord such as Trigger + Y, the B/Y
-  back button, or a trigger click on a close button), and the game got its controls back while the
-  button was still held, so it acted on it: closing with Trigger + Y also did whatever Y does
-  in the game. When a page closes with a controller button held, the game's controls now stay off until
-  every button has been up for 100 ms (1.5 s at most), and the log says so (`controls held off
-  until the controller buttons are released`, then `controls restored (controller buttons
-  released)`). Flat play is unchanged.
+  back button, or a trigger click on a close button), and the game got its menu context and
+  controls back while the button was still held, so it acted on it: closing with Trigger + Y also
+  did whatever Y does in the game. When a page closes with a controller button held, Magelight's
+  engine menu and the suspended controls now stay until the buttons that were down have been up
+  for 100 ms (1.5 s at most; a button pressed after the close does not extend it, and a paused
+  page keeps the game paused that long). The log says so: `controls held off until the controller
+  buttons are released`, then `controls restored (controller buttons released)`. A load ends the
+  hold at once. Flat play is unchanged.
 
 ## 0.31.3
 

@@ -1905,8 +1905,8 @@ namespace Magelight {
         DropFreezeWorld(menu.get(), why);
     }
 
-    // The game's controls UI mode turns off. storeState=false: a transient toggle that can never bake into
-    // a save. Console stays reachable as an escape hatch.
+    // The control set UI mode suspends (true) or gives back (false). storeState=false: a transient toggle
+    // that can never bake into a save; Console stays reachable as an escape hatch.
     static void SetGameControlsSuspended(RE::ControlMap* cm, bool suspend)
     {
         using UEFlag = RE::ControlMap::UEFlag;
@@ -1919,33 +1919,48 @@ namespace Magelight {
         cm->ToggleControls(flags, !suspend, false);
     }
 
-    // VR: UI mode closes on a controller button's press (a chord, the B/Y Cancel, a trigger click on a close
-    // button), and the game acts on that button once its controls are back. So an exit with a button held
-    // keeps the controls off until every button has been up kHeldReleaseSettleMs (FrameWork), or kHeldMaxMs
-    // at most (ArmControlsHold's timer, which does not depend on FrameWork running).
-    static std::atomic<bool>          s_controlsHeldForRelease{ false };
-    static std::atomic<std::uint32_t> s_controlsHoldGen{ 0 };
+    // VR: UI mode closes on a controller button's PRESS (a chord, the B/Y Cancel, a trigger click on a close
+    // button), and the game acts on that button (its release, or a press it reads as new) once the focus menu
+    // has gone and the controls are back. So a VR exit with a button down keeps BOTH, the focus menu (menu
+    // context, which is what shields the opening press) and the suspended controls, until the buttons held
+    // at the exit have been up kHeldReleaseSettleMs (FrameWork polls), or kHeldMaxMs at most (a timer that
+    // does not depend on FrameWork running). A later press does not extend it.
+    static std::atomic<std::uint32_t> s_heldGen{ 0 };        // the hold in force; 0 = none
+    static std::atomic<std::uint32_t> s_heldMask{ 0 };       // VR::HeldButtonMask bits it waits for
+    static std::atomic<std::uint32_t> s_holdCounter{ 0 };
+    static bool                       s_exitWithoutHold = false;   // game thread: ForceExitUIMode
     static constexpr std::uint64_t    kHeldReleaseSettleMs = 100;  // a few frames: the engine reads the release first
     static constexpr std::uint32_t    kHeldMaxMs = 1500;
 
-    // `gen` is the hold the caller armed for, so a late restore cannot end a later hold early.
-    static void RestoreHeldControls(const char* why, std::uint32_t gen)
+    // Ends hold `gen` (a later hold is left alone). Game thread.
+    static void EndControlsHold(const char* why, std::uint32_t gen)
     {
-        if (gen != s_controlsHoldGen.load()) return;
-        if (!s_controlsHeldForRelease.exchange(false)) return;
-        if (s_focused.load()) return;   // UI mode came back: it keeps the controls off itself
+        if (!gen || !s_heldGen.compare_exchange_strong(gen, 0)) return;
+        if (s_focused.load()) return;   // UI mode came back: it owns the menu and the controls again
+        if (s_focusMenuRegistered)
+            if (auto* queue = RE::UIMessageQueue::GetSingleton())
+                queue->AddMessage(MagelightFocusMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
         if (auto* cm = RE::ControlMap::GetSingleton()) SetGameControlsSuspended(cm, false);
         SKSE::log::info("Magelight: controls restored ({})", why);
     }
 
-    static void ArmControlsHold()
+    // False when the timer cannot start: the caller then exits as usual, never a hold nothing ends.
+    static bool ArmControlsHold(std::uint32_t mask)
     {
-        const std::uint32_t gen = s_controlsHoldGen.fetch_add(1) + 1;
-        s_controlsHeldForRelease.store(true);
-        std::thread([gen]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(kHeldMaxMs));
-            GameTask::Post([gen]() { RestoreHeldControls("a controller button still held after 1.5 s", gen); });
-        }).detach();
+        std::uint32_t gen = s_holdCounter.fetch_add(1) + 1;
+        if (!gen) gen = s_holdCounter.fetch_add(1) + 1;
+        try {
+            std::thread([gen]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kHeldMaxMs));
+                GameTask::Post([gen]() { EndControlsHold("hold time limit reached", gen); });
+            }).detach();
+        } catch (...) {
+            SKSE::log::warn("Magelight: could not start the controls-hold timer; controls restored at once");
+            return false;
+        }
+        s_heldMask.store(mask);
+        s_heldGen.store(gen);
+        return true;
     }
 
     static void SetUIModeImpl(bool on, bool hideView, bool pauseGame, bool noTextEntry)
@@ -1979,6 +1994,10 @@ namespace Magelight {
             }
             for (ViewId i : inspectors) ShowView(i, false);
         }
+        // See s_heldGen. Entering again ends a pending hold here: its focus menu is still open.
+        const std::uint32_t heldAtExit = (!on && !s_exitWithoutHold && VR::IsVRRuntime()) ? VR::HeldButtonMask() : 0;
+        const bool holdForRelease = heldAtExit && ArmControlsHold(heldAtExit);
+        const bool holdCancelled = on && s_heldGen.exchange(0) != 0;
 
         if (auto* queue = RE::UIMessageQueue::GetSingleton()) {
             queue->AddMessage(RE::CursorMenu::MENU_NAME,
@@ -1992,8 +2011,12 @@ namespace Magelight {
                 } else {
                     ApplyFreezeWorld("UI mode exit");   // s_focused is already off: drops the flag before the hide
                 }
-                queue->AddMessage(MagelightFocusMenu::MENU_NAME,
-                    on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
+                // A held menu closes first, so the show builds a new one with this entry's pause flag.
+                if (holdCancelled)
+                    queue->AddMessage(MagelightFocusMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+                if (on || !holdForRelease)
+                    queue->AddMessage(MagelightFocusMenu::MENU_NAME,
+                        on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
             }
         }
         SKSE::log::info("Magelight: cursor-menu {} queued{}", on ? "show" : "hide",
@@ -2001,17 +2024,8 @@ namespace Magelight {
         // We draw our own cursor topmost; the show message above processes async, so FrameWork re-asserts this.
         HideVanillaCursor(on);
         if (!on) s_mouseDown.store(false);
-        bool controlsHeld = false;
         if (auto* cm = RE::ControlMap::GetSingleton()) {
-            if (on) {
-                s_controlsHeldForRelease.store(false);
-                SetGameControlsSuspended(cm, true);
-            } else if (VR::IsVRRuntime() && VR::AnyButtonHeld()) {
-                ArmControlsHold();
-                controlsHeld = true;
-            } else {
-                SetGameControlsSuspended(cm, false);
-            }
+            if (on || !holdForRelease) SetGameControlsSuspended(cm, on);
             // Text-entry flag while UI mode is on (the engine's own text
             // fields do the same through SkyUI's AllowTextInput). SKSE
             // suppresses Papyrus OnKeyDown while it is raised, and the
@@ -2034,7 +2048,7 @@ namespace Magelight {
             }
         }
         SKSE::log::info("Magelight: controls {}", on ? "suspended"
-                        : controlsHeld ? "held off until the controller buttons are released" : "restored");
+                        : holdForRelease ? "held off until the controller buttons are released" : "restored");
         // OpenComposite's own menu laser: its SKSE plugin sets the window
         // property OC_MENU_ACTIVE whenever an engine menu is open (ours
         // counts), and OCU draws a second beam over our panels. Clear it while
@@ -5370,18 +5384,17 @@ float4 ps_straight(VSOut i) : SV_Target {
                 GameTask::Post([]() { if (s_focused.load()) ApplyFreezeWorld("reconcile"); });
             }
         } else {
-            if (s_controlsHeldForRelease.load()) {
+            if (const std::uint32_t gen = s_heldGen.load()) {
                 static std::uint32_t seenGen = 0, postedGen = 0;
-                static std::uint64_t upSinceMs = 0;   // 0 = a button is held
-                const std::uint32_t gen = s_controlsHoldGen.load();
+                static std::uint64_t upSinceMs = 0;   // 0 = a button of the hold is down
                 if (gen != seenGen) { seenGen = gen; upSinceMs = 0; }
                 if (gen != postedGen) {
                     const std::uint64_t now = GetTickCount64();
-                    if (VR::AnyButtonHeld()) upSinceMs = 0;
+                    if (VR::HeldButtonMask() & s_heldMask.load()) upSinceMs = 0;
                     else if (!upSinceMs) upSinceMs = now;
                     if (upSinceMs && now - upSinceMs >= kHeldReleaseSettleMs) {
                         postedGen = gen;
-                        GameTask::Post([gen]() { RestoreHeldControls("controller buttons released", gen); });
+                        GameTask::Post([gen]() { EndControlsHold("controller buttons released", gen); });
                     }
                 }
             }
@@ -6784,8 +6797,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     void ForceExitUIMode()
     {
         // Safety valve for load boundaries: never carry a suspended-controls /
-        // cursor-up state across a save load. Game thread.
+        // cursor-up state across a save load, a VR button hold included. Game thread.
+        s_exitWithoutHold = true;
         SetUIMode(false);
+        s_exitWithoutHold = false;
+        EndControlsHold("load boundary", s_heldGen.load());
     }
 
     void EnterUIMode(ViewId view) { EnterUIModeEx(view, false); }

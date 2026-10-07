@@ -210,9 +210,12 @@ namespace Magelight::VR {
     // field log 2026-09-12 14:20).
     bool ViewBindsButton(ViewId view, std::uint32_t openvrButton);
     inline constexpr std::uint32_t kButtonApplicationMenu = 1;   // vr::k_EButton_ApplicationMenu — B (right) / Y (left)
-    // True while either controller holds Grip, Trigger, B/Y, A/X, a stick click or the touchpad, read from
-    // the runtime now. False when the runtime is not live or no controller reports. Main thread.
-    bool AnyButtonHeld();
+    // The controller buttons held now: bit hand*6+i for kHeldButtons[i] (hand 0 left, 1 right), from the
+    // runtime as of the last frame plus the trigger, grip and B/Y events the input sink has seen (that half
+    // follows the game's left-handed mode). Any thread.
+    inline constexpr std::uint32_t kHeldButtons[] = { kVRButtonGrip, kVRButtonTrigger, kVRButtonMenu,
+                                                      kVRButtonA, kVRButtonStickClick, kVRButtonTouchpad };
+    std::uint32_t HeldButtonMask();
 
     // ── Virtual keyboard (VR-4) ─────────────────────────────────────────────
     // The page bridge reports text-field focus (the reserved '__textfocus'

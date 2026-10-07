@@ -434,6 +434,8 @@ namespace Magelight::VR {
             std::atomic<std::uint64_t> stickTick{ 0 };   // GetTickCount64 of the last stick event (staleness guard)
         };
         HandInput s_hands[2];   // 0 = left, 1 = right (physical), resolved via IsLeftHandedMode at use
+        std::atomic<std::uint32_t> s_runtimeHeldMask{ 0 };   // HeldButtonMask: SubmitFrame writes
+        std::atomic<std::uint32_t> s_engineHeldMask{ 0 };    // HeldButtonMask: NoteButton writes
 
         int HandIndexForDevice(int device)
         {
@@ -454,6 +456,13 @@ namespace Magelight::VR {
         HandInput& hi = s_hands[h];
         constexpr float kPressLevel = 0.5f;   // analog axes: half travel = pressed
         const bool down = value > kPressLevel;
+        // HeldButtonMask's engine half: kHeldButtons index 0 grip, 1 trigger, 2 B/Y.
+        const int held = code == K::kTrigger ? 1 : (code == K::kGrip || code == K::kGripAlt) ? 0 : code == K::kBY ? 2 : -1;
+        if (held >= 0) {
+            const std::uint32_t bit = 1u << (h * 6 + held);
+            if (down) s_engineHeldMask.fetch_or(bit);
+            else      s_engineHeldMask.fetch_and(~bit);
+        }
         if (code == K::kTrigger) {
             hi.triggerDown.store(down);        // LEVEL; TickLaser derives the click edges
         } else if (code == K::kGrip || code == K::kGripAlt) {
@@ -1327,20 +1336,26 @@ namespace Magelight::VR {
         }
     }
 
-    bool AnyButtonHeld()
-    {
-        if (GetState() != State::Live || !s_system) return false;
-        for (int hand = 0; hand < 2; ++hand) {
-            const auto role = (hand == 1) ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand;
-            const vr::TrackedDeviceIndex_t idx = s_system->GetTrackedDeviceIndexForControllerRole(role);
-            if (idx == vr::k_unTrackedDeviceIndexInvalid || idx >= vr::k_unMaxTrackedDeviceCount) continue;
-            vr::VRControllerState_t st{};
-            if (!s_system->GetControllerState(idx, &st, sizeof(st))) continue;
-            for (const std::uint32_t code : kEdgeCodes)
-                if (ButtonHeld(st, code)) return true;
+    namespace {
+        // Present thread only, like every other OpenVR call here.
+        std::uint32_t PollHeldMask()
+        {
+            if (!s_system) return 0;
+            std::uint32_t mask = 0;
+            for (int hand = 0; hand < 2; ++hand) {
+                const auto role = (hand == 1) ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand;
+                const vr::TrackedDeviceIndex_t idx = s_system->GetTrackedDeviceIndexForControllerRole(role);
+                if (idx == vr::k_unTrackedDeviceIndexInvalid || idx >= vr::k_unMaxTrackedDeviceCount) continue;
+                vr::VRControllerState_t st{};
+                if (!s_system->GetControllerState(idx, &st, sizeof(st))) continue;
+                for (std::size_t i = 0; i < std::size(kHeldButtons); ++i)
+                    if (ButtonHeld(st, kHeldButtons[i])) mask |= 1u << (hand * 6 + i);
+            }
+            return mask;
         }
-        return false;
     }
+
+    std::uint32_t HeldButtonMask() { return s_runtimeHeldMask.load() | s_engineHeldMask.load(); }
 
     void SubmitFrame(const PresentedFrame& frame, bool uiModeOn, ViewId /*uiModeView*/)
     {
@@ -1367,7 +1382,8 @@ namespace Magelight::VR {
             SetState(BindInterfaces() ? State::Live : State::Failed);
             return;
         }
-        if (GetState() != State::Live) return;
+        if (GetState() != State::Live) { s_runtimeHeldMask.store(0); return; }
+        s_runtimeHeldMask.store(PollHeldMask());
         if (GetCurrentThreadId() != s_thread) {   // invariant 1, mirrored — and a VR-1 telemetry line
             static bool warned = false;
             if (!warned) {
