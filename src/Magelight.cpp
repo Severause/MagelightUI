@@ -75,6 +75,7 @@ namespace Magelight {
     //   "imageProbe": false   // create the ImageSource probe page (views/probe)
     //   "devMode": false      // hot reload every v4 page folder, JS error overlay (reload/inspector keys unbound for now)
     //   "fontHinting": "normal", "fontGamma": 1.8   // text rasterization: smooth|normal|monochrome|none, gamma 1.0-3.0
+    //   "animationTimerDelay": 0.001   // seconds between requestAnimationFrame ticks; below the frame period = once per frame
     //   "msaa": 4             // GPU path: anti-aliasing samples for page shapes (1 = off, 2, 4, 8)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
@@ -155,10 +156,10 @@ namespace Magelight {
     // Milestone-3 playground: hover styling, click counters, a text field, and
     // a scrollable list — one widget per input path (mouse move/down/up, key,
     // char, wheel). The clock keeps proving the JS engine ticks.
-    // Loaded with LoadHTML, so it carries its CSP itself (the file-only policy of CspFor, kept in step by hand).
+    // Loaded with LoadHTML, so LoadViewLocked writes its CSP in (InjectCsp) as the file system does for a page.
     static constexpr const char* kBannerHTML = R"HTML(
 <!DOCTYPE html>
-<html><head><meta http-equiv="Content-Security-Policy" content="default-src file: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src data: blob:; frame-src data:; form-action file:; object-src 'none'"><style>
+<html><head><style>
   html, body { margin:0; background:transparent; overflow:hidden;
                font-family:Georgia,serif; color:#3a2d17; }
   .card {
@@ -1161,10 +1162,18 @@ namespace Magelight {
         else SKSE::log::info("Magelight: {} JS listener shim(s) refreshed on view {}", count, v.id);
     }
 
-    // A page's own URL schemes: what a view may show and what the bridge is installed on.
+    // What a view may show as its main frame, and what the bridge is installed on: the banner (LoadHTML,
+    // about:) and the HTML files MlFileSystem serves, which are the documents that carry a policy. A file: SVG
+    // runs script with no policy and keeps the file: origin, and a data: document inherits none, so a
+    // navigation to either is stopped like a remote one.
     static bool IsLocalPageUrl(const std::string& url)
     {
-        return url.empty() || url.rfind("file:", 0) == 0 || url.rfind("about:", 0) == 0 || url.rfind("data:", 0) == 0;
+        if (url.empty() || url.rfind("about:", 0) == 0) return true;
+        if (url.rfind("file:", 0) != 0) return false;
+        std::string path = url;
+        if (const auto q = path.find_first_of("?#"); q != std::string::npos) path.resize(q);
+        for (auto& c : path) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return path.ends_with(".html") || path.ends_with(".htm");
     }
 
     class MlLoadListener final : public ultralight::LoadListener {
@@ -1188,7 +1197,7 @@ namespace Magelight {
             caller->Stop();
             static std::atomic<int> s_logged{ 0 };
             if (s_logged.fetch_add(1) < 32)
-                SKSE::log::warn("Magelight: stopped a page navigating to {} - a view shows its own files only", u);
+                SKSE::log::warn("Magelight: stopped a page navigating to {} - a view shows its own HTML files only", u);
         }
         void OnWindowObjectReady(ultralight::View* caller, uint64_t, bool is_main_frame,
             const ultralight::String& url) override
@@ -2737,21 +2746,8 @@ namespace Magelight {
     // Network sandbox: a page's reach is its view's NetLevel, the owning mod's
     // NetworkPolicy (File unless the mod opted in). Tightening a default later
     // breaks mods, which is why the default is the tightest level.
-    // "http://127.0.0.1:8080/x", "http://localhost/x", "http://[::1]:1/x" -> true.
-    // 127.0.0.0/8 as a DOTTED QUAD only: a "127." prefix test let the legal
-    // hostname 127.attacker.example through the sandbox (review 2026-09-09).
-    static bool IsLoopbackV4(const std::string& host)
-    {
-        int octets = 0, value = 0, digits = 0;
-        for (std::size_t i = 0; i <= host.size(); ++i) {
-            const char c = i < host.size() ? host[i] : '.';
-            if (c >= '0' && c <= '9') { if (++digits > 3) return false; value = value * 10 + (c - '0'); continue; }
-            if (c != '.' || digits == 0 || value > 255) return false;
-            if (octets == 0 && value != 127) return false;
-            ++octets; value = 0; digits = 0;
-        }
-        return octets == 4;
-    }
+    // The loopback hosts are the two the page's CSP (CspFor) admits: an exact
+    // host match, never a prefix test (127.attacker.example is a legal name).
     static bool IsLoopbackUrl(const std::string& url)
     {
         const auto p = url.find("://");
@@ -2767,7 +2763,7 @@ namespace Magelight {
             host.resize(c);
         }
         for (auto& ch : host) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        return host == "localhost" || host == "[::1]" || IsLoopbackV4(host);
+        return host == "localhost" || host == "127.0.0.1";
     }
 
     // The network gate behind the page's CSP (CspFor): Ultralight calls it for http(s) loads only. It never
@@ -2798,14 +2794,14 @@ namespace Magelight {
             if (s_logged.fetch_add(1) < 32) {
                 SKSE::log::warn("Magelight: view {} blocked network request {} {} (protocol '{}') — its mod's network policy is {}",
                     id, req.httpMethod().utf8().data(), req.url().utf8().data(), proto,
-                    level == NetLevel::Loopback ? "loopback (http(s) to this machine only)" : "file only");
+                    level == NetLevel::Loopback ? "loopback (localhost and 127.0.0.1 only)" : "file only");
             }
             return false;
         }
     };
     static MlNetworkListener s_networkListener;
 
-    // Page roots outside Data\Magelight (an absolute page pins to its own
+    // Page roots outside Data\Magelight (an absolute page registers its own
     // directory — PageRootFor). Append-only and never pruned: a root is a
     // directory, and keeping a destroyed view's folder readable costs
     // nothing, whereas pruning would race a worker-thread read against the
@@ -2814,12 +2810,14 @@ namespace Magelight {
     static std::mutex s_pageRootsMutex;
     // Each root carries the network level of the views that load from it: the
     // page's CSP is chosen by the FILE's root, since the file system cannot
-    // tell which view asked (a mod's views all share its level).
+    // tell which view asked. The last view created or policy set for a root
+    // wins (a mod's views all share its level). The runtime dir is never
+    // noted: host pages stay file-only whatever a relative-path view asks.
     struct PageRoot { std::filesystem::path path; NetLevel net = NetLevel::File; };
     static std::vector<PageRoot> s_pageRoots;
     static void NotePageRoot(const std::filesystem::path& root, NetLevel net)
     {
-        if (root.empty()) return;
+        if (root.empty() || root == s_runtimeDir) return;
         std::lock_guard<std::mutex> lk(s_pageRootsMutex);
         for (auto& r : s_pageRoots) if (r.path == root) { r.net = net; return; }
         s_pageRoots.push_back({ root, net });
@@ -2831,7 +2829,7 @@ namespace Magelight {
         return false;
     }
     // The level a page at `p` gets: the deepest registered root containing it (a mod folder inside the mods
-    // root beats the mods root itself). Host pages and unknown paths are file-only.
+    // root beats the mods root itself); file-only when no root contains it.
     static NetLevel RootNetLevel(const std::filesystem::path& p)
     {
         std::lock_guard<std::mutex> lk(s_pageRootsMutex);
@@ -2878,18 +2876,39 @@ namespace Magelight {
     {
         return "<meta http-equiv=\"Content-Security-Policy\" content=\"" + CspFor(level) + "\">";
     }
-    // Writes the policy into an HTML document right after its BOM, leading whitespace and doctype: no page
-    // byte that can run or load anything comes before it, and the doctype still decides the mode. Inserting
-    // after <head> was beaten by a script written before it (and by "<head>" inside a comment).
+    // Writes the policy into an HTML document right after its BOM, leading whitespace, comments, XML prolog
+    // and doctype: no page byte that can run or load anything comes before it, and the doctype still decides
+    // the mode (a tag ahead of the doctype would put the page in quirks mode). Without a doctype it goes
+    // after the <html> start tag, or at the top of a document with none. Inserting after <head> was beaten
+    // by a script written before it (and by "<head>" inside a comment).
     static void InjectCsp(std::string& html, NetLevel level)
     {
+        const auto startsWith = [&](std::size_t at, const char* tok) {
+            const std::size_t n = std::strlen(tok);
+            return html.size() - at >= n && _strnicmp(html.data() + at, tok, n) == 0;
+        };
         std::size_t at = 0;
-        if (html.size() >= 3 && static_cast<unsigned char>(html[0]) == 0xEF &&
-            static_cast<unsigned char>(html[1]) == 0xBB && static_cast<unsigned char>(html[2]) == 0xBF) at = 3;
-        while (at < html.size() && std::isspace(static_cast<unsigned char>(html[at]))) ++at;
-        if (html.size() - at >= 9 && _strnicmp(html.data() + at, "<!doctype", 9) == 0) {
+        if (startsWith(0, "\xEF\xBB\xBF")) at = 3;
+        for (;;) {
+            while (at < html.size() && std::isspace(static_cast<unsigned char>(html[at]))) ++at;
+            if (startsWith(at, "<!--")) {
+                const std::size_t end = html.find("-->", at + 4);
+                if (end == std::string::npos) break;
+                at = end + 3;
+            } else if (startsWith(at, "<?")) {
+                const std::size_t end = html.find("?>", at + 2);
+                if (end == std::string::npos) break;
+                at = end + 2;
+            } else {
+                break;
+            }
+        }
+        if (startsWith(at, "<!doctype")) {
             const std::size_t gt = html.find('>', at);
-            at = (gt == std::string::npos) ? at : gt + 1;
+            if (gt != std::string::npos) at = gt + 1;
+        } else if (startsWith(at, "<html")) {
+            const std::size_t gt = html.find('>', at);
+            if (gt != std::string::npos) at = gt + 1;
         }
         html.insert(at, CspMetaFor(level));
     }
@@ -2965,11 +2984,12 @@ namespace Magelight {
             std::error_code ec;
             return std::filesystem::is_regular_file(p, ec);
         }
+        static std::string LowerExt(const std::filesystem::path& p) { return HotkeyNames::Lower(p.extension().string()); }
+        static bool IsHtmlExt(const std::string& ext) { return ext == ".html" || ext == ".htm"; }
         ultralight::String GetFileMimeType(const ultralight::String& file_path) override
         {
-            std::string ext = Resolve(file_path).extension().string();
-            for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (ext == ".html" || ext == ".htm") return "text/html";
+            const std::string ext = LowerExt(Resolve(file_path));
+            if (IsHtmlExt(ext)) return "text/html";
             if (ext == ".js" || ext == ".mjs") return "application/javascript";
             if (ext == ".css") return "text/css";
             if (ext == ".json" || ext == ".map") return "application/json";
@@ -2994,7 +3014,7 @@ namespace Magelight {
         ultralight::RefPtr<ultralight::Buffer> OpenFile(const ultralight::String& file_path) override
         {
             const auto path = Resolve(file_path);
-            if (path.empty()) return nullptr;   // refused by the pin (already logged)
+            if (path.empty()) return nullptr;   // refused by the file gate (already logged)
             std::ifstream f(path, std::ios::binary | std::ios::ate);
             if (!f) {
                 SKSE::log::warn("Magelight: OpenFile failed: {}", path.string());
@@ -3009,9 +3029,7 @@ namespace Magelight {
             }
             // Every page gets its mod's CSP (CspFor). The hosted Web Inspector is left as shipped: it is a
             // dev surface served from the runtime dir, and its frontend was not written against a policy.
-            std::string ext = path.extension().string();
-            for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if ((ext == ".html" || ext == ".htm") && !PathIsUnder(path, s_runtimeDir / L"inspector"))
+            if (IsHtmlExt(LowerExt(path)) && !PathIsUnder(path, s_runtimeDir / L"inspector"))
                 InjectCsp(data, RootNetLevel(path));
             return ultralight::Buffer::CreateFromCopy(data.data(), data.size());
         }
@@ -4151,7 +4169,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         } else {
             SKSE::log::warn("Magelight: view {} page '{}' missing — inline banner fallback",
                 v.id, v.htmlPath);
-            v.ul->LoadHTML(kBannerHTML);
+            std::string banner = kBannerHTML;
+            InjectCsp(banner, NetLevel::File);
+            v.ul->LoadHTML(banner.c_str());
         }
         if (waking) SKSE::log::info("Magelight: view {} woke from hibernation", v.id);
         // The UI-mode target loading late (a wake, or an entry while it waited in the queue): the focus marker ran
@@ -4645,7 +4665,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // Render created geometry before the capture, and the UAVs an 8-slot
     // OMSetRenderTargets unbinds). Capture BEFORE Renderer::Render.
     struct StateBackup {
-        static constexpr UINT kSrvSlots = 4;   // PS t0-t2 and VS t0-t3 are what a driver binds (t3 in later SDKs)
+        static constexpr UINT kSrvSlots = 4;   // the driver binds PS t0-t2 (t3 in later SDKs); VS slots are a belt
         D3D11_PRIMITIVE_TOPOLOGY topo{};
         ID3D11InputLayout* layout = nullptr;
         ID3D11Buffer* vb = nullptr; UINT vbStride = 0, vbOffset = 0;
@@ -4757,8 +4777,9 @@ float4 ps_straight(VSOut i) : SV_Target {
             } else {
                 c->OMSetRenderTargets(8, rtvs, dsv);
             }
-            if (vpCount) c->RSSetViewports(vpCount, vps);
-            if (scCount) c->RSSetScissorRects(scCount, scs);
+            // A count of 0 restores "none bound" (the driver binds one scissor rect per scissored draw).
+            c->RSSetViewports(vpCount, vpCount ? vps : nullptr);
+            c->RSSetScissorRects(scCount, scCount ? scs : nullptr);
             // Release the refs the Get* calls added.
             if (layout) layout->Release();
             if (vb) vb->Release();
@@ -5248,8 +5269,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         const int h = bh / 2;
         auto ul = s_ulRenderer->CreateView(static_cast<std::uint32_t>(bw), static_cast<std::uint32_t>(h), vc, nullptr);
         if (!ul) return nullptr;
-        // Sandboxed like any page, at File level: the runtime dir (where
-        // file:///inspector/ lives) and the inspected page's own folder.
+        // The network listener at File level; the inspector frontend is the one
+        // page served with no CSP (MlFileSystem::OpenFile), a dev surface.
         ul->set_network_listener(&s_networkListener);
         auto v = std::make_unique<MlView>();
         v->id = s_nextViewId.fetch_add(1);

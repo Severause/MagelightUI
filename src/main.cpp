@@ -102,7 +102,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
     // before any delay-loaded import fires. If the runtime is missing the
     // plugin stays loaded but inert (logged), rather than taking SKSE down.
     if (!Magelight::PreloadRuntime()) {
-        SKSE::log::error("Magelight: Ultralight runtime not found — overlay disabled this session");
+        SKSE::log::error("Magelight: Ultralight runtime unusable (see above) — overlay disabled this session");
         return true;
     }
 

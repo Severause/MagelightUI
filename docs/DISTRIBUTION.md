@@ -50,7 +50,10 @@ one download installs both. This is what SeverActions does. The pattern:
 If a user installs your bundle **and** a standalone Magelight (or two bundling
 mods), MO2 gives each file both copies carry to the mod that sits lower in the
 left pane. The runtime files are the same set in every copy, so the lower mod's
-Magelight is the one that runs; an **older** copy winning silently drops newer
+Magelight is the one that runs (a copy's `Magelight.dll` over another copy's
+runtime DLLs of a different Ultralight version is refused at load since 0.31.5,
+with both versions in the log, so one copy must win every file); an **older**
+copy winning silently drops newer
 features, and mods that need the newer host show the "needs updating" page.
 Tell users: if they have Magelight from more than one source, let the
 **newest** copy win (in MO2, place it lower in the left pane) or keep only one.

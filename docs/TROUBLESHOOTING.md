@@ -6,10 +6,15 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v0.31.3 loading`).
+version (`Magelight v0.31.5 loading`).
 
 ## Nothing from any Magelight mod appears
 
+- **`the Ultralight runtime under ... is version '...', but this Magelight.dll was built for ...`**
+  (0.31.5): a mod manager paired `Magelight.dll` from one mod with the runtime DLLs of another
+  (two mods bundle Magelight and neither wins every file). The host stays off for the session
+  rather than running a runtime it was not built for. Let ONE copy win every Magelight file: in MO2
+  the newer copy lowest in the left pane.
 - **`failed to load <runtime DLL> (GetLastError=126)`**: Windows could not load the Ultralight
   runtime. With no Visual C++ redistributable at all the line names `Magelight1Core.dll` (the
   first one loaded); with an old one it usually names `MgWCore.dll`. First check that `Magelight1Core.dll`, `MgWCore.dll`,
@@ -52,8 +57,14 @@ The number one question for any web-in-game UI. In order of likelihood:
 Since 0.30.0 a page reaches nothing over the network unless its mod opts in: loopback (a server
 on this machine) through the manifest (`"network": "loopback"`), Papyrus `SetNetworkPolicy` or
 the mod's DLL; any other host only through the DLL. The log names a mod's policy when the mod
-changes it, and the first 32 refused requests of the session. Views created through the v1-v3
-C++ `CreateView` belong to no mod: they are file-only and cannot opt in.
+changes it. Since 0.31.5 the policy is a Content-Security-Policy written into the page, so a
+refused request shows in the page console as `Refused to connect to ...` (in `Magelight.log` with
+`consoleLog` at `warnings` or above); the log's own `blocked network request` line covers only
+what the policy let through. Loopback means `localhost` or `127.0.0.1`: a page that used `[::1]`
+or another `127.x` address switches to one of those. A page cannot `fetch()` or XHR its own files
+either (import or inline the data; a Vite build sets `build.modulePreload.polyfill = false`, which
+`@magelight/vite-plugin` does, or it logs one refused fetch per page). Views created through the
+v1-v3 C++ `CreateView` belong to no mod: they are file-only and cannot opt in.
 
 ## The hotkey does nothing
 
@@ -86,8 +97,10 @@ mod that must be on top uses the `popup` or `system` layer for stacking, not UI 
 
 A mod such as SeverActions can ship its own copy of Magelight. If you also install Magelight UI
 by itself, the copy that wins the file conflict is the one that runs; in MO2 that is the mod
-lower in the left pane. Let the newer copy win. Line one of `Magelight.log` names the running
-version, and a "Magelight UI needs updating" page means an older copy won.
+lower in the left pane. Let the newer copy win, and let it win every file: a `Magelight.dll` from one
+copy over the runtime DLLs of another is refused at load (0.31.5; the log names both versions)
+and the host stays off. Line one of `Magelight.log` names the running version, and a "Magelight
+UI needs updating" page means an older copy won.
 
 ## Text fields do not type / paste
 

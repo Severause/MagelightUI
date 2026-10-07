@@ -91,7 +91,7 @@ string Function GetLastError(string modId) Global Native
 ; "ok"/"click", "cancel", "prevnext", "focus"/"hover", "open", "close", "inactive" (the vanilla
 ; UIMenu* sounds), or "Plugin.esp|0xFormID" of any SNDR. Unknown = silent (logged once). Host 0.29.0+.
 Function PlaySound(int view, string name) Global Native
-; What the mod's pages may reach: "file" (the default: files under the mod's folder only) or
-; "loopback" (also http(s) servers on this machine). Registers the mod if needed. "any",
+; What the mod's pages may reach: "file" (the default: nothing over the network) or
+; "loopback" (also http(s) and ws(s) to localhost or 127.0.0.1). Registers the mod if needed. "any",
 ; other words and a plugin's mod return false; internet reach is a plugin's call. Host 0.30.0+.
 bool Function SetNetworkPolicy(string modId, string policy) Global Native

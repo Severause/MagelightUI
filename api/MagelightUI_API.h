@@ -220,13 +220,16 @@ namespace MAGELIGHT_API {
 
     enum class Anchor : std::uint8_t { TopLeft = 0, TopRight = 1, BottomLeft = 2, BottomRight = 3 };
     // 0.28.2: what a mod's pages may reach over the network (SetNetworkPolicy).
-    // File reads are always pinned to the page's own mod folder and the host
-    // runtime dir. FileOnly (the default since 0.30.0): nothing over the
-    // network. LoopbackOnly: also http(s) to this machine (localhost, 127.x,
-    // [::1]); it was the default before 0.30.0, so a mod that talks to a
-    // local server now opts in. Any: any host, any scheme — the reach a page
-    // has in a browser. A manifest or a script may pick FileOnly or
-    // LoopbackOnly; Any is a plugin's call. Each change is logged.
+    // File reads come from the Data\Magelight tree, the registered page folders
+    // and the host runtime dir (no per-mod isolation). FileOnly (the default
+    // since 0.30.0): nothing over the network. LoopbackOnly: also http(s) and
+    // ws(s) to this machine (localhost, 127.0.0.1 - since 0.31.5 the policy is
+    // a Content-Security-Policy written into each page, which cannot name
+    // [::1] or other 127.x addresses); it was the default before 0.30.0, so a
+    // mod that talks to a local server now opts in. Any: any host, any scheme —
+    // the reach a page has in a browser. A manifest or a script may pick
+    // FileOnly or LoopbackOnly; Any is a plugin's call. Each change is logged
+    // and applies to a page on its next load.
     enum class NetworkPolicy : std::uint8_t {
         LoopbackOnly = 0,
         Any = 1,

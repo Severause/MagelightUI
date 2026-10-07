@@ -17,7 +17,7 @@ privately.
   `"any"` is refused. Every opt-in is logged. Loopback reaches every local service on the
   machine, not only the mod's own, so a mod opts in only when it needs a local server. The
   policy is enforced as a Content-Security-Policy the host writes into every page it serves,
-  plus a stop on main-frame navigation away from the page's own files (0.31.5); Ultralight's
+  plus a stop on any main-frame navigation but to the view's own HTML files (0.31.5); Ultralight's
   own request hook sees neither synchronous XHR nor WebSockets nor `file:` reads, so it is
   only the second line. Known limit: `<link rel="preload" as="fetch">` still sends one GET to
   any host (no Ultralight 1.4 API reaches it).

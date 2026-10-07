@@ -28,6 +28,8 @@ Modifications vs upstream (marked `// MG:` in source):
 - MSAA is the host's choice (`MgGpu_SetSampleCount`, from Magelight.json `msaa`), where upstream fixes 8x at
   compile time; an MSAA target draws into its own multisample surface and resolves into the plain texture
   everything samples, so the host's SRV and `BindTexture` never see a multisample resource.
+- A draw whose source texture is the texture behind the bound render buffer leaves that sampler slot null:
+  binding it resolved the MSAA target mid-layer and dropped the layer's last draws (a missing border segment).
 - MessageBox error reporting replaced with a host-provided log callback.
 - Shaders always load from the embedded fxc bytecode (no file-system path).
 - Everything else is kept as close to upstream as practical for diffability.
