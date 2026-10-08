@@ -123,18 +123,19 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
   `if (v4()->QueryCapability("vr")) ...`. The packed number is
   `MAJOR*10000 + MINOR*100 + PATCH`. See [CHANGELOG.md](../CHANGELOG.md) for
   which version added which call.
-- **Absolute page paths.** The host loads a `file:///` URL and pins reads to
-  your `Data\Magelight\<modId>\` folder, or, for a page kept elsewhere (a page
-  laid out under another UI mod's own folder, e.g. `Data\<OtherUI>\views\...`),
-  to the page's own directory (0.26.4+; pages outside `Data\Magelight` load as
-  of 0.28.1).
+- **Absolute page paths.** The host loads a `file:///` URL and serves files
+  from the `Data\Magelight` tree and from the directory of every page kept
+  elsewhere (a page laid out under another UI mod's own folder, e.g.
+  `Data\<OtherUI>\views\...`; pages outside `Data\Magelight` load as of
+  0.28.1). The file system cannot tell which page asks, so every page reads
+  that whole union.
   Resolve the path from `GetModuleFileNameW`, not the working directory.
 - **Network.** Since 0.30.0 every mod's pages are file-only by default
   (`NetworkPolicy::FileOnly`): they read their own files (see the previous
   point) and the host's runtime folder, and nothing over the network. Opt in with
   `SetNetworkPolicy(mod, policy)` once after `RegisterMod`:
-  `NetworkPolicy::LoopbackOnly` adds `http(s)` to this machine (`localhost`,
-  `127.x`, `[::1]`), for your own local server or a companion app;
+  `NetworkPolicy::LoopbackOnly` adds `http(s)` and `ws(s)` to this machine
+  (`localhost`, `127.0.0.1`), for your own local server or a companion app;
   `NetworkPolicy::Any` reaches any host with any scheme (the internet:
   catalogs, indexes, a user-set endpoint). It applies to all of that mod's
   views and each change is logged. (`FileOnly` as a value is new in 0.30.0;
@@ -161,10 +162,9 @@ call `ShowView`, `Navigate`, `DestroyView`, `EvalJS` and the
 listener-registration functions on it — including another mod's ids. That
 is deliberate: the Skyrim modding ecosystem is cooperative and cross-mod UI
 coordination is a feature (see `FindView`). But it is **not** isolation.
-What the host does isolate per mod: file reads (a page reads only its own
-`Data\Magelight\<modId>\` folder or its own directory — the log names the
-first 32 refused reads), storage (per-mod sessions), network (file-only unless
-the mod opts in with `SetNetworkPolicy`), hotkeys (first registrant wins), and
+What the host does isolate per mod: storage (per-mod sessions), network
+(file-only unless the mod opts in with `SetNetworkPolicy`; reads stay inside
+the page roots, but not inside the page's own mod folder), hotkeys (first registrant wins), and
 page calls (since 0.30.0 a page's `window.magelight.send` reaches only the
 listeners of the view it is in; it cannot call another view's). What it does
 not isolate between plugins: view control and JS execution inside an
@@ -226,8 +226,9 @@ where the runtime keyboard owns text entry.
 - **Local servers.** Once the mod has called
   `SetNetworkPolicy(mod, NetworkPolicy::LoopbackOnly)` (required since
   0.30.0, see Network above), a page may `fetch()`
-  `http://127.0.0.1:<port>` (or `localhost` / `[::1]`) — your own server on
-  this machine. Anything else is refused. `QueryCapability("loopback")`.
+  `http://127.0.0.1:<port>` (or `localhost`), or open a WebSocket there —
+  your own server on this machine. Anything else is refused.
+  `QueryCapability("loopback")`.
 - **Inspector, z-order, scroll step.** `ShowInspector`, `SetViewOrder`,
   `SetScrollStep` — see the header (`QueryCapability("inspector")`,
   `"vieworder"`, `"scrollstep"`). Page console output reaches you as the

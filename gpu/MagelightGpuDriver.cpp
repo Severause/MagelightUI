@@ -474,8 +474,14 @@ namespace ultralight {
         {
             BindRenderBuffer(state.render_buffer_id);
             SetViewport(state.viewport_width, state.viewport_height);
-            if (state.texture_1_id) BindTexture(0, state.texture_1_id);
-            if (state.texture_2_id) BindTexture(1, state.texture_2_id);
+            // MG: never sample the texture behind the bound render target. The core can name it (a stale id
+            // after pooled render-texture reuse); BindTexture would then resolve the MSAA target mid-layer and
+            // clear needs_resolve, so the layer's last draws never reach the resolve texture and a border
+            // segment goes missing (msaa 4, translucent-borders.html). The slot stays null, as
+            // BindRenderBuffer left it.
+            const uint32_t rtTex = BoundRenderTargetTexture(state.render_buffer_id);
+            if (state.texture_1_id && state.texture_1_id != rtTex) BindTexture(0, state.texture_1_id);
+            if (state.texture_2_id && state.texture_2_id != rtTex) BindTexture(1, state.texture_2_id);
             UpdateConstantBuffer(state);
             BindGeometry(geometry_id);
 
@@ -624,6 +630,13 @@ namespace ultralight {
             ctx->IASetIndexBuffer(geometry.indexBuffer.Get(), DXGI_FORMAT_R32_UINT, 0);
             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             BindVertexLayout(geometry.format);
+        }
+
+        // MG: the texture a render buffer draws into (0 = unknown buffer).
+        uint32_t BoundRenderTargetTexture(uint32_t render_buffer_id) const
+        {
+            auto i = render_targets_.find(render_buffer_id);
+            return i == render_targets_.end() ? 0u : i->second.render_target_texture_id;
         }
 
         ID3D11RenderTargetView* GetRenderTargetView(uint32_t render_buffer_id)

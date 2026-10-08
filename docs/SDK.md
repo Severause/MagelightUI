@@ -37,12 +37,16 @@ development. Neither the SDK nor React is required — the contract is the two g
 
 ## What a page can reach
 
-- **Files**: its own mod folder and the host's runtime dir, nothing else.
+- **Files**: the `Data/Magelight/` tree, registered page folders and the host's runtime dir, nothing
+  else; the host does not keep one mod's page out of another mod's folder.
 - **Network**: nothing by default (file-only, since 0.30.0; before that the default also let
   a page reach this machine). A mod opts in for itself: the manifest key `"network": "loopback"`,
-  or Papyrus `SetNetworkPolicy(modId, "loopback")` for a mod scripts own, adds http(s) to this
-  machine (localhost, 127.x, ::1). Only a DLL can grant internet reach (C++
-  `SetNetworkPolicy(mod, Any)`). A page that fetches from a local server needs one of these.
+  or Papyrus `SetNetworkPolicy(modId, "loopback")` for a mod scripts own, adds http(s) and ws(s)
+  to this machine (`localhost`, `127.0.0.1`). Only a DLL can grant internet reach (C++
+  `SetNetworkPolicy(mod, Any)`). A page that fetches from a local server needs one of these. The
+  policy is a Content-Security-Policy in the page (0.31.5), so a page cannot `fetch()` its own
+  files: a plain Vite build sets `build.modulePreload.polyfill = false` (the plugin does) or logs
+  one refused fetch per page.
 - **Storage**: `localStorage`, IndexedDB and cookies are per mod by default (a mod that names
   a shared session, or `"default"`, shares that jar). They are not per save or per character,
   and they are only as private as the tier that owns the mod. Scripts cannot act on the views

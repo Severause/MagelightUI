@@ -53,8 +53,10 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
 4. **LGPL isolation**: AppCore-derived code stays in `gpu/` + `MagelightGPU.dll`, reached only
    through `gpu/MagelightGpuApi.h` (C ABI). Never include driver internals in the host; never
    copy driver code into `src/`. Modifications carry `// MG:` markers.
-5. **Own FileSystem** (`MlFileSystem`): fixed MIME table (registry MIME kills module scripts),
-   query-string strip, percent-decode, absolute drive-letter paths. `resources/` must resolve.
+5. **Own FileSystem** (`MlFileSystem`): fixed MIME table (AppCore's has no `.mjs`, and module
+   scripts refuse a non-JS MIME), query-string strip, percent-decode, absolute drive-letter paths,
+   the page-root union, and the Content-Security-Policy injected into every page. `resources/` must
+   resolve.
 6. **Mouse rides the SKSE input sink + MenuCursor**; the window never gets WM mouse messages.
    `ToggleControls(..., storeState=false)`; `ForceExitUIMode` on every load boundary.
 7. **Own engine menu** (`MagelightFocus`, kUsesCursor) on UI-mode entry — the engine drives
@@ -96,7 +98,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`). Log: `...\SKSE\Magelight.log`.
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `animationTimerDelay`). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).
 - Version: CMake `project(... VERSION x.y.z)` is the single source (`PLUGIN_VERSION*` macros).

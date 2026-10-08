@@ -6,14 +6,21 @@ privately.
 
 ## The boundaries
 
-- **Files.** A page reads its own `Data\Magelight\<modId>\` folder (or its own page directory)
-  and the host's runtime dir, nothing else.
+- **Files.** A page reads the `Data\Magelight` tree, the directories of pages registered
+  elsewhere and the host's runtime dir, nothing else. Ultralight asks the host for files with no
+  page identity, so pages are not kept out of each other's folders: a mod's files are readable
+  by every page.
 - **Network.** By default a page reaches nothing over the network (0.30.0). A mod can opt in
-  to loopback (`http(s)` to `localhost`, `127.x.x.x` or `[::1]`) from its manifest
+  to loopback (`http(s)` and `ws(s)` to `localhost` or `127.0.0.1`) from its manifest
   (`"network": "loopback"`), from Papyrus (`SetNetworkPolicy`) or from its DLL, and to any
   host only from its DLL (`SetNetworkPolicy(mod, NetworkPolicy::Any)`). A manifest asking for
   `"any"` is refused. Every opt-in is logged. Loopback reaches every local service on the
-  machine, not only the mod's own, so a mod opts in only when it needs a local server.
+  machine, not only the mod's own, so a mod opts in only when it needs a local server. The
+  policy is enforced as a Content-Security-Policy the host writes into every page it serves,
+  plus a stop on any main-frame navigation but to the view's own HTML files (0.31.5); Ultralight's
+  own request hook sees neither synchronous XHR nor WebSockets nor `file:` reads, so it is
+  only the second line. Known limit: `<link rel="preload" as="fetch">` still sends one GET to
+  any host (no Ultralight 1.4 API reaches it).
 - **Storage.** By default each mod's pages get their own localStorage/IndexedDB/cookie jar,
   under `My Games\<game>\SKSE\Magelight-cache\<modId>\`. Jars are shared by name: a mod that
   asks for `"default"` shares the jar all v1-v3 views use, and a plugin that gives its mod a
@@ -47,8 +54,8 @@ privately.
 
 ## What to report
 
-- **File-read pin escapes** — a page reading files outside the folders above (e.g. via URL
-  trickery, path traversal, junctions).
+- **File-read escapes** — a page reading files outside the roots above (e.g. via URL
+  trickery, path traversal, junctions, or a request that never reaches the host file system).
 - **Network sandbox escapes** — a page reaching the network beyond what its mod opted into:
   anything at all under the default, a non-loopback host under a loopback opt-in, or the
   loopback check bypassed by URL parsing tricks.

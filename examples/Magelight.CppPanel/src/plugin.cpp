@@ -15,8 +15,9 @@ namespace {
     int                         g_counter = 41;
 
     // Pages live under Data\Magelight\<modId>\ — resolve the ABSOLUTE path from
-    // the running exe (the host loads a file:/// URL, and pins reads to this
-    // folder). modId here is "MyMod"; the folder must match.
+    // the running exe (the host loads a file:/// URL; the page's files must sit
+    // under Data\Magelight or the registered page folder). modId here is
+    // "MyMod"; the folder must match.
     std::string PagePath()
     {
         wchar_t buf[MAX_PATH]{};

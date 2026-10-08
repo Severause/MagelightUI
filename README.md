@@ -72,13 +72,16 @@ and that no other mod binds: one binding per key, and the first binder keeps it.
   never open another mod's page while you are typing. On flat, pages take mouse and keyboard;
   controller navigation inside a page is up to each mod. On VR, the controller laser points
   and the trigger clicks.
-- **Files**: a page reads its own mod folder (`Data/Magelight/<Mod>/`, or its own directory for
-  a page kept elsewhere) and the host's runtime dir, nothing else — no other mod's files, no
-  `..` out of `Data`, no arbitrary drive path (0.26.4; the log names the first 32 refused reads).
+- **Files**: a page reads the `Data/Magelight/` tree, the folders of pages registered elsewhere
+  and the host's runtime dir, nothing else — no `..` out of them, no arbitrary drive path (the
+  log names the first 32 refused reads). The host cannot tell which page asks for a file, so one
+  mod's page can read another's files; keep secrets out of mod folders.
 - **Network**: none by default (0.30.0). A page reaches only its files unless its mod opts in:
-  loopback (`http(s)` to this machine, for a local server) from the manifest
-  (`"network": "loopback"`), Papyrus (`SetNetworkPolicy`) or the mod's DLL; the internet only
-  from the mod's DLL (`SetNetworkPolicy(mod, NetworkPolicy::Any)`). Each opt-in is logged.
+  loopback (`http(s)` and `ws(s)` to `localhost` or `127.0.0.1`, for a local server) from the
+  manifest (`"network": "loopback"`), Papyrus (`SetNetworkPolicy`) or the mod's DLL; the internet
+  only from the mod's DLL (`SetNetworkPolicy(mod, NetworkPolicy::Any)`). Each opt-in is logged.
+  The policy is a Content-Security-Policy the host writes into every page (0.31.5), so it holds
+  for synchronous XHR and WebSockets too, and a page cannot navigate itself to a remote site.
 - **Storage**: by default each mod's pages get their own localStorage/IndexedDB/cookie jar, one
   per game install: every save, character and mod-manager profile shares it, and loading a save
   does not roll it back. Jars are shared by name: `"default"` is the jar all v1-v3 views use,
@@ -158,7 +161,7 @@ download and are installed beside the runtime under `SKSE/Plugins/Magelight/lice
   itself ([docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)).
 - **MagelightGPU.dll** — LGPL-2.1, derived from Ultralight's AppCore D3D11 driver and isolated in
   its own DLL behind a C ABI; its corresponding source is the `gpu/` folder of this repository
-  at each release's tag (`v0.31.4` for 0.31.4).
+  at each release's tag (`v0.31.5` for 0.31.5).
 - **Web Inspector** (staged by `build.ps1`, not in the player download) — Apple BSD.
 - Compiled into `Magelight.dll`: CommonLibVR (MinLL's MIT continuation of CommonLibSSE-NG),
   {fmt}, spdlog, nlohmann/json, DirectXMath and DirectXTK — MIT; rapidcsv, Xbyak and the

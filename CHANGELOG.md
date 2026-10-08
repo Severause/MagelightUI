@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 0.31.5 | 3105 | The network policy is a Content-Security-Policy written into every page: loopback = `localhost` / `127.0.0.1` over `http(s)` and `ws(s)` only (`[::1]` and other `127.x` no longer reach), a page cannot `fetch()` its own files, and a view shows only its own HTML files; `QueryCapability("csp")` |
 | 0.31.1 | 3101 | `SetViewCursorTint(view, tint)` with `CursorTint` — the host's drawn cursor (arrow, hover glow, I-beam) and the VR laser dot in your colours over a view; `QueryCapability("cursortint")` |
 | 0.31.0 | 3100 | `SetViewFreezeWorld(view, freeze)` — the game skips its 3D world render behind a paused page (flat only); Papyrus `SetFreezeWorld`; `QueryCapability("freezeworld")` |
 | 0.31.0 | 3100 | Page console lines in `Magelight.log` are opt-in (`Magelight.json` `consoleLog`); `QueryCapability("consolelog")` says what the log records (0-3); the `ConsoleMessage` event is unchanged |
@@ -29,7 +30,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.26.8 | 2608 | `FindView(mod, name, &id)` — resolve a view name to its id from C++ (the Papyrus tier already had it) |
 | 0.26.8 | — | Manifest robustness (a mistyped scalar warns instead of throwing); capability list single-sourced |
 | 0.26.6 | 2606 | `kUIModeFlagNoTextEntry` (a page with no text field asks the host not to raise the engine text-entry gate — on Skyrim VR that gate summons OpenComposite's keyboard) |
-| 0.26.4 | — | Host pinning: a page reads only its own `Data/Magelight/<Mod>/` folder and the runtime dir |
+| 0.26.4 | — | Host pinning: a page reads only its own `Data/Magelight/<Mod>/` folder and the runtime dir (removed in 0.31.5: `file:` reads never reached the hook, so it never held; pages read the union of page roots) |
 | 0.26.3 | — | OpenComposite (OCU) detected and render-model tip-aim skipped there (its stub pops a dialog) |
 | 0.26.0 | 2600 | `SetVRButtonListener` — raw controller button edges for press-to-bind chord UIs |
 | 0.21.0 | 2100 | `BindVRHotkeyCallback` — a VR controller chord that calls YOU instead of running a built-in action |
@@ -41,6 +42,44 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 0.31.5
+
+Found while testing Magelight against the Ultralight 2.0 beta; every item is a 1.4 fix.
+
+- **The network policy is a Content-Security-Policy now.** Ultralight 1.4 hands the host's request
+  hook only `http(s)` loads: synchronous XHR, WebSockets and `file:` reads never reach it, so a
+  file-only page could open a WebSocket, a document's synchronous XHR could read any file on the
+  disk, and the per-page file pin never ran. The host now writes the mod's policy into every page it
+  serves (`CspFor`), stops a main-frame navigation to anything but the view's own HTML files (a
+  `file:` SVG or a `data:` document would run with no policy), and keeps the request hook as the
+  second line. Loopback is `localhost` and `127.0.0.1` over `http(s)` and `ws(s)`; CSP cannot name
+  `127.x.x.x` or `[::1]`, so a page that reached its server at `[::1]` switches to `localhost`. A
+  page cannot `fetch()` its own files any more (Vite's `modulePreload` polyfill logs one refusal
+  per page; set `build.modulePreload.polyfill = false`, which `@magelight/vite-plugin` does), and
+  file: iframes between pages are refused: every `file:///` document shares one origin, so a
+  frame would lend a looser mod's policy. Known limit: `<link rel="preload" as="fetch">` still
+  sends one GET to any host. The docs now say that pages are not kept out of each other's
+  folders: the file system serves the union of the page roots and cannot tell which page asks.
+  `QueryCapability("csp")` answers 1.
+- **The game's pipeline state survives a Magelight frame.** `StateBackup` now saves and restores the
+  index buffer, pixel and vertex shader resource slots 0-3, the vertex constant buffer, the scissor
+  rects and the unordered-access views, and captures before `Render` (which creates geometry and
+  binds an input layout). A harness run with sentinel state had shown those slots left changed.
+- **A missing border segment at `msaa` 4.** The core can name the texture behind the bound render
+  target as a draw's source; binding it resolved the target mid-layer, so the layer's last draws
+  were lost. The driver skips such a bind.
+- **`requestAnimationFrame` runs at the frame rate.** Ultralight's rAF timer (1/60 s) aliased against
+  the per-frame pump: 40 callbacks a second on a 60 Hz game, 48 at 144 Hz, with alternating 17 and
+  33 ms gaps. `Magelight.json` `animationTimerDelay` (seconds, default `0.001`) sets it. CSS
+  animations and transitions were never affected.
+- **A runtime from another Ultralight version leaves the host inert** instead of crashing: a mod
+  manager can install `Magelight.dll` from one mod over the runtime DLLs of another. The log names
+  both versions.
+- Comments and docs corrected: Ultralight's own file system has a static MIME table (the registry
+  claim was wrong; `.mjs` and query strings are why Magelight has its own), the request hook runs on
+  the render thread, and with no `cache_path` WebKit writes page storage under the game root, not in
+  memory.
 
 ## 0.31.4
 
