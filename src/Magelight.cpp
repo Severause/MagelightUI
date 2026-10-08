@@ -64,6 +64,9 @@
 #include <Ultralight/platform/Logger.h>
 #include <Ultralight/platform/Platform.h>
 #include <Ultralight/platform/Surface.h>
+#include <Ultralight/platform/GPUDriver.h>
+
+#include "../gpu/MagelightGpuApi.h"   // the C ABI description only (MgGpuInfo); never driver internals (invariant 4)
 
 namespace Magelight {
 
@@ -576,6 +579,24 @@ namespace Magelight {
     static MgGpuUnregExtFn s_gpuUnregExt = nullptr;
     static void*          s_gpu = nullptr;       // backend handle (render thread)
     static bool           s_gpuActive = false;   // accelerated path in use
+
+    // Why a backend's build does not match this host's, or "" when it does. A mod manager can pair this
+    // Magelight.dll with another mod's MagelightGPU.dll, and one built for another Ultralight SDK reads every
+    // command at the wrong offsets.
+    static std::string GpuBuildMismatch(const MgGpuInfo* info)
+    {
+        if (!info) return "it has no version export (a Magelight before 0.31.6, or another build)";
+        if (info->size < sizeof(MgGpuInfo))
+            return std::format("its version record is {} bytes, this host reads {}", info->size, sizeof(MgGpuInfo));
+        if (info->contract != MGGPU_CONTRACT)
+            return std::format("it speaks GPU contract {}, this host {}", info->contract, MGGPU_CONTRACT);
+        const char* ul = info->ultralightVersion ? info->ultralightVersion : "?";
+        if (info->gpuStateSize != sizeof(ultralight::GPUState) || info->commandSize != sizeof(ultralight::Command)
+            || std::strcmp(ul, ULTRALIGHT_VERSION) != 0)
+            return std::format("it was built for Ultralight {} ({}-byte commands), this host for {} ({}-byte commands)",
+                               ul, info->commandSize, ULTRALIGHT_VERSION, sizeof(ultralight::Command));
+        return {};
+    }
 
     static void GpuLogBridge(const char* msg)
     {
@@ -2758,7 +2779,20 @@ namespace Magelight {
         // Optional GPU backend. Loaded AFTER the runtime so its (namespaced)
         // Ultralight imports bind to the modules already in the process.
         // Missing/failed = CPU surface fallback, never fatal.
-        if (HMODULE gpu = LoadLibraryW((s_runtimeDir / L"MagelightGPU.dll").c_str())) {
+        HMODULE gpu = LoadLibraryW((s_runtimeDir / L"MagelightGPU.dll").c_str());
+        const DWORD gpuLoadError = gpu ? 0 : GetLastError();
+        bool gpuRefused = false;
+        if (gpu) {
+            using MgGpuInfoFn = const MgGpuInfo* (*)();
+            const auto getInfo = reinterpret_cast<MgGpuInfoFn>(GetProcAddress(gpu, "MgGpu_GetInfo"));
+            const std::string mismatch = GpuBuildMismatch(getInfo ? getInfo() : nullptr);
+            if (!mismatch.empty()) {
+                SKSE::log::error("Magelight: MagelightGPU.dll does not match this Magelight.dll - {}. Pages draw on "
+                                 "the CPU; another mod's copy of MagelightGPU.dll is installed over this one", mismatch);
+                gpuRefused = true;
+            }
+        }
+        if (gpu && !gpuRefused) {
             s_gpuCreate    = reinterpret_cast<MgGpuCreateFn>(GetProcAddress(gpu, "MgGpu_Create"));
             s_gpuDestroy   = reinterpret_cast<MgGpuDestroyFn>(GetProcAddress(gpu, "MgGpu_Destroy"));
             s_gpuGetDriver = reinterpret_cast<MgGpuGetDrvFn>(GetProcAddress(gpu, "MgGpu_GetGPUDriver"));
@@ -2774,14 +2808,15 @@ namespace Magelight {
                 SKSE::log::warn("Magelight: GPU backend predates external textures — texture images unavailable");
             }
             if (s_gpuCreate && s_gpuDestroy && s_gpuGetDriver && s_gpuHas && s_gpuDraw && s_gpuSrv) {
-                SKSE::log::info("Magelight: GPU backend loaded (MagelightGPU.dll)");
+                SKSE::log::info("Magelight: GPU backend loaded (MagelightGPU.dll, contract {}, Ultralight {})",
+                                MGGPU_CONTRACT, ULTRALIGHT_VERSION);
             } else {
                 SKSE::log::error("Magelight: MagelightGPU.dll is missing exports — CPU fallback");
                 s_gpuCreate = nullptr;
             }
-        } else {
+        } else if (!gpu) {
             SKSE::log::info("Magelight: no GPU backend (MagelightGPU.dll not found, GetLastError={}) — CPU fallback",
-                GetLastError());
+                gpuLoadError);
         }
 
         s_runtimeReady.store(true);
@@ -6287,7 +6322,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // dxgi's swapchain vtable when the game's swapchain is a proxy (ENB's d3d11.dll wraps it): a throwaway
     // WARP device and swapchain made through the SYSTEM d3d11.dll, so a d3d11.dll proxy does not see them. A
-    // dxgi.dll proxy would (system d3d11 binds to the loaded dxgi.dll); the caller's IsSystemModule refuses it.
+    // dxgi.dll proxy would (system d3d11 binds to the loaded dxgi.dll), so the caller never calls this behind one.
     // The vtable is shared by every dxgi swapchain; only its address is kept.
     static void* const* DxgiSwapChainVtable()
     {
@@ -6330,9 +6365,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         return out;
     }
 
-    // "auto" turns it on only behind an earlier Present hook on a plain dxgi swapchain, never on VR. Behind a
-    // proxy (ENB's or ReShade's d3d11.dll, Skyrim Upscaler) only "late" looks for dxgi's own Present: the
-    // throwaway device it takes for that killed the game at start behind ENB.
+    // "auto" turns it on behind an earlier Present hook on a plain dxgi swapchain, and for Smooth Motion without
+    // engine mode, never on VR. Behind a d3d11.dll proxy (ENB's or ReShade's, Skyrim Upscaler) only "late" looks for
+    // dxgi's own Present: the throwaway device it takes for that killed the game at start behind ENB. Behind a
+    // dxgi.dll proxy nothing does: the search could only find the proxy's swapchain again.
     static void InstallLatePresent(void* const* vtbl, void* const* vtbl1)
     {
         const std::string& mode = s_presentHookMode;
@@ -6348,13 +6384,19 @@ float4 ps_straight(VSOut i) : SV_Target {
             return;
         }
         const bool earlierHook = ModuleAt(reinterpret_cast<const void*>(s_origPresent)) != ModuleAt(vtbl);
-        // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind ENB
-        // or ReShade's d3d11.dll: the throwaway device the dxgi search takes killed the game at start there.
-        const bool smoothMotion = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded()
-            && IsSystemModule(GetModuleHandleW(L"d3d11.dll"), L"d3d11.dll");
+        // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind a
+        // d3d11.dll or dxgi.dll proxy (ENB, ReShade): the throwaway device the dxgi search takes killed the game at
+        // start behind ENB, and behind a dxgi.dll proxy it would find the proxy's swapchain anyway.
+        const bool proxied = !IsSystemModule(GetModuleHandleW(L"d3d11.dll"), L"d3d11.dll")
+            || !IsSystemModule(GetModuleHandleW(L"dxgi.dll"), L"dxgi.dll");
+        const bool smoothMotionAuto = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded();
+        const bool smoothMotion = smoothMotionAuto && !proxied;
         if (smoothMotion)
             SKSE::log::info("Magelight: NVIDIA Smooth Motion is loaded and engine mode is off - drawing late, inside "
                             "dxgi's own Present (pages flicker while it is on)");
+        else if (smoothMotionAuto)
+            SKSE::log::info("Magelight: NVIDIA Smooth Motion is loaded and engine mode is off, but d3d11.dll or "
+                            "dxgi.dll is a proxy - not drawing late");
         if (mode != "late" && !smoothMotion && (!earlierHook || REL::Module::IsVR())) {
             SKSE::log::info("Magelight: presentHook 'auto' - {}, compositing in the vtable hook",
                 REL::Module::IsVR() ? "VR" : "no earlier Present hook");
@@ -6365,6 +6407,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (mode != "late" && !smoothMotion) {
                 SKSE::log::info("Magelight: presentHook 'auto' - the game swapchain is a proxy ({}), compositing in "
                                 "the vtable hook", ModuleOf(vtbl));
+                return;
+            }
+            // The throwaway device below binds to whatever dxgi.dll is loaded, so behind a dxgi.dll proxy the search
+            // can only find the proxy's swapchain again; do not take the device for nothing.
+            if (!IsSystemModule(GetModuleHandleW(L"dxgi.dll"), L"dxgi.dll")) {
+                SKSE::log::warn("Magelight: late composite unavailable - the loaded dxgi.dll is not the system one (a "
+                                "proxy such as ReShade's), so dxgi's own Present cannot be reached");
                 return;
             }
             // A proxy's swapchain wraps a real dxgi one: detour dxgi's own functions, found through a throwaway

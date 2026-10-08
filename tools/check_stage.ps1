@@ -122,7 +122,7 @@ if (Test-Path $gpuDll) {
     $exports = Get-PeExportNames $gpuDll
     if ($null -eq $exports) { Fail "MagelightGPU.dll: no readable PE export directory" } else {
         # Required ones (the host falls back to the CPU path without them), then the optional ones.
-        $wanted = @("MgGpu_Create", "MgGpu_Destroy", "MgGpu_GetGPUDriver", "MgGpu_HasCommandsPending",
+        $wanted = @("MgGpu_GetInfo", "MgGpu_Create", "MgGpu_Destroy", "MgGpu_GetGPUDriver", "MgGpu_HasCommandsPending",
                     "MgGpu_DrawCommandList", "MgGpu_GetTextureSRV", "MgGpu_SetSampleCount",
                     "MgGpu_RegisterExternalTexture", "MgGpu_SetExternalTextureSRV", "MgGpu_UnregisterExternalTexture")
         $missing = @($wanted | Where-Object { $exports -notcontains $_ })

@@ -22,7 +22,25 @@ struct ID3D11ShaderResourceView;
 #  define MGGPU_API
 #endif
 
+// The C ABI's revision: bump it whenever an MgGpu_* signature or meaning changes. The host refuses a backend built
+// with another revision.
+#define MGGPU_CONTRACT 1u
+
 extern "C" {
+
+    // What a backend was built with, for the host's version check (MgGpu_GetInfo). A backend built for another
+    // Ultralight SDK reads every command at the wrong offsets, and a crash inside a frame is the first sign, so the
+    // host compares the command layout itself, not only the version text. Fields may be appended, never reordered:
+    // `size` tells the host how much of the struct the backend filled.
+    struct MgGpuInfo {
+        std::uint32_t size;               // sizeof(MgGpuInfo) in the backend's build
+        std::uint32_t contract;           // MGGPU_CONTRACT in the backend's build
+        std::uint32_t gpuStateSize;       // sizeof(ultralight::GPUState) in the backend's build
+        std::uint32_t commandSize;        // sizeof(ultralight::Command) in the backend's build
+        const char*   ultralightVersion;  // ULTRALIGHT_VERSION of the SDK headers it was built against
+    };
+    // Static data, valid for the DLL's lifetime; any thread. A backend without this export predates the check.
+    MGGPU_API const MgGpuInfo* MgGpu_GetInfo();
 
     // Create a driver bound to the GAME's device/context (not owned). `log`
     // receives human-readable errors (may be null). Returns an opaque handle,

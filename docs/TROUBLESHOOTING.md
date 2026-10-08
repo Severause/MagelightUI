@@ -19,6 +19,10 @@ letter (`I`, `W`, `E`) and the thread id.
   (two mods bundle Magelight and neither wins every file). The host stays off for the session
   rather than running a runtime it was not built for. Let ONE copy win every Magelight file: in MO2
   the newer copy lowest in the left pane.
+- **`MagelightGPU.dll does not match this Magelight.dll - ...`** (0.31.6): the same pairing for the
+  GPU backend: `MagelightGPU.dll` comes from another copy of Magelight (or another build of it). The
+  host draws pages on the CPU instead, which works but costs frame time. The line says what differs.
+  Let ONE copy win every Magelight file.
 - **`failed to load <runtime DLL> (GetLastError=126)`**: Windows could not load the Ultralight
   runtime. With no Visual C++ redistributable at all the line names `Magelight1Core.dll` (the
   first one loaded); with an old one it usually names `MgWCore.dll`. First check that `Magelight1Core.dll`, `MgWCore.dll`,
@@ -103,7 +107,8 @@ A mod such as SeverActions can ship its own copy of Magelight. If you also insta
 by itself, the copy that wins the file conflict is the one that runs; in MO2 that is the mod
 lower in the left pane. Let the newer copy win, and let it win every file: a `Magelight.dll` from one
 copy over the runtime DLLs of another is refused at load (0.31.5; the log names both versions)
-and the host stays off. Line one of `Magelight.log` names the running version, and a "Magelight
+and the host stays off. A `MagelightGPU.dll` from another copy is refused too (0.31.6), and pages
+then draw on the CPU. Line one of `Magelight.log` names the running version, and a "Magelight
 UI needs updating" page means an older copy won.
 
 ## Text fields do not type / paste
