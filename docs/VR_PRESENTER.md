@@ -200,7 +200,11 @@ movement/looking/activate/fighting…); a finer approach masks combat
 controls only while the trigger is over a panel ("masking combat controls
 (trigger on panel)"). We start with the existing whole-UI-mode suspension
 and refine only if VR users need to keep moving while a HUD-class view is
-up. Whatever we do goes through `GameTask::Post` (section 4).
+up. Whatever we do goes through `GameTask::Post` (section 4). A page closes on
+a button's press, so an exit with a controller button down that was pressed
+while the page was open keeps the focus menu and the suspended controls until
+those buttons have been up 100 ms (1.5 s at most; `EndControlsHold`): otherwise
+the game acts on the button that closed the page.
 
 **Keyboard/text.** UI mode raises the engine text-entry flag; on VR that is
 precisely the signal that pops OCU's auto keyboard and SteamVR's overlay
