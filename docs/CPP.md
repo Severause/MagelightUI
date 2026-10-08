@@ -278,6 +278,20 @@ surface (SECURITY.md) and would bypass the audio settings.
   page with a CSS transform instead). Cutout and
   image rects are in VIEW pixels = CSS px x scale. `GetViewInfo` reads it
   back. Gate on `hostVersionNumber >= 2609`.
+- **Rebuild at a scale (0.31.7).** On a page that has loaded, prefer
+  `RebuildViewAtScale(view, scale)`: the host releases the View at its next
+  frame and loads the page again in a new View created at that scale (what
+  hibernation does), instead of re-laying the live page out. The page
+  reloads, so keep what it must survive in `localStorage` and send again on
+  `ViewReloaded` (or your `onDomReady`) whatever you set only when you
+  opened it. Bounds, visibility, UI mode, listeners, cutout, cursor and
+  sounds stay. A hidden view rebuilds when shown; the same scale is a no-op.
+  Gate on `hostVersionNumber >= 3107` or `QueryCapability("rebuildscale")`.
+
+```cpp
+if (v4()->hostVersionNumber >= 3107 && v4()->QueryCapability("rebuildscale") == 1)
+    v4()->RebuildViewAtScale(view, 1.5f);   // the page reloads at 150 %
+```
 - **Pause retarget (0.26.11).** Re-requesting UI mode on the view that
   already holds it re-targets `kUIModeFlagPause` in place: the live focus
   menu's pause flag and the engine's pause counter move on the game thread,

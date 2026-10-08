@@ -218,6 +218,9 @@ namespace Magelight {
     // onDomReady fires again on wake. 0 = never (the default).
     void SetViewHibernate(ViewId view, std::uint32_t idleMs);
     void SetViewScale(ViewId view, float scale);   // Ultralight device scale (0.26.9)
+    // 0.31.7: release the page's View and load the page again in a new View created at this device scale
+    // (1.0..3.0) on the next frame, or at the next load when it has none. False = no such view.
+    bool RebuildViewAtScale(ViewId view, float scale);
     // 0.28.0
     void SetViewEscapeCapture(ViewId view, bool capture);   // the page owns Escape (no UI-mode exit)
     void SetViewNetworkLevel(ViewId view, NetLevel level);  // see NetLevel above
