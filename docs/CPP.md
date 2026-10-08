@@ -273,11 +273,28 @@ surface (SECURITY.md) and would bypass the audio settings.
 - **Real DPI (0.26.9).** `ViewDesc::uiScale` is Ultralight's device scale:
   the page's `devicePixelRatio`, rasterised at that scale (0 = the host
   default). `SetViewScale(view, scale)` changes it on a live view — the
-  render thread applies it on its next frame. Clamped 1.0..3.0 since 0.30.3
+  render thread applies it on its next frame, as a live re-layout of the
+  page. That re-layout has crashed the game for a consumer and has not been
+  verified since it moved to the render thread (0.28.5): on a page that has
+  loaded, use `RebuildViewAtScale` below. Clamped 1.0..3.0 since 0.30.3
   (below 1 Ultralight clipped the page to scale squared of the view; shrink a
   page with a CSS transform instead). Cutout and
   image rects are in VIEW pixels = CSS px x scale. `GetViewInfo` reads it
   back. Gate on `hostVersionNumber >= 2609`.
+- **Rebuild at a scale (0.31.7).** `RebuildViewAtScale(view, scale)`: the
+  host releases the View at its next frame and loads the page again in a new
+  View created at that scale (what hibernation does), instead of re-laying
+  the live page out. The page reloads, so keep what it must survive in
+  `localStorage` and send again on `ViewReloaded` (or your `onDomReady`)
+  whatever you set only when you opened it, the cutout included: it is kept
+  in view pixels, so re-send it at the new scale. Bounds, visibility, UI
+  mode, listeners, cursor, sounds and VR placement stay. A hidden view
+  reloads at once unless it hibernates or loads on show (then when shown);
+  the scale the View already has is a no-op. Gate on
+  `hostVersionNumber >= 3107` (the capability `rebuildscale` is 1 on every
+  such host), e.g.
+  `if (v4()->hostVersionNumber >= 3107) v4()->RebuildViewAtScale(view, 1.5f);`
+  reloads the page at 150 %.
 - **Pause retarget (0.26.11).** Re-requesting UI mode on the view that
   already holds it re-targets `kUIModeFlagPause` in place: the live focus
   menu's pause flag and the engine's pause counter move on the game thread,

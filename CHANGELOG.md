@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 0.31.7 | 3107 | `RebuildViewAtScale(view, scale)` — change a loaded page's device scale by releasing its View and loading the page again in a new one created at that scale (the page reloads; `ViewReloaded` follows); `QueryCapability("rebuildscale")` |
 | 0.31.5 | 3105 | The network policy is a Content-Security-Policy written into every page: loopback = `localhost` / `127.0.0.1` over `http(s)` and `ws(s)` only (`[::1]` and other `127.x` no longer reach), a page cannot `fetch()` its own files, and a view shows only its own HTML files; `QueryCapability("csp")` |
 | 0.31.1 | 3101 | `SetViewCursorTint(view, tint)` with `CursorTint` — the host's drawn cursor (arrow, hover glow, I-beam) and the VR laser dot in your colours over a view; `QueryCapability("cursortint")` |
 | 0.31.0 | 3100 | `SetViewFreezeWorld(view, freeze)` — the game skips its 3D world render behind a paused page (flat only); Papyrus `SetFreezeWorld`; `QueryCapability("freezeworld")` |
@@ -42,6 +43,30 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 0.31.7
+
+- **`RebuildViewAtScale(view, scale)`: a new device scale for a loaded page without a live re-layout.**
+  `SetViewScale` on a page that has loaded calls Ultralight's `set_device_scale`, which re-lays the
+  page out inside the frame; that crashed the game for SeverActions three times out of three, and it
+  has not been verified since it moved to the render thread in 0.28.5. The new call does what
+  hibernation already does every session: at the view's next frame the host releases its View and
+  texture, keeps the record (bounds, visibility, UI mode, listeners, cursor, sounds, session, VR
+  placement) and loads the page again in a new View created with `initial_device_scale` at the new
+  scale, in the same frame when the view is visible, so the page lays out and rasterizes at that DPI
+  from its first paint. Calls sent meanwhile wait for the new page's DOM ready, and `onDomReady`,
+  `ViewDomReady` and `ViewReloaded` fire again. The cutout is kept in view pixels: send it again at
+  the new scale. A hidden view reloads at once unless it hibernates or loads on show (then when
+  shown), a view with no page yet takes the scale at its first load, the scale its View already has
+  is a no-op (and withdraws a pending rebuild), and a page hosting a Web Inspector is not rebuilt.
+  Clamped 1.0..3.0 like `SetViewScale`. The UI-mode view can be rebuilt in place: the focus marker
+  runs again on the new View, and a focused text field's IME, keyboard and VR keyboard claims are
+  dropped with the old page. Gate on `hostVersionNumber >= 3107` or `QueryCapability("rebuildscale")`;
+  the page sees `capabilities.rebuildScale`.
+- **VR: a hibernated view keeps its placement.** Waking from hibernation (and a rebuild) used to
+  create the new overlay at the layer default, so a `SetViewVRPlacement` choice was lost and
+  `GetViewVRPlacement` answered nothing until the view was shown again. The effective placement now
+  stays with the view, and a panel placed when it was released reappears where it was.
 
 ## 0.31.6
 

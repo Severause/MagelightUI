@@ -95,6 +95,7 @@ namespace Magelight::VR {
         float fwd[2] = { 0.0f, -1.0f };             // XZ unit forward the panel faces AWAY from the head along
         float pos[3] = { 0.0f, 0.0f, 0.0f };
         bool  following = false;                    // mid catch-up glide
+        bool  poseRestored = false;                 // placed from a kept pose: re-issue it once the overlay exists
     };
 
     extern std::map<ViewId, OverlayRec> s_overlays;

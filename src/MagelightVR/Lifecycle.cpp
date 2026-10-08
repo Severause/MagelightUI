@@ -11,6 +11,18 @@ namespace Magelight::VR {
         vr::VROverlayHandle_t s_probe = vr::k_ulOverlayHandleInvalid;   // VR-1: the hidden probe overlay
         std::chrono::steady_clock::time_point s_lastFrameTp{};
 
+        // What ReleaseView(hibernating=true) keeps of an overlay for the view's next one (a hibernation wake or a
+        // RebuildViewAtScale): the effective placement and, for a placed panel, its pose, so the new overlay
+        // appears where the old one was and stays placed. Ultralight thread only, like s_overlays.
+        struct KeptPlacement {
+            Placement placement;
+            bool placed = false;
+            vr::HmdMatrix34_t world{};
+            float fwd[2] = { 0.0f, -1.0f };
+            float pos[3] = { 0.0f, 0.0f, 0.0f };
+        };
+        std::map<ViewId, KeptPlacement> s_keptPlacements;
+
         // Placement overrides from the API (any thread) — applied next frame.
         std::mutex s_placementMutex;
         std::map<ViewId, Placement> s_placementOverrides;
@@ -164,7 +176,20 @@ namespace Magelight::VR {
             if (pv.isInspector || !pv.ul || !pv.srv || pv.w <= 0 || pv.h <= 0) continue;
             const bool fresh = s_overlays.find(pv.id) == s_overlays.end();
             OverlayRec& r = s_overlays[pv.id];
-            if (fresh) r.placement = DefaultPlacementForLayer(pv.layer);
+            if (fresh) {
+                if (auto kept = s_keptPlacements.find(pv.id); kept != s_keptPlacements.end()) {
+                    const KeptPlacement& k = kept->second;
+                    r.placement = k.placement;
+                    r.placed = k.placed;
+                    r.world = k.world;
+                    r.fwd[0] = k.fwd[0]; r.fwd[1] = k.fwd[1];
+                    r.pos[0] = k.pos[0]; r.pos[1] = k.pos[1]; r.pos[2] = k.pos[2];
+                    r.poseRestored = k.placed;
+                    s_keptPlacements.erase(kept);
+                } else {
+                    r.placement = DefaultPlacementForLayer(pv.layer);
+                }
+            }
             // A queued override MERGES onto that default: 0 means "keep the
             // host's value for this layer" (a manifest that only names a mode
             // must not drag a HUD badge to the panel distance).
@@ -194,6 +219,11 @@ namespace Magelight::VR {
                 s_placementSnapshot[pv.id] = r.placement;   // published under the lock for GetPlacement
             }
             if (!EnsureOverlay(pv.id, r, pv.layer)) continue;
+            if (r.poseRestored) {   // a kept pose: TickFollow writes a placed panel's transform only when it moves
+                r.poseRestored = false;
+                if (r.placed && r.placement.mode != Mode::HeadLocked && s_compositor)
+                    s_overlay->SetOverlayTransformAbsolute(r.handle, s_compositor->GetTrackingSpace(), &r.world);
+            }
             if (r.placement.mode == Mode::HeadLocked) {
                 // Glued: world = HMD * relative, pushed as an ABSOLUTE transform
                 // every frame the head pose is usable. OpenComposite puts a
@@ -326,11 +356,21 @@ namespace Magelight::VR {
         if (!hibernating) UnbindView(view);   // a hibernated view keeps its chord (see MagelightVR.h, ReleaseView)
         {
             std::lock_guard<std::mutex> lk(s_placementMutex);
-            s_placementSnapshot.erase(view);
+            if (!hibernating) s_placementSnapshot.erase(view);   // a kept placement stays readable
             s_placementResetRequests.erase(view);
         }
+        if (!hibernating) s_keptPlacements.erase(view);
         auto it = s_overlays.find(view);
         if (it == s_overlays.end()) return;
+        if (hibernating) {
+            const OverlayRec& r = it->second;
+            KeptPlacement& k = s_keptPlacements[view];
+            k.placement = r.placement;
+            k.placed = r.placed;
+            k.world = r.world;
+            k.fwd[0] = r.fwd[0]; k.fwd[1] = r.fwd[1];
+            k.pos[0] = r.pos[0]; k.pos[1] = r.pos[1]; k.pos[2] = r.pos[2];
+        }
         ReleaseRecLocked(it->second);
         s_overlays.erase(it);
         SKSE::log::info("Magelight VR: overlay released for view {}", view);
@@ -340,6 +380,7 @@ namespace Magelight::VR {
     {
         for (auto& [id, r] : s_overlays) ReleaseRecLocked(r);
         s_overlays.clear();
+        s_keptPlacements.clear();
         ReleaseBeams();
         if (s_overlay && s_probe != vr::k_ulOverlayHandleInvalid) {
             const auto err = s_overlay->DestroyOverlay(s_probe);

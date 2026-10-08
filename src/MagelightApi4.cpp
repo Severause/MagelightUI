@@ -980,6 +980,7 @@ namespace Magelight::Api4 {
         if (n == "loadonshow") return 1;    // SetViewLoadOnShow / manifest "loadOnShow" (0.31.0)
         if (n == "cursor") return 1;        // SetViewCursor / manifest "cursor" / Papyrus SetCursor (0.31.0)
         if (n == "cursortint") return 1;    // SetViewCursorTint (0.31.1)
+        if (n == "rebuildscale") return 1;  // RebuildViewAtScale (0.31.7)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1092,7 +1093,7 @@ namespace Magelight::Api4 {
                                         "pagebridge", "cutout", "hibernate", "inspector", "ime",
                                         "loopback", "escapeCapture", "viewOrder", "scrollStep", "networkPolicy",
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
-                                        "cursorTint" };
+                                        "cursorTint", "rebuildScale" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1446,6 +1447,17 @@ namespace Magelight::Api4 {
         }
         if (!Magelight::SetViewCursorTint(view, set))
             return Fail(OwnerOf(view), Result::InvalidView, "SetViewCursorTint: view is gone");
+        return Result::Ok;
+    }
+
+    // 0.31.7: a new View at the new device scale instead of a live set_device_scale (Magelight.cpp ApplyPendingRebuilds).
+    Result RebuildViewAtScale(ViewId view, float scale)
+    {
+        if (const Result g = GateView(view, "RebuildViewAtScale"); g != Result::Ok) return g;
+        if (!(scale > 0.0f) || scale != scale)
+            return Fail(OwnerOf(view), Result::InvalidArgument, "RebuildViewAtScale: scale must be a positive number");
+        if (!Magelight::RebuildViewAtScale(view, scale))
+            return Fail(OwnerOf(view), Result::InvalidView, "RebuildViewAtScale: view is gone");
         return Result::Ok;
     }
 

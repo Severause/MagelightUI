@@ -154,11 +154,14 @@ namespace Magelight::VR {
     // queues input. Never called when the host is render-dead.
     void SubmitFrame(const PresentedFrame& frame, bool uiModeOn, ViewId uiModeView);
     // Called from ApplyPendingLifecycle BEFORE a View RefPtr drops and from
-    // HibernateIdleViews BEFORE a texture is released: destroys the overlay
-    // and the host copy texture for that view. Idempotent.
-    // hibernating=true (HibernateIdleViews): the overlay and the placement
-    // snapshot go, the view RECORD stays — so its controller binding stays
-    // too. 0.28.4: the hibernate path shared the destroy path and erased the
+    // HibernateIdleViews and ApplyPendingRebuilds BEFORE a texture is
+    // released: destroys the overlay and the host copy texture for that view.
+    // Idempotent.
+    // hibernating=true (HibernateIdleViews, ApplyPendingRebuilds): the
+    // overlay goes, the view RECORD stays — so its controller binding stays
+    // too, and so does its effective placement (GetPlacement keeps answering;
+    // a placed panel's pose is kept and re-issued when the next overlay is
+    // created, so it reappears where it was). 0.28.4: the hibernate path shared the destroy path and erased the
     // binding with everything else, so a popup bound to a chord (SA's quick
     // wheel, hibernate budget 30 s) went deaf 30 s after it was last hidden
     // and only came back on a rebind (field 2026-09-08, a tester's log: every
