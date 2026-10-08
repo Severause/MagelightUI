@@ -58,7 +58,7 @@ Diagnostics and build hygiene, after a review of langfod's fork.
   the game's own marked. DXGI is loaded from the system folder by full path, so a proxy `dxgi.dll` is
   never asked, and no game device is touched.
 - **Paths in the log show the user folder as `%USERPROFILE%`**, so a posted log does not name the
-  Windows user.
+  Windows user. Ultralight's own startup lines (its cache folder) are covered too.
 - **A Windows user name the ANSI code page cannot spell no longer ends the game at load.** The log file
   was opened by a narrow path, which throws for such a name, and the failure ended the game; it is now
   opened by its wide path, and every logged path is written as UTF-8.

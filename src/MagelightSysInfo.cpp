@@ -11,6 +11,7 @@
 #include <intrin.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cstring>
 #include <format>
 #include <string_view>
@@ -119,6 +120,32 @@ namespace Magelight::SysInfo {
             (w.size() == s_profile.size() || w[s_profile.size()] == L'\\' || w[s_profile.size()] == L'/'))
             w.replace(0, s_profile.size(), L"%USERPROFILE%");
         return Narrow(w);
+    }
+
+    std::string RedactProfile(std::string text)
+    {
+        static const std::string s_profile = Narrow(UserProfile());
+        if (s_profile.empty()) return text;
+        const auto fold = [](char a, char b) {
+            const auto lower = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; };
+            return lower(a) == lower(b);
+        };
+        constexpr std::string_view kToken = "%USERPROFILE%";
+        std::size_t from = 0;
+        for (;;) {
+            const auto it = std::search(text.begin() + static_cast<std::ptrdiff_t>(from), text.end(),
+                                        s_profile.begin(), s_profile.end(), fold);
+            if (it == text.end()) break;
+            const auto at = static_cast<std::size_t>(it - text.begin());
+            const std::size_t end = at + s_profile.size();
+            if (end == text.size() || text[end] == '\\' || text[end] == '/') {
+                text.replace(at, s_profile.size(), kToken);
+                from = at + kToken.size();
+            } else {
+                from = end;
+            }
+        }
+        return text;
     }
 
     void LogPlatform(const SKSE::LoadInterface* skse)

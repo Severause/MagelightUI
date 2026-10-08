@@ -2795,7 +2795,7 @@ namespace Magelight {
     public:
         void LogMessage(ultralight::LogLevel, const ultralight::String& message) override
         {
-            SKSE::log::info("[UL] {}", message.utf8().data());
+            SKSE::log::info("[UL] {}", SysInfo::RedactProfile(message.utf8().data()));
         }
     };
     static SpdLogger s_ulLogger;
