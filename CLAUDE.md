@@ -21,6 +21,8 @@ src/MagelightManifest.cpp   Data/Magelight/<ModId>/manifest.json loader (docs/MA
 src/MagelightPapyrus.cpp    the Papyrus tier natives (papyrus/Magelight.psc, docs/PAPYRUS.md)
 src/MagelightDevWatch.cpp   devMode hot reload (folder watchers -> ReloadView)
 src/MagelightFonts.cpp      the font loader: the platform's, with a last resort that always loads (src/fonts: DejaVu Sans, an RCDATA resource)
+src/MagelightVR.h           the VR presenter's interface to the host (docs/VR_PRESENTER.md)
+src/MagelightVR/            the VR presenter: Runtime, Overlays, Laser, Input, Bindings, Lifecycle; State.h = the state they share and its rules
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -58,7 +60,11 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
 6. **Mouse rides the SKSE input sink + MenuCursor**; the window never gets WM mouse messages.
    `ToggleControls(..., storeState=false)`; `ForceExitUIMode` on every load boundary.
 7. **Own engine menu** (`MagelightFocus`, kUsesCursor) on UI-mode entry — the engine drives
-   MenuCursor only while a cursor-using menu is topmost.
+   MenuCursor only while a cursor-using menu is topmost. On VR an exit with a controller button
+   down that was pressed while the page was open keeps that menu and the suspended controls until
+   those buttons have been up 100 ms (`EndControlsHold`, 1.5 s at most): it is the menu context that
+   keeps the closing press from the game. A kHide is read as the game closing the menu only if the
+   menu is still closed once the queue has run (`CheckFocusMenuClosed`).
 8. **es2022 bundles on the 1.4 SDK**; `crossorigin` stripped; `base: './'`.
 9. **Blank pages must name themselves**: console listener + `OnFailLoading` → log + event.
    Console errors and warnings reach the log by default, gated only by the player's

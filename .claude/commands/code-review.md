@@ -22,6 +22,7 @@ Save the diff to a file in the scratchpad and hand every agent its path.
 | Pattern | Category | Lenses |
 |---------|----------|--------|
 | `src/Magelight.cpp`, `src/Magelight.h`, `src/main.cpp` | Host | threading, bugs, simplicity |
+| `src/MagelightVR.h`, `src/MagelightVR/**` | VR presenter | threading, bugs, simplicity |
 | `src/MagelightApi4.*`, `src/MagelightApiExport.cpp`, `api/*.h` | Public ABI | abi (mandatory), threading, bugs |
 | `gpu/*` | GPU driver | gpu-driver (mandatory), bugs |
 | `extern/ultralight/*`, `extern/appcore-ref/*`, `extern/README.md` | SDK bump | gpu-driver, packaging, docs |
