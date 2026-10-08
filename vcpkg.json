@@ -6,13 +6,11 @@
   "dependencies": [
     "commonlibsse-ng",
     "directxmath",
-    "directxtex",
     "directxtk",
     "fmt",
     "minhook",
     "nlohmann-json",
     "rapidcsv",
-    "spdlog",
-    "xbyak"
+    "spdlog"
   ]
 }

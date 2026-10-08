@@ -9,6 +9,7 @@
 #include "MagelightDevWatch.h"
 #include "MagelightCursorArt.h"
 #include "MagelightFonts.h"
+#include "MagelightSysInfo.h"
 #include "HotkeyNames.h"
 
 #include <RE/Skyrim.h>
@@ -50,6 +51,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -404,10 +406,10 @@ namespace Magelight {
                 if (std::filesystem::exists(c, ec)) { p = c; break; }
             if (p.empty()) {
                 SKSE::log::info("Magelight: no Magelight.json (looked in {} and {}) — defaults in effect",
-                    candidates.front().string(), candidates.back().string());
+                    SysInfo::ForLog(candidates.front()), SysInfo::ForLog(candidates.back()));
                 return;
             }
-            SKSE::log::info("Magelight: settings file {}", p.string());
+            SKSE::log::info("Magelight: settings file {}", SysInfo::ForLog(p));
             std::ifstream f(p);
             nlohmann::json j;
             f >> j;
@@ -2363,10 +2365,11 @@ namespace Magelight {
 
     // ── Crash telemetry (0.3.2 diagnostics) ─────────────────────────────────
     // A first-chance vectored handler that LOGS severe exceptions from ANY
-    // thread — code, address, owning module + offset — then continues the
-    // search (log-only, never swallows). The field CTD produces no crashlog
-    // and doesn't trip our SEH nets, so it lives on a thread/path we don't
-    // guard; this names it. Rate-limited; known-handled families skipped.
+    // thread — code, address, owning module + offset, then the caller stack —
+    // and continues the search (log-only, never swallows). The field CTD
+    // produces no crashlog and doesn't trip our SEH nets, so it lives on a
+    // thread/path we don't guard; this names it. Once per fault site;
+    // known-handled families skipped.
     // module+offset for an address, module BASENAME: one resolver and one
     // format for the VEH logger and the stall watchdog (review 2026-09-09).
     // `path` is scratch the returned pointer points into.
@@ -2385,8 +2388,75 @@ namespace Magelight {
         return base;
     }
 
-    // The watchdog thread is walking a stack: VectoredLogger leaves its caught faults alone.
+    // A stack walk is in progress on this thread (the watchdog's, or the VEH's own): VectoredLogger leaves its
+    // caught faults alone.
     static thread_local bool t_walkingStack = false;
+
+    // One report per distinct fault site for the life of the process. A count cap spent itself on the first mod
+    // that faults in a loop (eight lines in one millisecond from one module), and every later fault went
+    // unlogged. Keyed on (code, raw address) before any module lookup: a repeat costs a table scan, not the
+    // loader lock, and faults in module-less memory (JIT code, a call through null) stay distinct. Lock-free;
+    // two threads racing on one new site may each report it. A slot's addr is written before its code (release),
+    // so a reader that sees the code sees the addr: a half-written slot has code 0 and matches nothing.
+    struct SeenFault {
+        std::atomic<std::uint32_t>  code{ 0 };
+        std::atomic<std::uintptr_t> addr{ 0 };
+    };
+    static constexpr int kMaxSeenFaults = 64;
+    static SeenFault         s_seenFaults[kMaxSeenFaults];
+    static std::atomic<int>  s_seenFaultCount{ 0 };
+    static std::atomic<bool> s_seenFaultsFull{ false };
+
+    // A stack overflow on a thread with too little stack left to format a line is parked here and logged by
+    // the stall watchdog's thread (DrainParkedOverflow): logging on the exhausted stack would overflow it again,
+    // which kills the process, a handled overflow included.
+    static std::atomic<bool>           s_overflowParked{ false };
+    static std::atomic<std::uintptr_t> s_overflowAddr{ 0 };
+    static std::atomic<DWORD>          s_overflowTid{ 0 };
+    static constexpr std::size_t       kStackToLog = 32 * 1024;   // a line costs ~3 KB, the logger's first use ~11 KB
+
+    static int  UnwindFromContext(CONTEXT* ctx, void** frames, int cap, std::uintptr_t stackLow, std::uintptr_t stackHigh);   // fwd (below)
+    static constexpr int kVehStackFrames = 24;
+
+    // Committed stack left below the caller on this thread. In a stack overflow that is all there is: the guard
+    // page is spent, and a touch below it is an access violation the process does not survive.
+    static std::size_t StackLeft()
+    {
+        const auto low = reinterpret_cast<std::uintptr_t>(reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackLimit);
+        const auto sp = reinterpret_cast<std::uintptr_t>(_AddressOfReturnAddress());
+        return sp > low ? sp - low : 0;
+    }
+
+    // The faulting thread's callers, from the exception's own CONTEXT: the thread is stopped in its handler, so
+    // the stack is exactly the one that faulted. Bounded to this thread's committed stack (its TEB), capped in
+    // depth, and the unwinder's own faults are caught (t_walkingStack). noinline keeps its ~2 KB of buffers out
+    // of VectoredLogger's frame, which every severe exception pays, a stack overflow included.
+    static __declspec(noinline) void LogFaultStack(EXCEPTION_POINTERS* ep)
+    {
+        if (!ep->ContextRecord) return;
+        const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+        const auto stackLow = reinterpret_cast<std::uintptr_t>(tib->StackLimit);
+        const auto stackHigh = reinterpret_cast<std::uintptr_t>(tib->StackBase);
+        if (stackHigh <= stackLow) return;
+        CONTEXT ctx = *ep->ContextRecord;
+        // A call through null faults with Rip 0 and the caller's return address on top of the stack: start there,
+        // and print that frame, which is not on the report line.
+        int first = 1;
+        if (ctx.Rip == 0 && ctx.Rsp >= stackLow && ctx.Rsp + 8 <= stackHigh) {
+            ctx.Rip = *reinterpret_cast<const DWORD64*>(ctx.Rsp);
+            ctx.Rsp += 8;
+            first = 0;
+        }
+        void* frames[kVehStackFrames]{};
+        t_walkingStack = true;
+        const int n = UnwindFromContext(&ctx, frames, kVehStackFrames, stackLow, stackHigh);
+        t_walkingStack = false;
+        for (int i = first; i < n; ++i) {   // frame 0 is otherwise the faulting address, already on the report line
+            char path[MAX_PATH]; std::uintptr_t off = 0;
+            const char* base = ModuleOffsetOf(frames[i], path, off);
+            SKSE::log::error("Magelight VEH:   #{:02} {}+0x{:X}", i, base, off);
+        }
+    }
 
     static LONG CALLBACK VectoredLogger(EXCEPTION_POINTERS* ep)
     {
@@ -2395,18 +2465,59 @@ namespace Magelight {
         if (code < 0xC0000000u) return EXCEPTION_CONTINUE_SEARCH;                       // not severe
         if (code == 0xC06D007Eu || code == 0xC06D007Fu) return EXCEPTION_CONTINUE_SEARCH;  // delay-load internals
         if (code == 0xE06D7363u) return EXCEPTION_CONTINUE_SEARCH;                      // C++ EH in flight
-        if (t_walkingStack) return EXCEPTION_CONTINUE_SEARCH;                           // the watchdog's own, caught
-
-        static std::atomic<int> s_veCount{ 0 };
-        if (s_veCount.fetch_add(1) >= 8) return EXCEPTION_CONTINUE_SEARCH;
+        if (t_walkingStack) return EXCEPTION_CONTINUE_SEARCH;                           // a stack walk's own, caught
 
         void* addr = ep->ExceptionRecord->ExceptionAddress;
+        const auto key = reinterpret_cast<std::uintptr_t>(addr);
+        if (code == EXCEPTION_STACK_OVERFLOW && StackLeft() < kStackToLog) {
+            if (!s_overflowParked.load(std::memory_order_acquire)) {
+                s_overflowAddr.store(key, std::memory_order_relaxed);
+                s_overflowTid.store(GetCurrentThreadId(), std::memory_order_relaxed);
+                s_overflowParked.store(true, std::memory_order_release);
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const int seen = (std::min)(s_seenFaultCount.load(std::memory_order_acquire), kMaxSeenFaults);
+        for (int i = 0; i < seen; ++i)
+            if (s_seenFaults[i].code.load(std::memory_order_acquire) == code &&
+                s_seenFaults[i].addr.load(std::memory_order_relaxed) == key)
+                return EXCEPTION_CONTINUE_SEARCH;
+        // Full: no claim (an unbounded count would wrap and index outside the table).
+        if (seen >= kMaxSeenFaults) {
+            if (!s_seenFaultsFull.exchange(true))
+                SKSE::log::error("Magelight VEH: {} distinct fault sites logged; later new ones are not", kMaxSeenFaults);
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const int slot = s_seenFaultCount.fetch_add(1, std::memory_order_acq_rel);
+        if (slot >= kMaxSeenFaults) return EXCEPTION_CONTINUE_SEARCH;   // lost the race for the last slot
+        s_seenFaults[slot].addr.store(key, std::memory_order_relaxed);
+        s_seenFaults[slot].code.store(code, std::memory_order_release);
+
         char modPath[MAX_PATH]; std::uintptr_t offset = 0;
         const char* modName = ModuleOffsetOf(addr, modPath, offset);
+        // CrashLogger's symbolizer probes memory while it writes a crash report; those faults are its own.
+        if (_stricmp(modName, "CrashLogger.dll") == 0) return EXCEPTION_CONTINUE_SEARCH;
         SKSE::log::error(
             "Magelight VEH: exception 0x{:08X} at {} (module {} +0x{:X}) on thread {}",
             code, addr, modName, offset, GetCurrentThreadId());
+        if (code != EXCEPTION_STACK_OVERFLOW) LogFaultStack(ep);   // an overflow gets its line only
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // The watchdog thread's half of a parked stack overflow (see s_overflowParked).
+    static void DrainParkedOverflow()
+    {
+        if (!s_overflowParked.load(std::memory_order_acquire)) return;
+        void* addr = reinterpret_cast<void*>(s_overflowAddr.load(std::memory_order_relaxed));
+        const DWORD tid = s_overflowTid.load(std::memory_order_relaxed);
+        static void* s_lastLogged = nullptr;   // a handled overflow in a loop logs once, not four times a second
+        if (addr == s_lastLogged) { s_overflowParked.store(false, std::memory_order_release); return; }
+        s_lastLogged = addr;
+        char modPath[MAX_PATH]; std::uintptr_t offset = 0;
+        const char* modName = ModuleOffsetOf(addr, modPath, offset);
+        SKSE::log::error("Magelight VEH: exception 0x{:08X} (stack overflow) at {} (module {} +0x{:X}) on thread {}",
+                         static_cast<std::uint32_t>(EXCEPTION_STACK_OVERFLOW), addr, modName, offset, tid);
+        s_overflowParked.store(false, std::memory_order_release);
     }
 
     // ── Stall watchdog (0.28.3) ──────────────────────────────────────────
@@ -2562,6 +2673,7 @@ namespace Magelight {
         int       reports      = 0;
         for (;;) {
             std::this_thread::sleep_for(milliseconds(250));
+            DrainParkedOverflow();
             if (!s_stallWatchdog.load() || reports >= 12) continue;
             const long long lastMs = s_lastPresentMs.load();
             if (!lastMs || !s_worldReady.load()) continue;   // nothing to watch yet
@@ -2623,7 +2735,7 @@ namespace Magelight {
         }
         if (!std::filesystem::exists(s_runtimeDir / L"resources" / L"icudt67l.dat")) {
             SKSE::log::error("Magelight: resources/icudt67l.dat missing under {}",
-                s_runtimeDir.string());
+                SysInfo::ForLog(s_runtimeDir));
             return false;
         }
         // The runtime must be the SDK this host was built against: a mod manager can pair Magelight.dll from
@@ -2638,7 +2750,7 @@ namespace Magelight {
             if (have != ULTRALIGHT_VERSION) {
                 SKSE::log::error("Magelight: the Ultralight runtime under {} is version '{}', but this Magelight.dll "
                     "was built for {} - another mod's copy of the runtime is installed over this one",
-                    s_runtimeDir.string(), have, ULTRALIGHT_VERSION);
+                    SysInfo::ForLog(s_runtimeDir), have, ULTRALIGHT_VERSION);
                 return false;
             }
         }
@@ -2673,7 +2785,7 @@ namespace Magelight {
         }
 
         s_runtimeReady.store(true);
-        SKSE::log::info("Magelight: Ultralight runtime preloaded from {}", s_runtimeDir.string());
+        SKSE::log::info("Magelight: Ultralight runtime preloaded from {}", SysInfo::ForLog(s_runtimeDir));
         return true;
     }
 
@@ -2974,7 +3086,7 @@ namespace Magelight {
             if (PathIsUnder(out, s_runtimeDir) || PathIsUnder(out, s_modsRoot) || IsUnderRegisteredPageRoot(out)) return out;
             static std::atomic<int> s_logged{ 0 };
             if (s_logged.fetch_add(1) < 32)
-                SKSE::log::warn("Magelight: file read outside Data\\Magelight or any page root refused — {}", out.string());
+                SKSE::log::warn("Magelight: file read outside Data\\Magelight or any page root refused — {}", Magelight::SysInfo::ForLog(out));
             return {};
         }
         bool FileExists(const ultralight::String& file_path) override
@@ -3017,14 +3129,14 @@ namespace Magelight {
             if (path.empty()) return nullptr;   // refused by the file gate (already logged)
             std::ifstream f(path, std::ios::binary | std::ios::ate);
             if (!f) {
-                SKSE::log::warn("Magelight: OpenFile failed: {}", path.string());
+                SKSE::log::warn("Magelight: OpenFile failed: {}", Magelight::SysInfo::ForLog(path));
                 return nullptr;
             }
             const std::streamsize size = f.tellg();
             f.seekg(0, std::ios::beg);
             std::string data(static_cast<size_t>(size), '\0');
             if (size > 0 && !f.read(data.data(), size)) {
-                SKSE::log::warn("Magelight: OpenFile read failed: {}", path.string());
+                SKSE::log::warn("Magelight: OpenFile read failed: {}", Magelight::SysInfo::ForLog(path));
                 return nullptr;
             }
             // Every page gets its mod's CSP (CspFor). The hosted Web Inspector is left as shipped: it is a
@@ -3414,14 +3526,14 @@ float4 ps_straight(VSOut i) : SV_Target {
             : (s_runtimeDir / std::filesystem::path(s_cursorFile).make_preferred());
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) {
-            SKSE::log::info("Magelight: no cursor art at {} — the drawn cursor stays", p.string());
+            SKSE::log::info("Magelight: no cursor art at {} — the drawn cursor stays", Magelight::SysInfo::ForLog(p));
             return;
         }
         ID3D11Texture2D* tex = nullptr;
         ID3D11ShaderResourceView* srv = nullptr;
         int w = 0, h = 0;
         if (!LoadCursorImage(p, &tex, &srv, w, h)) {
-            SKSE::log::warn("Magelight: cursor art {} failed to load — the drawn cursor stays", p.string());
+            SKSE::log::warn("Magelight: cursor art {} failed to load — the drawn cursor stays", Magelight::SysInfo::ForLog(p));
             return;
         }
         if (s_cursorSrv) s_cursorSrv->Release();
@@ -3515,7 +3627,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (SUCCEEDED(co)) CoUninitialize();
         if (!ok) {
             std::vector<std::uint8_t>().swap(img.px);
-            SKSE::log::warn("Magelight: cursor image {} - {}; the host cursor shows instead", img.file.string(), why);
+            SKSE::log::warn("Magelight: cursor image {} - {}; the host cursor shows instead", Magelight::SysInfo::ForLog(img.file), why);
             img.state.store(CursorImage::kFailed);
             return;
         }
@@ -3547,7 +3659,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             img->state.store(CursorImage::kFailed);
             return nullptr;
         }
-        SKSE::log::info("Magelight: cursor image {} ({}x{}, hotspot {:.0f},{:.0f}, {}{})", img->file.string(), img->w,
+        SKSE::log::info("Magelight: cursor image {} ({}x{}, hotspot {:.0f},{:.0f}, {}{})", Magelight::SysInfo::ForLog(img->file), img->w,
                         img->h, img->hotX, img->hotY,
                         img->height > 0 ? std::to_string(static_cast<int>(img->height)) + "px at 1080p" : "own height",
                         img->press ? ", press shrink" : "");
@@ -5322,7 +5434,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             return;
         }
         if (!InspectorAvailable()) {
-            SKSE::log::warn("Magelight[dev]: inspector assets missing — expected {}", (s_runtimeDir / "inspector" / "Main.html").string());
+            SKSE::log::warn("Magelight[dev]: inspector assets missing — expected {}", Magelight::SysInfo::ForLog(s_runtimeDir / "inspector" / "Main.html"));
             return;
         }
         ultralight::RefPtr<ultralight::View> ul;
@@ -7512,7 +7624,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         {
             std::ofstream f(file, std::ios::binary | std::ios::trunc);
             if (!f) {
-                SKSE::log::error("Magelight: RegisterTextureImage('{}') — cannot write {}", n, file.string());
+                SKSE::log::error("Magelight: RegisterTextureImage('{}') — cannot write {}", n, Magelight::SysInfo::ForLog(file));
                 return 0;
             }
             f << "IMGSRC-V1\n" << n;

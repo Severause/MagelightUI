@@ -100,10 +100,32 @@ jobs:
             C:\b\mgl\vcpkg_installed
             ~\AppData\Local\vcpkg\archives
           key: vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
+          # A manifest or port change still restores the binary archives of every package it left alone:
+          # vcpkg rebuilds only what the new ABI hashes miss, not the whole ~45-minute set.
+          restore-keys: |
+            vcpkg-
 
       - name: Build + stage (build.ps1 → C:\b\mgl)
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File build.ps1
+
+      - name: Prune vcpkg archives the build did not use
+        shell: pwsh
+        # A restore-keys hit brings back every older archive, and the cache saves the folder whole: without this
+        # each manifest change would carry the superseded ABIs into the next cache. Keeps the archive of every
+        # package the build installed (its Abi in vcpkg's status file); with no status, prunes nothing.
+        run: |
+          $status = 'C:\b\mgl\vcpkg_installed\vcpkg\status'
+          $archives = Join-Path $env:LOCALAPPDATA 'vcpkg\archives'
+          if (-not (Test-Path $status) -or -not (Test-Path $archives)) { return }
+          $keep = @{}
+          foreach ($p in ((Get-Content $status -Raw) -split '\r?\n\r?\n')) {
+            if ($p -match '(?m)^Status: .*\binstalled\s*$' -and $p -match '(?m)^Abi: (\w+)') { $keep[$Matches[1]] = $true }
+          }
+          if ($keep.Count -eq 0) { return }
+          $drop = @(Get-ChildItem $archives -Recurse -Filter *.zip | Where-Object { -not $keep.ContainsKey($_.BaseName) })
+          $drop | Remove-Item
+          Write-Host "kept $($keep.Count) archives, removed $($drop.Count)"
 
       - name: Stage lint
         shell: pwsh

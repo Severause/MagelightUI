@@ -3,6 +3,7 @@
 #include <SKSE/SKSE.h>
 
 #include "MagelightDevWatch.h"
+#include "MagelightSysInfo.h"
 
 #include <windows.h>
 
@@ -37,7 +38,7 @@ namespace Magelight::Dev {
                     FILE_NOTIFY_CHANGE_DIR_NAME,
                     &bytes, nullptr, nullptr);
                 if (!ok) {
-                    SKSE::log::warn("Magelight[dev]: watcher on {} stopped (error {})", w->dir.string(), GetLastError());
+                    SKSE::log::warn("Magelight[dev]: watcher on {} stopped (error {})", Magelight::SysInfo::ForLog(w->dir), GetLastError());
                     return;
                 }
                 w->lastChange.store(GetTickCount64());
@@ -51,7 +52,7 @@ namespace Magelight::Dev {
         std::error_code ec;
         const auto dir = std::filesystem::weakly_canonical(dirIn, ec);
         if (ec || !std::filesystem::is_directory(dir, ec)) {
-            SKSE::log::warn("Magelight[dev]: cannot watch {} — not a folder", dirIn.string());
+            SKSE::log::warn("Magelight[dev]: cannot watch {} — not a folder", Magelight::SysInfo::ForLog(dirIn));
             return;
         }
         std::lock_guard<std::mutex> lk(s_mutex);
@@ -59,7 +60,7 @@ namespace Magelight::Dev {
             if (w->dir == dir) {
                 for (ViewId v : w->views) if (v == view) return;
                 w->views.push_back(view);
-                SKSE::log::info("Magelight[dev]: view {} joins the watch on {}", view, dir.string());
+                SKSE::log::info("Magelight[dev]: view {} joins the watch on {}", view, Magelight::SysInfo::ForLog(dir));
                 return;
             }
         }
@@ -67,7 +68,7 @@ namespace Magelight::Dev {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            SKSE::log::warn("Magelight[dev]: cannot watch {} (error {})", dir.string(), GetLastError());
+            SKSE::log::warn("Magelight[dev]: cannot watch {} (error {})", Magelight::SysInfo::ForLog(dir), GetLastError());
             return;
         }
         auto w = std::make_unique<Watcher>();
@@ -77,7 +78,7 @@ namespace Magelight::Dev {
         Watcher* raw = w.get();
         s_watchers.push_back(std::move(w));
         std::thread(WatchThread, raw).detach();   // lives for the process; the registry never shrinks
-        SKSE::log::info("Magelight[dev]: watching {} for view {} (hot reload)", dir.string(), view);
+        SKSE::log::info("Magelight[dev]: watching {} for view {} (hot reload)", Magelight::SysInfo::ForLog(dir), view);
     }
 
     void Tick()

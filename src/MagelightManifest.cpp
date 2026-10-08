@@ -3,6 +3,7 @@
 #include <SKSE/SKSE.h>
 
 #include "Magelight.h"
+#include "MagelightSysInfo.h"
 #include "MagelightApi4.h"
 #include "MagelightManifest.h"
 #include "MagelightDevWatch.h"
@@ -201,14 +202,14 @@ namespace Magelight::Manifest {
             nlohmann::json j;
             try {
                 std::ifstream f(file);
-                if (!f) { SKSE::log::error("Magelight[manifest]: {} — cannot open", file.string()); return; }
+                if (!f) { SKSE::log::error("Magelight[manifest]: {} — cannot open", Magelight::SysInfo::ForLog(file)); return; }
                 f >> j;
             } catch (const std::exception& e) {
-                SKSE::log::error("Magelight[manifest]: {} — invalid JSON: {}", file.string(), e.what());
+                SKSE::log::error("Magelight[manifest]: {} — invalid JSON: {}", Magelight::SysInfo::ForLog(file), e.what());
                 return;
             }
             if (!j.is_object()) {
-                SKSE::log::error("Magelight[manifest]: {} — top level must be an object", file.string());
+                SKSE::log::error("Magelight[manifest]: {} — top level must be an object", Magelight::SysInfo::ForLog(file));
                 return;
             }
             const std::string topCtx = file.string() + " — ";
@@ -253,7 +254,7 @@ namespace Magelight::Manifest {
                                 : r == Result::InvalidMod ? "modId already registered by a DLL"
                                 : r == Result::Denied ? "its storage jar (named after the modId) is a plugin's session"
                                 : "refused";
-                SKSE::log::error("Magelight[manifest]: {} — {}", file.string(), why);
+                SKSE::log::error("Magelight[manifest]: {} — {}", Magelight::SysInfo::ForLog(file), why);
                 return;
             }
             // Before the views exist, so each one is created at the mod's level.
@@ -269,19 +270,19 @@ namespace Magelight::Manifest {
                 for (auto it = views->begin(); it != views->end(); ++it) {
                     const std::string vname = it.key();
                     const nlohmann::json& v = it.value();
-                    if (!v.is_object()) { SKSE::log::error("Magelight[manifest]: {} — view '{}' must be an object", file.string(), vname); ++failed; continue; }
+                    if (!v.is_object()) { SKSE::log::error("Magelight[manifest]: {} — view '{}' must be an object", Magelight::SysInfo::ForLog(file), vname); ++failed; continue; }
                     const std::string vctx = file.string() + " — view '" + vname + "': ";
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
                                          "hotkeyPause", "sounds", "loadOnShow", "cursor" }, vctx);
                     const std::string path = MJStr(v, "path", "", vctx);
                     if (!SafeRelative(path)) {
-                        SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", file.string(), vname);
+                        SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
                         ++failed; continue;
                     }
                     const fs::path page = modDir / path;
                     if (!fs::exists(page)) {
-                        SKSE::log::error("Magelight[manifest]: {} — view '{}': page not found: {}", file.string(), vname, page.string());
+                        SKSE::log::error("Magelight[manifest]: {} — view '{}': page not found: {}", Magelight::SysInfo::ForLog(file), vname, Magelight::SysInfo::ForLog(page));
                         ++failed; continue;
                     }
                     const std::string abs = page.string();
@@ -299,12 +300,12 @@ namespace Magelight::Manifest {
                     vd.uiScale = 0.0f;
                     vd.onDomReady = nullptr;
                     if (!vd.fullscreen && (vd.w <= 0 || vd.h <= 0)) {
-                        SKSE::log::error("Magelight[manifest]: {} — view '{}': needs w/h > 0 or fullscreen: true", file.string(), vname);
+                        SKSE::log::error("Magelight[manifest]: {} — view '{}': needs w/h > 0 or fullscreen: true", Magelight::SysInfo::ForLog(file), vname);
                         ++failed; continue;
                     }
                     ViewId id = 0;
                     if (Api4::CreateViewEx(mod, &vd, &id) != Result::Ok) {
-                        SKSE::log::error("Magelight[manifest]: {} — view '{}': {}", file.string(), vname, Api4::GetLastErrorMessage(mod));
+                        SKSE::log::error("Magelight[manifest]: {} — view '{}': {}", Magelight::SysInfo::ForLog(file), vname, Api4::GetLastErrorMessage(mod));
                         ++failed; continue;
                     }
                     ++created;
@@ -368,23 +369,23 @@ namespace Magelight::Manifest {
                                              : MJBool(*vh, "pause", false, vctx + "vrHotkey: ") ? kHotkeyActionToggleUIModePaused
                                                                          : kHotkeyActionToggleUIMode;
                             if (Api4::BindVRHotkey(id, &hd) != Result::Ok)
-                                SKSE::log::error("Magelight[manifest]: {} — view '{}': {}", file.string(), vname, Api4::GetLastErrorMessage(mod));
+                                SKSE::log::error("Magelight[manifest]: {} — view '{}': {}", Magelight::SysInfo::ForLog(file), vname, Api4::GetLastErrorMessage(mod));
                         }
                     }
                     if (auto hk = v.find("hotkey"); hk != v.end()) {
                         std::string err;
                         const std::uint32_t code = HotkeyNames::Parse(*hk, err);
                         if (!err.empty()) {
-                            SKSE::log::error("Magelight[manifest]: {} — view '{}': hotkey {}", file.string(), vname, err);
+                            SKSE::log::error("Magelight[manifest]: {} — view '{}': hotkey {}", Magelight::SysInfo::ForLog(file), vname, err);
                         } else if (!code) {
-                            SKSE::log::info("Magelight[manifest]: {} — view '{}': hotkey off", file.string(), vname);
+                            SKSE::log::info("Magelight[manifest]: {} — view '{}': hotkey off", Magelight::SysInfo::ForLog(file), vname);
                         } else {
                             const bool hud = vd.clickThrough || vd.layer == Layer::Hud;
                             const std::uint32_t action = hud ? kHotkeyActionToggleVisible
                                                        : MJBool(v, "hotkeyPause", false, vctx) ? kHotkeyActionToggleUIModePaused
                                                                                               : kHotkeyActionToggleUIMode;
                             if (Api4::BindHotkey(id, code, action) != Result::Ok)
-                                SKSE::log::error("Magelight[manifest]: {} — view '{}': {}", file.string(), vname, Api4::GetLastErrorMessage(mod));
+                                SKSE::log::error("Magelight[manifest]: {} — view '{}': {}", Magelight::SysInfo::ForLog(file), vname, Api4::GetLastErrorMessage(mod));
                         }
                     }
                 }
@@ -414,7 +415,7 @@ namespace Magelight::Manifest {
             ++found;
             LoadOne(entry.path());
         }
-        SKSE::log::info("Magelight[manifest]: {} manifest mod(s) under {}", found, root.string());
+        SKSE::log::info("Magelight[manifest]: {} manifest mod(s) under {}", found, Magelight::SysInfo::ForLog(root));
     }
 
 }  // namespace Magelight::Manifest

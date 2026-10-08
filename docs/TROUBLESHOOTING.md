@@ -6,7 +6,11 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v0.31.5 loading`).
+version (`Magelight v0.31.6 loading`); the lines after it name the game (SE, AE or VR, its version and
+SKSE's), Windows (or the Wine under Proton), the CPU and RAM, and, once the game's data has loaded,
+every graphics adapter with its driver version, the one the game renders on marked. Paths in the
+log show your user folder as `%USERPROFILE%`. Each line starts with the date and time, a level
+letter (`I`, `W`, `E`) and the thread id.
 
 ## Nothing from any Magelight mod appears
 
@@ -224,16 +228,20 @@ hide OpenComposite's own menu laser over Magelight pages), `aimUseTip` (`true`) 
 crashed inside a frame, in Ultralight or in Magelight's own frame code. Magelight caught the crash so
 the game keeps running, and turned its overlay off for the rest of the session: restart the game to
 bring the UI back (loading a save does not). Post the whole log with the report. The
-`Magelight VEH: exception ... (module <dll> +0x...)` line just before it names the module and
-offset: `MgWCore.dll` is Ultralight's web engine (see the VEH section below; the VEH line is
-missing when the session already logged eight exceptions). `MgWCore.dll +0xFB7F77` before 0.31.3
+`Magelight VEH: exception ... (module <dll> +0x...)` line above it (with its `#NN` caller lines under
+it) names the module and offset; a place that faulted earlier in the session is named by its first
+line, and new places stop being logged after 64: `MgWCore.dll` is Ultralight's web engine (see the VEH section below). `MgWCore.dll +0xFB7F77` before 0.31.3
 was a PC where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near the top of the log
 name the last-resort font the session uses and, when Arial could not be used, why.
 
 ## "Magelight VEH" and "Magelight stall" lines
 
-`Magelight VEH: exception ...` records the first few serious exceptions raised on any thread
-of the game, including ones another mod raises and handles itself; `Magelight stall: ...`
+`Magelight VEH: exception ...` records each serious exception raised on any thread of the
+game, once per place it happens (up to 64 places a session), including ones another mod raises and
+handles itself. The `Magelight VEH:   #01 <module>+0x...` lines under it are the calls that led
+there, most recent first: they tell a fault Magelight caused from another mod's or the game's own
+(a stack overflow gets the one line only, written a moment later by another thread when the
+overflowed one has too little stack left to write it). `Magelight stall: ...`
 records the stacks of the present and main threads when no frame was presented for longer than
 `stallThresholdMs` (a long save or a hitch can do that). The first sample of a session also
 records every other game thread (up to 64, labelled `other`), which names the thread a hang is

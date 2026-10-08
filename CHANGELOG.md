@@ -43,6 +43,40 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 0.31.6
+
+Diagnostics and build hygiene, after a review of langfod's fork.
+
+- **`Magelight.log` keeps its own first lines.** `SKSE::Init` ran CommonLib's log setup after ours,
+  which reopened (truncated) the same file and replaced the logger, so the "loading (built ...)" line
+  never reached the log and the format was CommonLib's. Magelight now keeps its own logger: each line
+  carries the date, the level letter and the thread id, and the level is `info` unless
+  `Magelight.json` `"logLevel"` says otherwise.
+- **The top of the log says what the game runs on:** Skyrim SE/AE/VR and its version, SKSE's version,
+  Windows (build, update revision and release, or the Wine version under Proton), the CPU and RAM,
+  and at kDataLoaded every graphics adapter with its VRAM and driver version (the NVIDIA number too),
+  the game's own marked. DXGI is loaded from the system folder by full path, so a proxy `dxgi.dll` is
+  never asked, and no game device is touched.
+- **Paths in the log show the user folder as `%USERPROFILE%`**, so a posted log does not name the
+  Windows user.
+- **A Windows user name the ANSI code page cannot spell no longer ends the game at load.** The log file
+  was opened by a narrow path, which throws for such a name, and the failure ended the game; it is now
+  opened by its wide path, and every logged path is written as UTF-8.
+- **The crash telemetry logs every distinct fault, with its stack.** It used to stop after the first
+  eight exceptions of a session, which one mod faulting in a loop could spend in a millisecond. It now
+  logs each fault site once (up to 64), keyed on the raw address, and under it the faulting thread's
+  calls as `module+offset`, up to 23 frames; a call through a null pointer is walked from its caller. A
+  stack overflow gets the one line only, and when the overflowed thread has too little stack left to
+  write it, another thread writes it a moment later: logging there could overflow it again and kill a
+  process that handles it. CrashLogger's own probes while it writes a report are skipped.
+- Build: the Ultralight headers are a system include (their hundred-odd unreferenced-parameter
+  warnings are gone), CommonLib is a precompiled header for the host (an edit to `Magelight.cpp`
+  rebuilds in about 8 s instead of 15), CommonLib is built without xbyak, the unused `directxtex` and
+  `xbyak` packages (and Xbyak's notice) and the dead colorglass registry are gone, the port declares
+  itself static-only, CI restores the vcpkg binary archives of unchanged packages after a manifest
+  change and keeps only the archives the build used, and the garbled dashes in CMakeLists.txt (one of
+  them in the missing-SDK error) are fixed.
+
 ## 0.31.5
 
 Found while testing Magelight against the Ultralight 2.0 beta; every item is a 1.4 fix.
