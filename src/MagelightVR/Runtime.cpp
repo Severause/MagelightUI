@@ -1,7 +1,7 @@
 // Magelight UI — Skyrim VR presenter: the OpenVR runtime binding, the presenter
 // state and settings, and the per-frame pose snapshot (docs/VR_PRESENTER.md).
 // OpenVR comes from the openvr_api.dll the game loaded, through GetProcAddress:
-// nothing links an OpenVR import library. Shared state and its rules: State.h.
+// Magelight.dll imports nothing from openvr_api.dll. Shared state and its rules: State.h.
 
 #include "State.h"
 

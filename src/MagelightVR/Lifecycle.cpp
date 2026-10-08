@@ -110,7 +110,7 @@ namespace Magelight::VR {
                     if (pressed & (1u << i)) s_runtimePressMs[i].store(now);
             }
         }
-        if (GetCurrentThreadId() != s_thread) {   // invariant 1, mirrored — and a VR-1 telemetry line
+        if (GetCurrentThreadId() != s_thread) {   // invariant 1, mirrored
             static bool warned = false;
             if (!warned) {
                 warned = true;
@@ -119,16 +119,15 @@ namespace Magelight::VR {
             }
             return;
         }
-        if (!s_settings.submitViews) return;     // VR-1: probe only; VR-2 flips this on
+        if (!s_settings.submitViews) return;     // off: the runtime is bound and probed, no view is submitted
 
         // Runtime restart: every handle is dead. Rebind, next frame recreates.
         if (s_getInitToken && s_getInitToken() != s_initToken) {
             SKSE::log::warn("Magelight VR: OpenVR init token changed — rebinding");
-            // ReleaseRecLocked guards every runtime teardown call on
-            // `handle != invalid`, so nulling FIRST skipped HideOverlay /
-            // ClearOverlayTexture / DestroyOverlay entirely and orphaned the
-            // overlay inside the runtime under its stable key. The next
-            // CreateOverlay for that view then failed KeyInUse forever.
+            // Release before nulling the handle: ReleaseRecLocked guards every
+            // runtime teardown call on `handle != invalid`, and an overlay left
+            // in the runtime under its stable key makes the next CreateOverlay
+            // for that view fail KeyInUse for good.
             for (auto& [id, r] : s_overlays) { ReleaseRecLocked(r); r.handle = vr::k_ulOverlayHandleInvalid; }
             ForgetBeams();
             s_aim[0] = AimCache{}; s_aim[1] = AimCache{};

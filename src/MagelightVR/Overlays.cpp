@@ -48,12 +48,12 @@ namespace Magelight::VR {
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        // TODO(VR-2, verify): SteamVR's vrclient copies in-process, so no
-        // MISC_SHARED is needed; flip it on if either runtime refuses.
+        // No MISC_SHARED: SteamVR's vrclient copies in-process. Set it if a
+        // runtime refuses the texture.
         if (FAILED(s_device->CreateTexture2D(&td, nullptr, &r.tex))) return false;
         if (FAILED(s_device->CreateRenderTargetView(r.tex, nullptr, &r.rtv))) return false;
         if (FAILED(s_device->CreateShaderResourceView(r.tex, nullptr, &r.srv))) return false;
-        // Transparent until the copy pass (VR-2) fills it: a fresh D3D
+        // Transparent until the copy pass fills it: a fresh D3D
         // texture's contents are undefined, and undefined must never
         // reach the headset.
         const float clear[4] = { 0, 0, 0, 0 };

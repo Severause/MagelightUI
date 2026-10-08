@@ -28,8 +28,8 @@ namespace Magelight::VR {
         // Present-thread only: seed the capture masks on the first tick after
         // arming. The 0xFFFFFFFF "suppress everything currently held" seed is
         // written by the OWNER of these arrays (the tick), never by
-        // SetButtonListener on the game thread — that cross-thread write would
-        // race the tick's own writes.
+        // SetButtonListener, which runs on its caller's thread — that
+        // cross-thread write would race the tick's own writes.
         bool                        s_edgeSeedPending = false;  // guarded by s_bindMutex
         std::map<ViewId, bool>      s_bindWas;       // present thread: rising-edge latch per view
         std::map<ViewId, std::uint32_t> s_bindWasEpoch;  // present thread: bind epoch the latch last reset for
@@ -208,7 +208,7 @@ namespace Magelight::VR {
         // Ask the present-thread tick to seed the capture masks ("suppress
         // everything currently held, so the button the user clicked Rebind
         // with is not read as a fresh edge"). Writing that seed HERE, on the
-        // game thread, would race the tick's own mask writes.
+        // caller's thread, would race the tick's own mask writes.
         s_edgeSeedPending = (cb != nullptr);
         SKSE::log::info("Magelight VR: button listener {}", cb ? "armed — bindings suppressed" : "cleared");
     }
