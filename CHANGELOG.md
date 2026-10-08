@@ -55,6 +55,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   paused that long). The log says so: `controls held off until the controller
   buttons are released`, then `controls restored (controller buttons released)`. A load ends the
   hold at once. Flat play is unchanged.
+- The VR host is now six source files (`src/MagelightVR/`) instead of one; no behaviour change.
 
 ## 0.31.3
 

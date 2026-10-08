@@ -21,6 +21,8 @@ src/MagelightManifest.cpp   Data/Magelight/<ModId>/manifest.json loader (docs/MA
 src/MagelightPapyrus.cpp    the Papyrus tier natives (papyrus/Magelight.psc, docs/PAPYRUS.md)
 src/MagelightDevWatch.cpp   devMode hot reload (folder watchers -> ReloadView)
 src/MagelightFonts.cpp      the font loader: the platform's, with a last resort that always loads (src/fonts: DejaVu Sans, an RCDATA resource)
+src/MagelightVR.h           the VR presenter's interface to the host (docs/VR_PRESENTER.md)
+src/MagelightVR/            the VR presenter: Runtime, Overlays, Laser, Input, Bindings, Lifecycle; State.h = the state they share and its rules
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
