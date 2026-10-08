@@ -1,11 +1,29 @@
-// Magelight UI — Skyrim VR presenter: Init, the per-frame SubmitFrame, ReleaseView,
-// Shutdown and the placement API (docs/VR_PRESENTER.md). Shared state and its rules: State.h.
+// Magelight UI — Skyrim VR presenter: Init and the probe overlay, the per-frame
+// SubmitFrame, ReleaseView, Shutdown, and the placement API with the requests it
+// queues (docs/VR_PRESENTER.md). Shared state and its rules: State.h.
 
 #include "State.h"
 
 namespace Magelight::VR {
 
     namespace {
+        DWORD             s_thread = 0;            // the thread Init ran on (== Ultralight thread)
+        vr::VROverlayHandle_t s_probe = vr::k_ulOverlayHandleInvalid;   // VR-1: the hidden probe overlay
+        std::chrono::steady_clock::time_point s_lastFrameTp{};
+
+        // Placement overrides from the API (any thread) — applied next frame.
+        std::mutex s_placementMutex;
+        std::map<ViewId, Placement> s_placementOverrides;
+        std::map<ViewId, bool>      s_recenterRequests;
+        // "reset to the layer default" requests (SetViewVRPlacement(view, nullptr)),
+        // drained in SubmitFrame where the layer is known.
+        std::map<ViewId, bool>      s_placementResetRequests;
+        // A thread-safe COPY of each view's effective placement, published by
+        // the present thread each frame under s_placementMutex; GetPlacement
+        // reads THIS, never s_overlays (which the present thread mutates
+        // lock-free).
+        std::map<ViewId, Placement> s_placementSnapshot;
+
         // VR submit accounting. Logged periodically while a panel is up so a
         // field log SAYS whether the overlay path is doing per-frame work,
         // instead of us inferring it from symptoms.
@@ -13,6 +31,23 @@ namespace Magelight::VR {
     }
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
+    // VR-1 probe: one overlay, created hidden, never shown, destroyed in
+    // Shutdown. Its two log lines are the milestone: the runtime accepts our
+    // overlay creation on this thread and releases it cleanly.
+    static void CreateProbeOverlay()
+    {
+        if (!s_overlay) return;
+        const auto err = s_overlay->CreateOverlay("severause.magelight.probe", "Magelight probe", &s_probe);
+        if (err != vr::VROverlayError_None) {
+            SKSE::log::error("Magelight VR: probe CreateOverlay failed ({}) — view overlays would fail the same way",
+                static_cast<int>(err));
+            s_probe = vr::k_ulOverlayHandleInvalid;
+            return;
+        }
+        s_overlay->SetOverlayWidthInMeters(s_probe, 0.5f);
+        SKSE::log::info("Magelight VR: probe overlay created (handle {}) — hidden by design", s_probe);
+    }
+
     void Init(ID3D11Device* device, ID3D11DeviceContext* context)
     {
         s_isVR = REL::Module::IsVR();
@@ -133,15 +168,13 @@ namespace Magelight::VR {
             if (fresh) r.placement = DefaultPlacementForLayer(pv.layer);
             // A queued override MERGES onto that default: 0 means "keep the
             // host's value for this layer" (a manifest that only names a mode
-            // must not drag a HUD badge to the panel distance — field
-            // 2026-09-03: the badge came out 1.40m at 1.60m instead of
-            // 0.45m at 1.50m).
+            // must not drag a HUD badge to the panel distance).
             {
                 std::lock_guard<std::mutex> lk(s_placementMutex);
                 if (s_placementResetRequests.erase(pv.id) > 0) {
                     // SetViewVRPlacement(view, nullptr): restore the LAYER
                     // default rather than storing a concrete default that
-                    // clobbers it (review 2026-09-05, finding 6).
+                    // clobbers it.
                     r.placement = DefaultPlacementForLayer(pv.layer);
                     r.placed = false; r.following = false;
                     s_placementOverrides.erase(pv.id);
@@ -159,17 +192,17 @@ namespace Magelight::VR {
                     if (r.handle != vr::k_ulOverlayHandleInvalid)
                         s_overlay->SetOverlayWidthInMeters(r.handle, ClampWidthM(r.placement.widthMeters));
                 }
-                s_placementSnapshot[pv.id] = r.placement;   // finding 3: publish under the lock
+                s_placementSnapshot[pv.id] = r.placement;   // published under the lock for GetPlacement
             }
             if (!EnsureOverlay(pv.id, r, pv.layer)) continue;
             if (r.placement.mode == Mode::HeadLocked) {
                 // Glued: world = HMD * relative, pushed as an ABSOLUTE transform
-                // every frame the head pose is usable. OpenComposite put the
-                // TrackedDeviceRelative badge on the floor (field 2026-09-03);
-                // the absolute path is what both runtimes composite correctly,
-                // and it is the same matrix the laser hits. One frame of lag on
-                // a HUD widget is accepted. Runtime-relative remains the
-                // first-placement fallback while no head pose is available.
+                // every frame the head pose is usable. OpenComposite puts a
+                // TrackedDeviceRelative HUD overlay on the floor; the absolute
+                // path is what both runtimes composite correctly, and it is the
+                // same matrix the laser hits. One frame of lag on a HUD widget
+                // is accepted. Runtime-relative remains the first-placement
+                // fallback while no head pose is available.
                 if (s_frameHmdUsable && s_overlay && s_compositor) {
                     r.world = MatMul(s_frameRender[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking,
                                      HeadRelative(r.placement));
@@ -181,11 +214,11 @@ namespace Magelight::VR {
             }
             // A panel whose transform was never authored sits at the
             // tracking-space ORIGIN — on the floor, usually behind the player,
-            // while the desktop mirror renders it perfectly. That is the
-            // "open on the monitor, invisible in the headset" report. It
-            // happens whenever the head pose was unusable on the frame the
-            // overlay was created, because TickFollow is the only thing that
-            // writes r.world for a non-HeadLocked view. Wait for a pose.
+            // while the desktop mirror renders it perfectly: open on the
+            // monitor, invisible in the headset. It happens whenever the head
+            // pose was unusable on the frame the overlay was created, because
+            // TickFollow is the only thing that writes r.world for a
+            // non-HeadLocked view. Wait for a pose.
             if (r.placement.mode != Mode::HeadLocked && !r.placed) continue;
             if (!EnsureTexture(r, pv.w, pv.h)) continue;
 
@@ -196,14 +229,13 @@ namespace Magelight::VR {
                 for (int h = 0; h < 2; ++h)
                     if (s_hover[h].hit && s_hover[h].view == pv.id) { marks[nm].u = s_hover[h].u; marks[nm].v = s_hover[h].v; ++nm; }
             // ── Submit only what changed ──────────────────────────────
-            // This used to run EVERY frame regardless: a full-panel render-
-            // target copy plus SetOverlayTexture, which hands a texture
-            // across to the compositor process. At 1600x900 that is ~5.8 MB
-            // per frame, ~90 times a second, for a page that is usually
-            // perfectly still. The flat compositor has no equivalent cost
-            // (it draws the SRV straight into a backbuffer it is already
-            // writing), so this overlay-submission cost stayed invisible
-            // until a page was driven from inside a headset.
+            // A submission is a full-panel render-target copy plus
+            // SetOverlayTexture, which hands a texture across to the
+            // compositor process: at 1600x900 ~5.8 MB per frame, ~90 times a
+            // second, for a page that is usually perfectly still. The flat
+            // compositor has no equivalent cost (it draws the SRV straight
+            // into a backbuffer it is already writing), so this one only
+            // shows in a headset.
             //
             // A view is resubmitted when its pixels changed (needs_paint,
             // sampled before Render cleared it), when the laser dot moved
@@ -211,11 +243,11 @@ namespace Magelight::VR {
             // submission yet. Everything else the compositor already holds.
             // Quantise to a texel BEFORE comparing, and stamp the quantised
             // value, so the mark the gate tests is the mark that gets drawn.
-            // Raw u/v come straight from the ray-quad intersection, so hand
-            // tremor of a fraction of a degree moved them every single frame —
-            // which made marksMoved true whenever the laser touched a panel
-            // and defeated the whole needs_paint gate exactly when the user
-            // was interacting.
+            // Raw u/v come straight from the ray-quad intersection, where hand
+            // tremor of a fraction of a degree moves them every frame; left
+            // unquantised, marksMoved would be true whenever the laser touches
+            // a panel, defeating the needs_paint gate exactly when the user
+            // interacts.
             for (int i = 0; i < nm; ++i) {
                 if (r.texW > 0) marks[i].u = std::lround(marks[i].u * r.texW) / static_cast<float>(r.texW);
                 if (r.texH > 0) marks[i].v = std::lround(marks[i].v * r.texH) / static_cast<float>(r.texH);
@@ -247,8 +279,8 @@ namespace Magelight::VR {
             if (!r.shown) {
                 const auto serr = s_overlay->ShowOverlay(r.handle);
                 // Only latch on success: !r.shown is one of the terms that
-                // forces a resubmit, so latching a FAILED show meant the view
-                // was never retried and stayed invisible for good.
+                // forces a resubmit, so latching a FAILED show would never
+                // retry it and leave the view invisible for good.
                 r.shown = (serr == vr::VROverlayError_None);
                 SKSE::log::info("Magelight VR: overlay shown for view {} ({}x{}, {})", pv.id, pv.w, pv.h, static_cast<int>(serr));
             }
@@ -274,15 +306,11 @@ namespace Magelight::VR {
                 // Forget the anchor so the next SHOW re-places the panel in
                 // front of wherever the head is looking THEN. Without this a
                 // WorldLocked panel keeps the transform it was first given
-                // for the whole session: field 2026-09-03 opened the UI once
-                // on load, played on for three minutes, and every later open
-                // was invisible in the headset while the desktop mirror
-                // showed it perfectly — the quad was still sitting where the
-                // player had been standing when they first opened it. Lazy
-                // follow used to hide this by continuously re-aiming, so it
-                // only surfaced once follow became opt-in (0.22.0). Placed
-                // and STAYS placed is the contract, but the placement is per
-                // opening, not per session.
+                // for the whole session, and every later open is invisible
+                // in the headset (the quad still sits where the player stood
+                // when they first opened it) while the desktop mirror shows
+                // it perfectly. Placed and STAYS placed is the contract, but
+                // the placement is per opening, not per session.
                 r.placed = false;
                 r.following = false;
                 SKSE::log::info("Magelight VR: overlay hidden for view {}", id);
@@ -296,7 +324,7 @@ namespace Magelight::VR {
 
     void ReleaseView(ViewId view, bool hibernating)
     {
-        if (!hibernating) UnbindView(view);   // a hibernated view keeps its chord (see the header)
+        if (!hibernating) UnbindView(view);   // a hibernated view keeps its chord (see MagelightVR.h, ReleaseView)
         {
             std::lock_guard<std::mutex> lk(s_placementMutex);
             s_placementSnapshot.erase(view);
@@ -323,7 +351,7 @@ namespace Magelight::VR {
         if (GetState() == State::Live) SetState(State::Dormant);
     }
 
-    // ── Queries / placement API ─────────────────────────────────────────────
+    // ── Placement API ───────────────────────────────────────────────────────
     void SetPlacement(ViewId view, const Placement& p)
     {
         std::lock_guard<std::mutex> lk(s_placementMutex);
@@ -334,7 +362,7 @@ namespace Magelight::VR {
     {
         // Read the snapshot the present thread publishes each frame under this
         // lock — never a lock-free s_overlays.find() from the game thread while
-        // the present thread inserts/erases that map (review 2026-09-05, finding 3).
+        // the present thread inserts/erases that map.
         std::lock_guard<std::mutex> lk(s_placementMutex);
         auto it = s_placementSnapshot.find(view);
         if (it == s_placementSnapshot.end()) return false;
@@ -353,17 +381,6 @@ namespace Magelight::VR {
     {
         std::lock_guard<std::mutex> lk(s_placementMutex);
         s_recenterRequests[view] = true;
-    }
-
-    const char* StateName(State s)
-    {
-        switch (s) {
-        case State::Dormant: return "dormant";
-        case State::Pending: return "pending";
-        case State::Live:    return "live";
-        case State::Failed:  return "failed";
-        }
-        return "?";
     }
 
 }  // namespace Magelight::VR

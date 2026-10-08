@@ -1,5 +1,5 @@
-// Magelight UI — Skyrim VR presenter: the per-view overlay records (create,
-// texture, place, follow, release) and the placement requests (docs/VR_PRESENTER.md).
+// Magelight UI — Skyrim VR presenter: the per-view overlay records — create,
+// texture, place, follow, release (docs/VR_PRESENTER.md).
 // Shared state and its rules: State.h.
 
 #include "State.h"
@@ -9,23 +9,14 @@ namespace Magelight::VR {
     // ── Per-view overlay records (Ultralight thread only) ───────────────────
     std::map<ViewId, OverlayRec> s_overlays;
 
-    // Placement overrides from the API (any thread) — applied next frame.
-    std::mutex s_placementMutex;
-    std::map<ViewId, Placement> s_placementOverrides;
-    std::map<ViewId, bool>      s_recenterRequests;
-    // "reset to the layer default" requests (SetViewVRPlacement(view, nullptr)),
-    // drained in SubmitFrame where the layer is known (finding 6).
-    std::map<ViewId, bool>      s_placementResetRequests;
-    // A thread-safe COPY of each view's effective placement, published by
-    // the present thread each frame under s_placementMutex; GetPlacement
-    // reads THIS, never s_overlays (which the present thread mutates
-    // lock-free) — review 2026-09-05, finding 3.
-    std::map<ViewId, Placement> s_placementSnapshot;
-
     // Bumped on every (re)bind of the OpenVR interfaces. Part of each
     // overlay key so a rebind can never collide with an overlay orphaned
     // inside the runtime by a restart mid-teardown.
     std::uint64_t s_bindGeneration = 0;
+
+    namespace {
+        const char* kOverlayKeyPrefix = "severause.magelight.view.";
+    }
 
     void ReleaseRecLocked(OverlayRec& r)
     {
@@ -145,11 +136,10 @@ namespace Magelight::VR {
         return m;
     }
 
-    // TODO(VR-2): WorldLocked — read the HMD pose (GetLastPoses, standing
-    // universe), compose HeadRelative into it with the yaw only (no roll/
-    // pitch bake), SetOverlayTransformAbsolute, remember `world` for the
-    // laser. HeadLocked uses SetOverlayTransformTrackedDeviceRelative and
-    // reconstructs `world` every frame from the HMD pose for the laser.
+    // HeadLocked: the runtime-relative transform, SubmitFrame's first
+    // placement while no head pose is usable (with one, SubmitFrame authors
+    // the absolute world itself). LazyFollow and WorldLocked are only
+    // re-armed here: TickFollow places them from the live head pose.
     void ApplyPlacement(OverlayRec& r, const Placement& p)
     {
         r.placement = p;

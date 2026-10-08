@@ -70,7 +70,7 @@ namespace Magelight::VR {
         s_hands[h].stickTick.store(GetTickCount64());
     }
 
-    // Present thread only, like every other OpenVR call here.
+    // Present thread only: it calls OpenVR (see State.h).
     std::uint32_t PollHeldMask()
     {
         if (!s_system) return 0;

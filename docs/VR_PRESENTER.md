@@ -378,7 +378,7 @@ BOUNDS-CHECKED against `k_unTrackedDeviceIndexInvalid`/max (an off controller
 returns 0xFFFFFFFF → OOB pose read → CTD, the most likely first-cut crash);
 `heightM = widthM * texH/texW`; topmost-first hit (reverse frame order, matches
 the host hitTest); pixel injected through a new `Magelight::QueueSyntheticInput`
-bridge (the file-static `QueueInput` is invisible to the VR TU); trigger drives
+bridge (the file-static `QueueInput` is invisible to the VR translation units); trigger drives
 clicks off the LEVEL not the edge counter; the sink swallows the VR trigger +
 thumbstick while a page is focused so they can't also fire the weapon / turn
 the player (B/Y stays linked for the exit). A fixed `kAimPitchDeg = -35°`

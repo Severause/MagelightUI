@@ -36,7 +36,6 @@ namespace Magelight::VR {
         }
     }
 
-    // ── VR-3 laser helpers (verified plan; docs/VR_PRESENTER.md §6) ──
     // ── Aim frame ────────────────────────────────────────────────
     // Preferred: the controller's render-model "tip" component. OpenVR
     // defines its local frame with -Z out of the surface, which is exactly
@@ -52,11 +51,10 @@ namespace Magelight::VR {
         void ResolveAim(int hand, vr::TrackedDeviceIndex_t idx, const vr::VRControllerState_t& st)
         {
             if (!s_system) return;
-            // The property query below is an IPC round-trip to the runtime and
-            // it sat ABOVE the cache check, so it ran twice a frame forever to
-            // answer a question whose answer changes only when a controller is
-            // swapped. Re-ask about once a second; the cached aim is used in
-            // between. (Audit finding B5, 2026-09-04.)
+            // The property query below is an IPC round-trip to the runtime,
+            // and its answer changes only when a controller is swapped, so
+            // this cache check stays ABOVE it: re-ask about once a second and
+            // use the cached aim in between.
             AimCache& cached = s_aim[hand];
             if (cached.resolved && cached.recheck > 0) { --cached.recheck; return; }
             // Render-model names are short; k_unMaxPropertyStringSize is 32 KB
@@ -137,18 +135,19 @@ namespace Magelight::VR {
 
     namespace {
         // ── Beam overlays (one per hand, SESSION-GLOBAL like the probe) ──
-        // A static 256x2 straight-alpha gradient texture set ONCE (never
-        // recreated while the runtime references it — recreating one it still
-        // holds is a known teardown fault); per frame only width + an absolute transform that
-        // billboards the strip toward the HMD so it is never seen edge-on.
-        // Released in Shutdown only, never in ReleaseView.
+        // A static kBeamTexW x kBeamTexH straight-alpha gradient texture set
+        // ONCE (never recreated while the runtime references it — recreating
+        // one it still holds is a known teardown fault); per frame only width
+        // + an absolute transform that billboards the strip toward the HMD so
+        // it is never seen edge-on. Released in Shutdown only, never in
+        // ReleaseView.
         vr::VROverlayHandle_t s_beam[2] = { vr::k_ulOverlayHandleInvalid, vr::k_ulOverlayHandleInvalid };
         bool                  s_beamShown[2] = { false, false };
         ID3D11Texture2D*      s_beamTex = nullptr;
         // Wider texture = THINNER beam: the overlay's height is
-        // width(metres) * texH/texW, so 512x2 is half the thickness 256x2 gave
-        // (~0.8 cm at 2 m). White, fading toward the tip — the thin pale beam
-        // the runtime's own pointer uses, rather than a fat coloured one.
+        // width(metres) * texH/texW, so 512x2 is ~0.8 cm thick at 2 m. White,
+        // fading toward the tip — the thin pale beam the runtime's own pointer
+        // uses, rather than a fat coloured one.
         constexpr int         kBeamTexW = 512, kBeamTexH = 2;
         constexpr float       kBeamIdleLen = 2.0f;   // metres when nothing is hit
 
@@ -231,8 +230,6 @@ namespace Magelight::VR {
             // zero, and reaching THROUGH the panel makes it denormal-small.
             // OpenVR wants a positive width and a runtime is entitled to do
             // anything with a zero one; a beam that thin is invisible anyway.
-            // Suspected in the "reaching out past a threshold freezes the
-            // game" report (2026-09-04) — the threshold is the panel distance.
             if (!std::isfinite(len) || len < 0.02f) { HideBeam(hand); return; }
             s_overlay->SetOverlayWidthInMeters(s_beam[hand], len);
             s_overlay->SetOverlayTransformAbsolute(s_beam[hand], s_compositor->GetTrackingSpace(), &M);
@@ -285,8 +282,8 @@ namespace Magelight::VR {
                 // VREvent_KeyboardCharInput per keystroke instead of
                 // keeping its own text buffer and handing the whole string
                 // over at Done. We are typing into a live web page, so we
-                // want the keystrokes (field 2026-09-03: with minimal mode
-                // off, SteamVR's keyboard opened and produced nothing).
+                // want the keystrokes; with minimal mode off, SteamVR's
+                // keyboard opens and produces nothing.
                 const auto err = s_overlay->ShowKeyboardForOverlay(
                     it->second.handle, vr::k_EGamepadTextInputModeNormal,
                     vr::k_EGamepadTextInputLineModeSingleLine, "Magelight", 256, "", true, 0);
@@ -314,8 +311,8 @@ namespace Magelight::VR {
         auto it = s_overlays.find(s_kbView);
         if (it == s_overlays.end()) { s_overlay->HideKeyboard(); s_kbShown = false; s_kbView = 0; return; }
         // BOUNDED: this runs on the present thread, and raising the
-        // keyboard produced a flood of focus events in the field. An
-        // unbounded drain here is a frame stall.
+        // keyboard can produce a flood of focus events. An unbounded drain
+        // here is a frame stall.
         vr::VREvent_t ev{};
         int drained = 0;
         while (drained++ < 64 && s_overlay->PollNextOverlayEvent(it->second.handle, &ev, sizeof(ev))) {
@@ -368,11 +365,13 @@ namespace Magelight::VR {
         s_kbShown = false; s_kbView = 0;
     }
 
-    // Hover + click on the panel overlays (VR-3 first cut: no beam, no
-    // scroll). One pose snapshot; reconstruct each panel's world from the
-    // live HMD pose (B1); per hand, intersect topmost-first and inject the
-    // in-view pixel through the host's synthetic-input bridge. Present
-    // thread; touches no engine state (buttons already came from the sink).
+    // The laser on the panel overlays: hover, click, scroll, the grip
+    // recentre, grab-and-move and the beam. Uses SubmitFrame's pose
+    // snapshot; HeadLocked panels get their world rebuilt from the live HMD
+    // pose (B1); per hand, intersect topmost-first and inject the in-view
+    // pixel through the host's synthetic-input bridge. Present thread;
+    // touches no engine state (controller levels are polled from the
+    // runtime, with the input sink's as the fallback).
     void TickLaser(const PresentedFrame& frame)
     {
         if (!s_system || !s_compositor || !s_overlay) return;
@@ -408,8 +407,8 @@ namespace Magelight::VR {
             // Axis0 = stick/pad, Axis1 = trigger (0..1), Axis2 = grip on
             // Touch/Index; k_EButton_Grip for wands. The engine's ButtonEvent
             // stream for these analog axes is not a usable level source
-            // (0.17.7 field: still one click per frame), so the laser no
-            // longer depends on it — the sink only swallows those events.
+            // (it gives one click per frame), so the laser does not depend
+            // on it — the sink only swallows those events.
             vr::VRControllerState_t st{};
             bool polled = false, trig = false, gripNow = false; float stickY = 0.0f;
             if (s_system->GetControllerState(idx, &st, sizeof(st))) {
@@ -434,8 +433,8 @@ namespace Magelight::VR {
 
             // Grip rising edge: bring every non-HUD panel back in front of you.
             // A grip already held when UI mode opened is NOT an edge — it is
-            // the modifier the user is holding for a controller binding
-            // (field 2026-09-03: opening with grip+A recentred on every open).
+            // the modifier the user is holding for a controller binding, and
+            // a grip+A binding would recentre the panels on every open.
             {
                 if (!s_gripSeeded[hand]) { s_gripWas[hand] = gripNow; s_gripSeeded[hand] = true; }
                 bool edge;
@@ -461,8 +460,8 @@ namespace Magelight::VR {
                 // Clamp to the SAME width the overlay is displayed at
                 // (SetOverlayWidthInMeters(ClampWidthM(...))) — the raw
                 // panelWidthM is unvalidated, so an out-of-range or NaN
-                // value made the click rectangle diverge from the visible
-                // panel (review 2026-09-05, finding 4).
+                // value would make the click rectangle diverge from the
+                // visible panel.
                 const float widthM  = ClampWidthM(r.placement.widthMeters);
                 const float heightM = widthM * static_cast<float>(r.texH) / static_cast<float>(r.texW);  // M4
                 float u, v, dist;
@@ -536,10 +535,10 @@ namespace Magelight::VR {
                     Magelight::QueueSyntheticInput(WM_LBUTTONDOWN, MK_LBUTTON, pos);
             }
             // Release at the LAST HIT pixel of this hand (a web click needs
-            // the press and the release on the same element — 0.17.9 sent
-            // the up at (0,0), which the host re-hit-tested to a corner far
-            // outside every control). Fires whether or not the ray still
-            // hits, so a drag that left the panel still releases.
+            // the press and the release on the same element; an up at (0,0)
+            // re-hit-tests to a corner far outside every control). Fires
+            // whether or not the ray still hits, so a drag that left the
+            // panel still releases.
             if (!nowDown && s_lastTriggerDown[hand]) {
                 const auto upPos = static_cast<std::intptr_t>(MAKELPARAM(static_cast<WORD>(s_lastPx[hand]), static_cast<WORD>(s_lastPy[hand])));
                 Magelight::QueueSyntheticInput(WM_LBUTTONUP, 0, upPos);

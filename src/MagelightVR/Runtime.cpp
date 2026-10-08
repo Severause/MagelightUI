@@ -1,6 +1,7 @@
 // Magelight UI — Skyrim VR presenter: the OpenVR runtime binding, the presenter
 // state and settings, and the per-frame pose snapshot (docs/VR_PRESENTER.md).
-// Shared state and its rules: State.h.
+// OpenVR comes from the openvr_api.dll the game loaded, through GetProcAddress:
+// nothing links an OpenVR import library. Shared state and its rules: State.h.
 
 #include "State.h"
 
@@ -16,8 +17,6 @@ namespace Magelight::VR {
 
     bool              s_isVR = false;          // REL::Module::IsVR(), latched in Init
     Settings          s_settings;              // Magelight.json "vr"
-    DWORD             s_thread = 0;            // the thread Init ran on (== Ultralight thread)
-    vr::VROverlayHandle_t s_probe = vr::k_ulOverlayHandleInvalid;   // VR-1: the hidden probe overlay
 
     vr::IVRSystem*     s_system = nullptr;
     vr::IVRCompositor* s_compositor = nullptr;
@@ -34,8 +33,6 @@ namespace Magelight::VR {
 
     ID3D11Device*        s_device = nullptr;   // not owned (the host's refs)
     ID3D11DeviceContext* s_context = nullptr;
-
-    const char* kOverlayKeyPrefix = "severause.magelight.view.";
 
     void SetState(State s) { s_state.store(static_cast<int>(s)); }
 
@@ -81,10 +78,10 @@ namespace Magelight::VR {
         //
         // OpenComposite (OpenVR re-implemented over OpenXR; OCU on Skyrim VR)
         // SERVES IVRRenderModels but stubs RenderModelHasComponent: the
-        // call pops its "Hit stubbed file" dialog every time (field
-        // 2026-09-05). It is recognisable by the factory exports stock
-        // openvr_api.dll never has (HmdSystemFactory, VRSystem, ...), so
-        // don't touch render models there at all.
+        // call pops its "Hit stubbed file" dialog every time. It is
+        // recognisable by the factory exports stock openvr_api.dll never
+        // has (HmdSystemFactory, VRSystem, ...), so don't touch render
+        // models there at all.
         const bool openComposite = GetProcAddress(mod, "HmdSystemFactory") != nullptr;
         if (openComposite) {
             SKSE::log::info("Magelight VR: OpenComposite detected (HmdSystemFactory export) — "
@@ -108,21 +105,23 @@ namespace Magelight::VR {
     vr::TrackedDevicePose_t s_frameRender[vr::k_unMaxTrackedDeviceCount];
     bool  s_frameHmdUsable = false;
     float s_frameDt = 0.0f;
-    std::chrono::steady_clock::time_point s_lastFrameTp{};
 
     bool PoseUsable(const vr::TrackedDevicePose_t& p)
     {
         // Running_OutOfRange is a NORMAL, recoverable state (you stepped
         // outside the play space, a base station lost you for a moment).
         // The pose it carries is still valid — bPoseIsValid says so — and
-        // demanding Running_OK meant a panel never got placed and the
-        // laser died outright for the duration. Everything else
-        // (Uninitialised, calibrating, fallback-rotation-only) stays out.
+        // demanding Running_OK would leave a panel unplaced and the laser
+        // dead for the duration. Everything else (Uninitialised,
+        // calibrating, fallback-rotation-only) stays out.
         if (!p.bPoseIsValid || !p.bDeviceIsConnected) return false;
         return p.eTrackingResult == vr::TrackingResult_Running_OK ||
                p.eTrackingResult == vr::TrackingResult_Running_OutOfRange;
     }
 
+    // ── Settings and state queries ──────────────────────────────────────────
+    // Configure runs once, at settings load before Init; the queries may be
+    // called from any thread.
     void Configure(const Settings& s) { s_settings = s; }
     bool MirrorEnabled() { return s_settings.mirror || GetState() != State::Live; }
     bool SuppressRuntimeLaser() { return s_settings.suppressRuntimeLaser && GetState() == State::Live; }
@@ -144,24 +143,18 @@ namespace Magelight::VR {
         return true;
     }
 
-    // VR-1 probe: one overlay, created hidden, never shown, destroyed in
-    // Shutdown. Its two log lines are the milestone: the runtime accepts our
-    // overlay creation on this thread and releases it cleanly.
-    void CreateProbeOverlay()
-    {
-        if (!s_overlay) return;
-        const auto err = s_overlay->CreateOverlay("severause.magelight.probe", "Magelight probe", &s_probe);
-        if (err != vr::VROverlayError_None) {
-            SKSE::log::error("Magelight VR: probe CreateOverlay failed ({}) — view overlays would fail the same way",
-                static_cast<int>(err));
-            s_probe = vr::k_ulOverlayHandleInvalid;
-            return;
-        }
-        s_overlay->SetOverlayWidthInMeters(s_probe, 0.5f);
-        SKSE::log::info("Magelight VR: probe overlay created (handle {}) — hidden by design", s_probe);
-    }
-
     State GetState() { return static_cast<State>(s_state.load()); }
     bool  IsVRRuntime() { return s_isVR; }
+
+    const char* StateName(State s)
+    {
+        switch (s) {
+        case State::Dormant: return "dormant";
+        case State::Pending: return "pending";
+        case State::Live:    return "live";
+        case State::Failed:  return "failed";
+        }
+        return "?";
+    }
 
 }  // namespace Magelight::VR

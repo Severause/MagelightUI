@@ -2,17 +2,22 @@
 // Magelight UI — Skyrim VR presenter, the state its translation units share
 // (src/MagelightVR/*.cpp; design: docs/VR_PRESENTER.md). Each variable and
 // function declared here is defined in exactly one of those files; the types
-// and ClampWidthM are defined here. Anything one file uses alone stays in that
-// file's anonymous namespace. A `static` redefinition of a name declared here
-// is a compile error (/we4211); without the flag MSVC gives that file its own copy.
+// and ClampWidthM are defined here. A name no other file uses has internal
+// linkage (its file's anonymous namespace, or `static`), and a variable only
+// one file touches is defined in that file. A `static` redefinition of a name
+// declared here is a compile error (/we4211); a redeclaration inside a file's
+// anonymous namespace is not, and code in that namespace silently uses the
+// file's own copy, so never add one.
 //
 // Rules a change must keep:
 //  - Threads (MagelightVR.h): OpenVR is called on the present (= Ultralight)
 //    thread only, from Init, SubmitFrame, ReleaseView, Shutdown and what they
-//    call. Button levels arrive on the game thread through NoteButton /
-//    NoteThumbstick; what they share with the present thread is atomic, no
-//    lock. Placement requests may come from any thread and go through
-//    s_placementMutex; the binding table is behind s_bindMutex (Bindings.cpp).
+//    call. Button levels arrive from the input sink, on the game thread,
+//    through NoteButton / NoteThumbstick: what they share with the present
+//    thread is atomic, no lock, and their rising-edge latches are the sink's
+//    own. Placement requests may come from any thread and go through
+//    s_placementMutex (Lifecycle.cpp); the binding table is behind
+//    s_bindMutex (Bindings.cpp).
 //  - The pose snapshot (s_frameRender, s_frameHmdUsable, s_frameDt) is taken
 //    once per frame in SubmitFrame and shared by the follow glide and the
 //    laser, on the present thread.
@@ -55,8 +60,6 @@ namespace Magelight::VR {
 
     extern bool s_isVR;
     extern Settings s_settings;
-    extern DWORD s_thread;
-    extern vr::VROverlayHandle_t s_probe;
     extern vr::IVRSystem* s_system;
     extern vr::IVRCompositor* s_compositor;
     extern vr::IVROverlay* s_overlay;
@@ -65,15 +68,12 @@ namespace Magelight::VR {
     extern GetInitTokenFn s_getInitToken;
     extern ID3D11Device* s_device;
     extern ID3D11DeviceContext* s_context;
-    extern const char* kOverlayKeyPrefix;
     void SetState(State s);
     bool BindInterfaces();
     extern vr::TrackedDevicePose_t s_frameRender[vr::k_unMaxTrackedDeviceCount];
     extern bool s_frameHmdUsable;
     extern float s_frameDt;
-    extern std::chrono::steady_clock::time_point s_lastFrameTp;
     bool PoseUsable(const vr::TrackedDevicePose_t& p);
-    void CreateProbeOverlay();
 
     // ── Overlays.cpp: overlay records and placement ─────────────────────────────
     struct OverlayRec {
@@ -98,11 +98,6 @@ namespace Magelight::VR {
     };
 
     extern std::map<ViewId, OverlayRec> s_overlays;
-    extern std::mutex s_placementMutex;
-    extern std::map<ViewId, Placement> s_placementOverrides;
-    extern std::map<ViewId, bool> s_recenterRequests;
-    extern std::map<ViewId, bool> s_placementResetRequests;
-    extern std::map<ViewId, Placement> s_placementSnapshot;
     extern std::uint64_t s_bindGeneration;
 
     // Every overlay width goes through here. Magelight.json supplies
@@ -142,6 +137,7 @@ namespace Magelight::VR {
     std::uint32_t PollHeldMask();
 
     // ── Laser.cpp: aim, hover, beams, the runtime keyboard ──────────────────────
+    // Per-hand aim frame cache; see s_aim in Laser.cpp.
     struct AimCache {
         std::string model;                 // Prop_RenderModelName_String
         vr::HmdMatrix34_t tip{};

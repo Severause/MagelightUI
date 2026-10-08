@@ -1,5 +1,6 @@
 // Magelight UI — Skyrim VR presenter: controller hotkey bindings and the
-// press-to-bind listener (docs/VR_PRESENTER.md §6). Shared state and its rules: State.h.
+// press-to-bind listener (MagelightVR.h, VR controller hotkeys; the VR-4 entry
+// of docs/VR_PRESENTER.md §10a). Shared state and its rules: State.h.
 
 #include "State.h"
 
@@ -22,17 +23,17 @@ namespace Magelight::VR {
         // or capture arm/disarm. The dispatch loop re-latches EVERY view when
         // the epoch it last saw changed, so a chord still physically held when
         // capture ends — or when another view is rebound — can never fire a
-        // bystander view's action (review 2026-09-05, finding 1).
+        // bystander view's action.
         std::uint32_t               s_bindEpoch = 0;   // guarded by s_bindMutex
         // Present-thread only: seed the capture masks on the first tick after
         // arming. The 0xFFFFFFFF "suppress everything currently held" seed is
         // written by the OWNER of these arrays (the tick), never by
-        // SetButtonListener on the game thread — that cross-thread write raced
-        // the tick's own writes (review 2026-09-05, finding 7).
+        // SetButtonListener on the game thread — that cross-thread write would
+        // race the tick's own writes.
         bool                        s_edgeSeedPending = false;  // guarded by s_bindMutex
         std::map<ViewId, bool>      s_bindWas;       // present thread: rising-edge latch per view
         std::map<ViewId, std::uint32_t> s_bindWasEpoch;  // present thread: bind epoch the latch last reset for
-        std::map<ViewId, std::uint64_t> s_bindLastTick;  // present thread: PER-VIEW debounce (finding 5)
+        std::map<ViewId, std::uint64_t> s_bindLastTick;  // present thread: PER-VIEW debounce
         std::uint64_t               s_captureLastTick = 0;  // present thread: the capture branch's own debounce
 
         // Press-to-bind listener (guarded by s_bindMutex). While set, the
@@ -45,8 +46,8 @@ namespace Magelight::VR {
         // reported at once: it may be the HOLD half of a chord. It sits here
         // until a second button on the same hand fires (→ reported as that
         // button with this one held) or it is released with nothing else
-        // pressed (→ reported bare). Field 2026-09-05: without this, pressing
-        // Grip to start "Grip + A" captured a bare Grip immediately.
+        // pressed (→ reported bare), so pressing Grip to start "Grip + A"
+        // does not capture a bare Grip.
         std::uint32_t s_edgePending[2] = { 0, 0 };
         // The chord vocabulary, in the order a chord's MODIFIER is reported
         // when more than one other button is held (Grip and Trigger are what
@@ -162,16 +163,16 @@ namespace Magelight::VR {
                 // arming/ending). Re-latch EVERY view to live state so a
                 // chord still physically held — from the press that chose
                 // it, or from an unrelated view's chord — must be released
-                // before it can fire. Reseeding only the rebound view left
-                // bystander views to fire on a held-through chord.
+                // before it can fire. Reseeding only the rebound view would
+                // let bystander views fire on a held-through chord.
                 seenEpoch = epoch;
                 was = down;
                 continue;
             }
             if (down && !was) {
-                // Per-view debounce: a single global timestamp let one
+                // Per-view debounce: a single global timestamp would let one
                 // view's fire swallow another view's distinct hotkey within
-                // 250ms (finding 5).
+                // 250ms.
                 std::uint64_t& lastTick = s_bindLastTick[view];
                 const std::uint64_t now = GetTickCount64();
                 if (now - lastTick >= 250) {
@@ -202,12 +203,12 @@ namespace Magelight::VR {
         std::lock_guard<std::mutex> lk(s_bindMutex);
         s_edgeCb = cb; s_edgeUser = user;
         // Every bound view must re-latch on the next tick — a chord held
-        // through the capture must not fire a view when capture ends (finding 1).
+        // through the capture must not fire a view when capture ends.
         ++s_bindEpoch;
         // Ask the present-thread tick to seed the capture masks ("suppress
         // everything currently held, so the button the user clicked Rebind
         // with is not read as a fresh edge"). Writing that seed HERE, on the
-        // game thread, raced the tick's own mask writes (finding 7).
+        // game thread, would race the tick's own mask writes.
         s_edgeSeedPending = (cb != nullptr);
         SKSE::log::info("Magelight VR: button listener {}", cb ? "armed — bindings suppressed" : "cleared");
     }
