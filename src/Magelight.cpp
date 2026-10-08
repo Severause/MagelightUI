@@ -655,6 +655,7 @@ namespace Magelight {
         bool scaleDirty = false;    // render thread applies set_device_scale (0.28.5)
         bool rebuildPending = false;   // 0.31.7 RebuildViewAtScale: render thread releases the View (ApplyPendingRebuilds)
         bool rebuilt = false;          // released by a rebuild, not by hibernation (LoadViewLocked's log line)
+        float liveScale = 0.0f;        // the device scale the current View has (0 = no View); deviceScale is the wanted one
         bool shimsDirty = false;    // render thread re-installs bridge shims
         DomReadyFn onDomReady = nullptr;
         struct Listener { JsListenerFn fn = nullptr; JsListenerExFn fnEx = nullptr; void* user = nullptr; };
@@ -4287,7 +4288,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             InjectCsp(banner, NetLevel::File);
             v.ul->LoadHTML(banner.c_str());
         }
-        if (waking && v.rebuilt) SKSE::log::info("Magelight: view {} rebuilt at device scale {:.3f}", v.id, v.deviceScale);
+        v.liveScale = v.deviceScale;
+        if (v.rebuilt) SKSE::log::info("Magelight: view {} rebuilt at device scale {:.3f}", v.id, v.deviceScale);
         else if (waking) SKSE::log::info("Magelight: view {} woke from hibernation", v.id);
         v.rebuilt = false;
         // The UI-mode target loading late (a wake, or an entry while it waited in the queue): the focus marker ran
@@ -4408,6 +4410,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         v.texW = v.texH = 0;
         v.dormant = true;
         v.domReady = false;
+        v.liveScale = 0.0f;
         released.push_back(std::move(v.ul));
         v.ul = nullptr;
     }
@@ -4436,13 +4439,15 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // Render thread, after HibernateIdleViews and before MaterializeViews: RebuildViewAtScale. The View is released
-    // as hibernation releases it and the record wakes like a hibernated one, so a visible view gets its new View in
-    // this same frame (MaterializeViews loads a dormant visible view at once) created with initial_device_scale =
-    // the new deviceScale. Never set_device_scale on a laid-out page. A page hosting a Web Inspector is not rebuilt:
-    // the inspector is bound to the old View; its scale applies at its next load.
+    // as hibernation releases it and the record loads again in a new View created with initial_device_scale = the new
+    // deviceScale: a visible view in this same frame (MaterializeViews loads a dormant visible view at once), a hidden
+    // one at once too unless it hibernates or loads on show (then it stays dormant until shown). Never
+    // set_device_scale on a laid-out page. A page hosting a Web Inspector is not rebuilt (the inspector is bound to
+    // its View): it keeps its live scale.
     static void ApplyPendingRebuilds()
     {
         std::vector<ultralight::RefPtr<ultralight::View>> released;
+        std::vector<ViewId> rebuilt;
         {
             std::lock_guard<std::mutex> lk(s_viewsMutex);
             for (auto& vp : s_views) {
@@ -4451,8 +4456,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                 v.rebuildPending = false;
                 if (!v.ul || v.destroyPending) continue;   // released meanwhile: the next load uses deviceScale
                 if (s_inspectorOf.count(v.id)) {
-                    SKSE::log::warn("Magelight: view {} not rebuilt at device scale {:.3f} - it hosts a Web Inspector; "
-                                    "the scale applies at its next load", v.id, v.deviceScale);
+                    v.deviceScale = v.liveScale;   // hit tests, the IME caret and GetViewInfo keep the View's scale
+                    SKSE::log::warn("Magelight: view {} not rebuilt - it hosts a Web Inspector; it stays at device "
+                                    "scale {:.3f}", v.id, v.liveScale);
                     continue;
                 }
                 ReleaseViewKeepRecordLocked(v, released);
@@ -4460,11 +4466,26 @@ float4 ps_straight(VSOut i) : SV_Target {
                 v.boundsDirty = false;    // and at the current w/h
                 v.reloadedFlag = true;    // ViewReloaded follows the new page's DOM ready
                 v.rebuilt = true;
+                const bool waitForShow = !v.visible && (v.hibernateMs || v.loadOnShow);
+                if (!v.visible && !waitForShow) {   // never hibernates: reload now, hidden
+                    v.dormant = false;
+                    v.loadNow = true;
+                }
+                rebuilt.push_back(v.id);
                 SKSE::log::info("Magelight: view {} released for a rebuild at device scale {:.3f}{}", v.id,
-                    v.deviceScale, v.visible ? "" : " (hidden: it loads when shown)");
+                    v.deviceScale, waitForShow ? " (hidden: it loads when shown)" : "");
             }
         }
         released.clear();   // WebKit teardown outside the lock, like a destroy
+        // The old page's focused text field went with it: clear its keyboard claims as a '__textfocus' '0' would.
+        for (const ViewId id : rebuilt) {
+            VR::NoteTextFocus(id, false);
+            if (IsUIModeActive() && id == static_cast<ViewId>(s_uiModeView.load()) &&
+                id != static_cast<ViewId>(s_kbViewId.load())) {
+                ImeOnTextFocus(false);
+                ShowOwnKeyboard(false);
+            }
+        }
     }
 
     // Render thread: apply a pending SetViewBounds resize.
@@ -4478,6 +4499,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (v.scaleDirty) {   // 0.26.9 SetViewScale, applied here on the render thread
                 v.scaleDirty = false;
                 v.ul->set_device_scale(v.deviceScale > 0.f ? v.deviceScale : 1.f);
+                v.liveScale = v.deviceScale > 0.f ? v.deviceScale : 1.f;
             }
             if (v.w > 0 && v.h > 0) {
                 v.ul->Resize(static_cast<std::uint32_t>(v.w), static_cast<std::uint32_t>(v.h));
@@ -7316,14 +7338,18 @@ float4 ps_straight(VSOut i) : SV_Target {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return false;
-        // A loaded page already at this scale (no SetViewScale pending on it) has nothing to rebuild.
-        const bool same = std::fabs(v->deviceScale - scale) < 0.0005f && !v->scaleDirty;
         v->deviceScale = scale;
-        if (!v->ul) {   // not loaded yet, or dormant: the next load creates its View at this scale
+        if (!v->ul) {
+            // Not loaded yet, or dormant: the next load creates its View at this scale. A page that loaded before
+            // reloads then, so ViewReloaded follows its DOM ready as for any rebuild.
+            if (v->dormant) { v->reloadedFlag = true; v->rebuilt = true; }
             SKSE::log::info("Magelight: view {} device scale {:.3f} (applies at its next load)", view, scale);
             return true;
         }
-        if (same && !v->rebuildPending) {
+        if (std::fabs(v->liveScale - scale) < 0.0005f) {
+            // Already the View's scale: withdraw a pending rebuild or SetViewScale aimed elsewhere.
+            v->rebuildPending = false;
+            v->scaleDirty = false;
             SKSE::log::info("Magelight: view {} already at device scale {:.3f} - no rebuild", view, scale);
             return true;
         }

@@ -681,12 +681,18 @@ namespace MAGELIGHT_API {
         // its DOM ready, and your onDomReady, ViewDomReady and ViewReloaded
         // fire again; send whatever page state you set only at open again on
         // one of those. What the host keeps per view stays: bounds,
-        // visibility, UI mode (and its focus), listeners, cutout, cursor,
-        // sounds, session, VR placement, and an escape capture the old page
-        // set (a page that set one clears it before asking). A hidden view
-        // rebuilds when next shown; a view that has no page yet takes the
-        // scale at its first load; the scale it already has is a no-op. A
-        // page hosting a Web Inspector is not rebuilt (logged). Any thread.
+        // visibility, UI mode (and its focus; a focused text field's keyboard
+        // claims are dropped with the old page), listeners, cursor, sounds,
+        // session, VR placement (a placed panel keeps its pose), and an escape
+        // capture the old page set (a page that set one clears it before
+        // asking). The cutout stays in VIEW pixels, which are CSS px x scale:
+        // send it again at the new scale on ViewReloaded. A hidden view
+        // reloads at once, hidden, unless it hibernates (SetViewHibernate) or
+        // loads on show (SetViewLoadOnShow): then it reloads when next shown.
+        // A view that has no page yet takes the scale at its first load (no
+        // ViewReloaded); the scale its View already has is a no-op and
+        // withdraws a pending rebuild. A page hosting a Web Inspector is not
+        // rebuilt and keeps its scale (logged). Any thread.
         // QueryCapability("rebuildscale").
         Result (*RebuildViewAtScale)(ViewId view, float scale);
     };
