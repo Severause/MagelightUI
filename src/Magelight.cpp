@@ -64,6 +64,9 @@
 #include <Ultralight/platform/Logger.h>
 #include <Ultralight/platform/Platform.h>
 #include <Ultralight/platform/Surface.h>
+#include <Ultralight/platform/GPUDriver.h>
+
+#include "../gpu/MagelightGpuApi.h"   // the C ABI description only (MgGpuInfo); never driver internals (invariant 4)
 
 namespace Magelight {
 
@@ -363,9 +366,9 @@ namespace Magelight {
     static std::atomic<int>  s_imeCaretX{ -1 }, s_imeCaretY{ -1 }, s_imeCaretH{ 0 };   // client px; x<0 = unknown
 
     static std::filesystem::path s_runtimeDir;  // Data/SKSE/Plugins/Magelight
-    // Magelight.json "presentHook": "auto" (late composite only behind an earlier Present hook on a plain dxgi
-    // swapchain; never behind a proxy, never on VR), "late" (always try it), "vtable" (never). See
-    // InstallLatePresent.
+    // Magelight.json "presentHook": "auto" (late composite behind an earlier Present hook on a plain dxgi
+    // swapchain, or for Smooth Motion without engine mode; never on VR), "late" (try it wherever dxgi's own Present
+    // can be reached), "vtable" (never). See InstallLatePresent.
     static std::string s_presentHookMode = "auto";
     // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
     // at Present; "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
@@ -558,9 +561,9 @@ namespace Magelight {
     using MgGpuHasFn      = int (*)(void*);
     using MgGpuDrawFn     = void (*)(void*);
     using MgGpuSrvFn      = void* (*)(void*, std::uint32_t);
-    using MgGpuSamplesFn  = int (*)(void*, int);   // optional (MSAA); absent = no MSAA
-    // External textures (ImageSource) — optional exports; absent = images unsupported.
-    using MgGpuRegExtFn   = std::uint32_t (*)(void*, ID3D11ShaderResourceView*);
+    using MgGpuSamplesFn  = int (*)(void*, int);   // MSAA sample count
+    // External textures (ImageSource).
+    using MgGpuRegExtFn  = std::uint32_t (*)(void*, ID3D11ShaderResourceView*);
     using MgGpuSetExtFn   = int (*)(void*, std::uint32_t, ID3D11ShaderResourceView*);
     using MgGpuUnregExtFn = void (*)(void*, std::uint32_t);
 
@@ -576,6 +579,32 @@ namespace Magelight {
     static MgGpuUnregExtFn s_gpuUnregExt = nullptr;
     static void*          s_gpu = nullptr;       // backend handle (render thread)
     static bool           s_gpuActive = false;   // accelerated path in use
+
+    // Why a backend's build does not match this host's, or "" when it does. A mod manager can pair this
+    // Magelight.dll with another mod's MagelightGPU.dll, and one built for another Ultralight SDK reads every
+    // command at the wrong offsets.
+    static std::string GpuBuildMismatch(const MgGpuInfo* info)
+    {
+        if (!info) return "it has no version export (a Magelight before 0.31.6, or another build)";
+        if (info->size < sizeof(MgGpuInfo))
+            return std::format("its version record is {} bytes, this host reads {}", info->size, sizeof(MgGpuInfo));
+        if (info->contract != MGGPU_CONTRACT)
+            return std::format("it speaks GPU contract {}, this host {}", info->contract, MGGPU_CONTRACT);
+        const char* ul = info->ultralightVersion ? info->ultralightVersion : "?";
+        if (info->gpuStateSize != sizeof(ultralight::GPUState) || info->commandSize != sizeof(ultralight::Command)
+            || std::strcmp(ul, ULTRALIGHT_VERSION) != 0)
+            return std::format("it was built for Ultralight {} ({}-byte state, {}-byte commands), this host for {} "
+                               "({}-byte state, {}-byte commands)", ul, info->gpuStateSize, info->commandSize,
+                               ULTRALIGHT_VERSION, sizeof(ultralight::GPUState), sizeof(ultralight::Command));
+        return {};
+    }
+
+    static const MgGpuInfo* QueryGpuInfo(HMODULE gpu)
+    {
+        using MgGpuInfoFn = const MgGpuInfo* (*)();
+        const auto get = reinterpret_cast<MgGpuInfoFn>(GetProcAddress(gpu, "MgGpu_GetInfo"));
+        return get ? get() : nullptr;
+    }
 
     static void GpuLogBridge(const char* msg)
     {
@@ -1418,6 +1447,20 @@ namespace Magelight {
     static void CursorMenuWatchdog();                                                   // fwd (below)
     static std::atomic<bool> s_focusMenuPause{ false };   // flag for the NEXT open
     static std::atomic<bool> s_focusMenuFreeze{ false };  // the UI-mode view wants the world freeze (see ApplyFreezeWorld)
+    static std::atomic<bool> s_focusMenuHideSeen{ false };   // a kHide reached the menu while focused
+    static void CheckFocusMenuClosed();                       // fwd (below)
+
+    // The next main-thread FrameWork frame runs CheckFocusMenuClosed; this timer runs it too, for frames that
+    // never reach that point (a loading screen presenting from another thread, a dead renderer).
+    static void ArmFocusMenuCloseCheck()
+    {
+        try {
+            std::thread([]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                GameTask::Post([]() { CheckFocusMenuClosed(); });
+            }).detach();
+        } catch (...) {}   // FrameWork still checks
+    }
     static bool              s_focusMenuRegistered = false;
 
     class MagelightFocusMenu final : public RE::IMenu
@@ -1478,11 +1521,12 @@ namespace Magelight {
                     return RE::UI_MESSAGE_RESULTS::kHandled;
                 }
             } else if (msg.type == RE::UI_MESSAGE_TYPE::kHide) {
-                // Engine-initiated close (loading screen, force-close): UI
-                // mode must follow. Our own SetUIModeImpl(false) clears
-                // s_focused BEFORE queuing this hide, so it never re-enters.
+                // Engine-initiated close (loading screen, force-close): UI mode must follow, decided once the
+                // queue has run (CheckFocusMenuClosed): a hide of our own while UI mode is on (the held menu
+                // closed before a re-entry's show) leaves the menu open again by then.
                 if (s_focused.load()) {
-                    GameTask::Post([]() { SetUIMode(false); });
+                    s_focusMenuHideSeen.store(true);
+                    ArmFocusMenuCloseCheck();
                 }
             }
             return RE::IMenu::ProcessMessage(msg);
@@ -1609,7 +1653,7 @@ namespace Magelight {
         if (REL::Module::IsVR()) return false;
         if (s_engineMode || s_compositeMode == "ui") return true;
         if (s_compositeMode == "present") return false;
-        if (SmoothMotionLoaded()) return false;   // no engine mode: drawn late, inside dxgi's own Present
+        if (SmoothMotionLoaded()) return false;   // no engine mode: drawn at Present (late when InstallLatePresent can)
         return streamlineSwapChain || GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
     }
 
@@ -1948,6 +1992,68 @@ namespace Magelight {
         DropFreezeWorld(menu.get(), why);
     }
 
+    // The control set UI mode suspends (true) or gives back (false). storeState=false: a transient toggle
+    // that can never bake into a save; Console stays reachable as an escape hatch.
+    static void SetGameControlsSuspended(RE::ControlMap* cm, bool suspend)
+    {
+        using UEFlag = RE::ControlMap::UEFlag;
+        // Scoped enum without a free operator| — combine the bits directly.
+        const auto flags = static_cast<UEFlag>(
+            std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
+            std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
+            std::to_underlying(UEFlag::kFighting) | std::to_underlying(UEFlag::kPOVSwitch) |
+            std::to_underlying(UEFlag::kWheelZoom));
+        cm->ToggleControls(flags, !suspend, false);
+    }
+
+    // VR: UI mode closes on a controller button's PRESS (a chord, the B/Y Cancel), and the game acts on that
+    // button (its release, or a press it reads as new) once the focus menu has gone and the controls are
+    // back. So a VR exit with a button down that was pressed while the page was open keeps BOTH, the focus
+    // menu (menu context, which is what shields the opening press) and the suspended controls, until those
+    // buttons have been up kHeldReleaseSettleMs (FrameWork polls), or kHeldMaxMs at most (a timer that does
+    // not depend on FrameWork running). A button resting down from before the page opened, or pressed after
+    // the exit, does not count.
+    static std::atomic<std::uint32_t> s_heldGen{ 0 };        // the hold in force; 0 = none
+    static std::atomic<std::uint32_t> s_heldRuntime{ 0 };    // the VR::HeldButtons it waits for, by half
+    static std::atomic<std::uint32_t> s_heldEngine{ 0 };
+    static std::atomic<std::uint32_t> s_holdCounter{ 0 };
+    static bool                       s_exitWithoutHold = false;   // game thread: ForceExitUIMode
+    static std::atomic<std::uint64_t> s_uiModeEnteredMs{ 0 };      // GetTickCount64 of the last UI-mode entry
+    static constexpr std::uint64_t    kHeldReleaseSettleMs = 100;  // a few frames: the engine reads the release first
+    static constexpr std::uint32_t    kHeldMaxMs = 1500;
+
+    // Ends hold `gen` (a later hold is left alone). Game thread.
+    static void EndControlsHold(const char* why, std::uint32_t gen)
+    {
+        if (!gen || !s_heldGen.compare_exchange_strong(gen, 0)) return;
+        if (s_focused.load()) return;   // UI mode came back: it owns the menu and the controls again
+        if (s_focusMenuRegistered)
+            if (auto* queue = RE::UIMessageQueue::GetSingleton())
+                queue->AddMessage(MagelightFocusMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+        if (auto* cm = RE::ControlMap::GetSingleton()) SetGameControlsSuspended(cm, false);
+        SKSE::log::info("Magelight: controls restored ({})", why);
+    }
+
+    // False when the timer cannot start: the caller then exits as usual, never a hold nothing ends.
+    static bool ArmControlsHold(const VR::HeldButtons& held)
+    {
+        std::uint32_t gen = s_holdCounter.fetch_add(1) + 1;
+        if (!gen) gen = s_holdCounter.fetch_add(1) + 1;
+        try {
+            std::thread([gen]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kHeldMaxMs));
+                GameTask::Post([gen]() { EndControlsHold("hold time limit reached", gen); });
+            }).detach();
+        } catch (...) {
+            SKSE::log::warn("Magelight: could not start the controls-hold timer; controls restored at once");
+            return false;
+        }
+        s_heldRuntime.store(held.runtime);
+        s_heldEngine.store(held.engine);
+        s_heldGen.store(gen);
+        return true;
+    }
+
     static void SetUIModeImpl(bool on, bool hideView, bool pauseGame, bool noTextEntry)
     {
         if (s_focused.load() == on) return;
@@ -1962,6 +2068,8 @@ namespace Magelight {
         }
         SKSE::log::info("Magelight: SetUIMode({}{}) begin", on, (on && pauseGame) ? ", paused" : "");
         s_focused.store(on);
+        s_focusMenuHideSeen.store(false);   // a hide from an earlier session is no news about this one
+        if (on) s_uiModeEnteredMs.store(GetTickCount64());
         if (!on && s_hwnd) { s_imeCaretX.store(-1); PostMessageW(s_hwnd, kImeCtlMsg, 0, 0); }   // IME follows UI mode off
         // UI mode shows its target view; other views (HUD badges etc.) keep
         // their own visibility.
@@ -1979,6 +2087,11 @@ namespace Magelight {
             }
             for (ViewId i : inspectors) ShowView(i, false);
         }
+        // See s_heldGen. Entering again ends a pending hold here: its focus menu is still open.
+        const VR::HeldButtons heldAtExit = (!on && !s_exitWithoutHold && VR::IsVRRuntime())
+            ? VR::HeldButtonsPressedSince(s_uiModeEnteredMs.load()) : VR::HeldButtons{};
+        const bool holdForRelease = heldAtExit.Any() && ArmControlsHold(heldAtExit);
+        const bool holdCancelled = on && s_heldGen.exchange(0) != 0;
 
         if (auto* queue = RE::UIMessageQueue::GetSingleton()) {
             queue->AddMessage(RE::CursorMenu::MENU_NAME,
@@ -1992,8 +2105,12 @@ namespace Magelight {
                 } else {
                     ApplyFreezeWorld("UI mode exit");   // s_focused is already off: drops the flag before the hide
                 }
-                queue->AddMessage(MagelightFocusMenu::MENU_NAME,
-                    on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
+                // A held menu closes first, so the show builds a new one with this entry's pause flag.
+                if (holdCancelled)
+                    queue->AddMessage(MagelightFocusMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+                if (on || !holdForRelease)
+                    queue->AddMessage(MagelightFocusMenu::MENU_NAME,
+                        on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
             }
         }
         SKSE::log::info("Magelight: cursor-menu {} queued{}", on ? "show" : "hide",
@@ -2002,16 +2119,7 @@ namespace Magelight {
         HideVanillaCursor(on);
         if (!on) s_mouseDown.store(false);
         if (auto* cm = RE::ControlMap::GetSingleton()) {
-            using UEFlag = RE::ControlMap::UEFlag;
-            // Scoped enum without a free operator| — combine the bits directly.
-            const auto flags = static_cast<UEFlag>(
-                std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
-                std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
-                std::to_underlying(UEFlag::kFighting) | std::to_underlying(UEFlag::kPOVSwitch) |
-                std::to_underlying(UEFlag::kWheelZoom));
-            // storeState=false: a transient toggle that can never bake into a
-            // save. Console stays reachable as an escape hatch.
-            cm->ToggleControls(flags, !on, false);
+            if (on || !holdForRelease) SetGameControlsSuspended(cm, on);
             // Text-entry flag while UI mode is on (the engine's own text
             // fields do the same through SkyUI's AllowTextInput). SKSE
             // suppresses Papyrus OnKeyDown while it is raised, and the
@@ -2033,7 +2141,8 @@ namespace Magelight {
                 s_textEntryRaised = false;
             }
         }
-        SKSE::log::info("Magelight: controls {}", on ? "suspended" : "restored");
+        SKSE::log::info("Magelight: controls {}", on ? "suspended"
+                        : holdForRelease ? "held off until the controller buttons are released" : "restored");
         // OpenComposite's own menu laser: its SKSE plugin sets the window
         // property OC_MENU_ACTIVE whenever an engine menu is open (ours
         // counts), and OCU draws a second beam over our panels. Clear it while
@@ -2080,6 +2189,17 @@ namespace Magelight {
         } __except (LogSehAndDisable("SetUIMode", GetExceptionCode(),
                         (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
         }
+    }
+
+    // A kHide reached the focus menu while UI mode was on: if the menu is still closed once the queue has run,
+    // the game closed it and UI mode follows. Main thread (FrameWork) or a game task.
+    static void CheckFocusMenuClosed()
+    {
+        if (!s_focusMenuHideSeen.exchange(false) || !s_focused.load() || !s_focusMenuRegistered) return;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || ui->IsMenuOpen(MagelightFocusMenu::MENU_NAME)) return;
+        SKSE::log::info("Magelight: the focus menu was closed by the game - leaving UI mode");
+        GameTask::Post([]() { SetUIMode(false); });
     }
 
     // OpenComposite Unleashed's virtual keyboard posts every character to the
@@ -2761,7 +2881,13 @@ namespace Magelight {
         // Optional GPU backend. Loaded AFTER the runtime so its (namespaced)
         // Ultralight imports bind to the modules already in the process.
         // Missing/failed = CPU surface fallback, never fatal.
-        if (HMODULE gpu = LoadLibraryW((s_runtimeDir / L"MagelightGPU.dll").c_str())) {
+        if (HMODULE gpu = LoadLibraryW((s_runtimeDir / L"MagelightGPU.dll").c_str()); !gpu) {
+            SKSE::log::info("Magelight: no GPU backend (MagelightGPU.dll not found, GetLastError={}) — CPU fallback",
+                GetLastError());
+        } else if (const std::string mismatch = GpuBuildMismatch(QueryGpuInfo(gpu)); !mismatch.empty()) {
+            SKSE::log::error("Magelight: MagelightGPU.dll does not match this Magelight.dll - {}. Pages draw on "
+                             "the CPU; another mod's copy of MagelightGPU.dll is installed over this one", mismatch);
+        } else {
             s_gpuCreate    = reinterpret_cast<MgGpuCreateFn>(GetProcAddress(gpu, "MgGpu_Create"));
             s_gpuDestroy   = reinterpret_cast<MgGpuDestroyFn>(GetProcAddress(gpu, "MgGpu_Destroy"));
             s_gpuGetDriver = reinterpret_cast<MgGpuGetDrvFn>(GetProcAddress(gpu, "MgGpu_GetGPUDriver"));
@@ -2772,19 +2898,15 @@ namespace Magelight {
             s_gpuRegExt    = reinterpret_cast<MgGpuRegExtFn>(GetProcAddress(gpu, "MgGpu_RegisterExternalTexture"));
             s_gpuSetExtSrv = reinterpret_cast<MgGpuSetExtFn>(GetProcAddress(gpu, "MgGpu_SetExternalTextureSRV"));
             s_gpuUnregExt  = reinterpret_cast<MgGpuUnregExtFn>(GetProcAddress(gpu, "MgGpu_UnregisterExternalTexture"));
-            if (!(s_gpuRegExt && s_gpuSetExtSrv && s_gpuUnregExt)) {
-                s_gpuRegExt = nullptr;  // all-or-nothing: texture images unsupported
-                SKSE::log::warn("Magelight: GPU backend predates external textures — texture images unavailable");
-            }
-            if (s_gpuCreate && s_gpuDestroy && s_gpuGetDriver && s_gpuHas && s_gpuDraw && s_gpuSrv) {
-                SKSE::log::info("Magelight: GPU backend loaded (MagelightGPU.dll)");
+            // Every contract-1 backend exports all of them; one that does not is a broken build.
+            if (s_gpuCreate && s_gpuDestroy && s_gpuGetDriver && s_gpuHas && s_gpuDraw && s_gpuSrv && s_gpuSamples
+                && s_gpuRegExt && s_gpuSetExtSrv && s_gpuUnregExt) {
+                SKSE::log::info("Magelight: GPU backend loaded (MagelightGPU.dll, contract {}, Ultralight {})",
+                                MGGPU_CONTRACT, ULTRALIGHT_VERSION);
             } else {
                 SKSE::log::error("Magelight: MagelightGPU.dll is missing exports — CPU fallback");
                 s_gpuCreate = nullptr;
             }
-        } else {
-            SKSE::log::info("Magelight: no GPU backend (MagelightGPU.dll not found, GetLastError={}) — CPU fallback",
-                GetLastError());
         }
 
         s_runtimeReady.store(true);
@@ -2798,7 +2920,7 @@ namespace Magelight {
     public:
         void LogMessage(ultralight::LogLevel, const ultralight::String& message) override
         {
-            SKSE::log::info("[UL] {}", message.utf8().data());
+            SKSE::log::info("[UL] {}", SysInfo::RedactProfile(message.utf8().data()));
         }
     };
     static SpdLogger s_ulLogger;
@@ -4180,13 +4302,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                 if (auto* drv = static_cast<ultralight::GPUDriver*>(s_gpuGetDriver(s_gpu))) {
                     // The sample count applies to targets created from now on, so it is set before the renderer
                     // exists: no view (staggered or not) can have made one yet.
-                    if (s_gpuSamples) {
-                        const int got = s_gpuSamples(s_gpu, s_msaa);
-                        if (got == s_msaa) SKSE::log::info("Magelight: MSAA {}x", got);
-                        else SKSE::log::info("Magelight: MSAA {}x (Magelight.json asks {}x, which this graphics card cannot do for page targets)", got, s_msaa);
-                    } else {
-                        SKSE::log::info("Magelight: the GPU backend predates MSAA — page shapes draw without anti-aliasing");
-                    }
+                    const int got = s_gpuSamples(s_gpu, s_msaa);
+                    if (got == s_msaa) SKSE::log::info("Magelight: MSAA {}x", got);
+                    else SKSE::log::info("Magelight: MSAA {}x (Magelight.json asks {}x, which this graphics card cannot do for page targets)", got, s_msaa);
                     ultralight::Platform::instance().set_gpu_driver(drv);
                     s_gpuActive = true;
                 }
@@ -5633,6 +5751,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         static int uiFrames = 0;
         static int offFrames = -1;   // frames since the last exit; -1 = no exit sample pending
         if (s_focused.load()) {
+            if (s_focusMenuHideSeen.load()) CheckFocusMenuClosed();
             ++uiFrames;
             offFrames = -1;
             if (uiFrames == 3 || uiFrames == 30) {
@@ -5654,6 +5773,21 @@ float4 ps_straight(VSOut i) : SV_Target {
                 GameTask::Post([]() { if (s_focused.load()) ApplyFreezeWorld("reconcile"); });
             }
         } else {
+            if (const std::uint32_t gen = s_heldGen.load()) {
+                static std::uint32_t seenGen = 0, postedGen = 0;
+                static std::uint64_t upSinceMs = 0;   // 0 = a button of the hold is down
+                if (gen != seenGen) { seenGen = gen; upSinceMs = 0; }
+                if (gen != postedGen) {
+                    const std::uint64_t now = GetTickCount64();
+                    const VR::HeldButtons held = VR::HeldButtonsNow();
+                    if ((held.runtime & s_heldRuntime.load()) | (held.engine & s_heldEngine.load())) upSinceMs = 0;
+                    else if (!upSinceMs) upSinceMs = now;
+                    if (upSinceMs && now - upSinceMs >= kHeldReleaseSettleMs) {
+                        postedGen = gen;
+                        GameTask::Post([gen]() { EndControlsHold("controller buttons released", gen); });
+                    }
+                }
+            }
             if (uiFrames > 0) {
                 offFrames = 0;
                 // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
@@ -6354,7 +6488,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // dxgi's swapchain vtable when the game's swapchain is a proxy (ENB's d3d11.dll wraps it): a throwaway
     // WARP device and swapchain made through the SYSTEM d3d11.dll, so a d3d11.dll proxy does not see them. A
-    // dxgi.dll proxy would (system d3d11 binds to the loaded dxgi.dll); the caller's IsSystemModule refuses it.
+    // dxgi.dll proxy would (system d3d11 binds to the loaded dxgi.dll), so the caller never calls this behind one.
     // The vtable is shared by every dxgi swapchain; only its address is kept.
     static void* const* DxgiSwapChainVtable()
     {
@@ -6397,9 +6531,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         return out;
     }
 
-    // "auto" turns it on only behind an earlier Present hook on a plain dxgi swapchain, never on VR. Behind a
-    // proxy (ENB's or ReShade's d3d11.dll, Skyrim Upscaler) only "late" looks for dxgi's own Present: the
-    // throwaway device it takes for that killed the game at start behind ENB.
+    // "auto" turns it on behind an earlier Present hook on a plain dxgi swapchain, and for Smooth Motion without
+    // engine mode when d3d11.dll is the system one; never on VR. Behind a swapchain wrapper (a d3d11.dll proxy such
+    // as ENB's, Streamline, Skyrim Upscaler) dxgi's own Present is found through a throwaway device, which only
+    // "late" and Smooth Motion take: it killed the game at start behind ENB. Behind a dxgi.dll proxy (ReShade's)
+    // nothing takes it: the device binds to the proxy, so the search could only find the proxy's swapchain again.
     static void InstallLatePresent(void* const* vtbl, void* const* vtbl1)
     {
         const std::string& mode = s_presentHookMode;
@@ -6415,8 +6551,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             return;
         }
         const bool earlierHook = ModuleAt(reinterpret_cast<const void*>(s_origPresent)) != ModuleAt(vtbl);
-        // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind ENB
-        // or ReShade's d3d11.dll: the throwaway device the dxgi search takes killed the game at start there.
+        // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind
+        // ENB's or ReShade's d3d11.dll: the throwaway device the dxgi search takes killed the game at start there.
         const bool smoothMotion = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded()
             && IsSystemModule(GetModuleHandleW(L"d3d11.dll"), L"d3d11.dll");
         if (smoothMotion)
@@ -6432,6 +6568,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (mode != "late" && !smoothMotion) {
                 SKSE::log::info("Magelight: presentHook 'auto' - the game swapchain is a proxy ({}), compositing in "
                                 "the vtable hook", ModuleOf(vtbl));
+                return;
+            }
+            // The throwaway device below binds to whatever dxgi.dll is loaded, so behind a dxgi.dll proxy the search
+            // can only find the proxy's swapchain again; do not take the device for nothing.
+            if (!IsSystemModule(GetModuleHandleW(L"dxgi.dll"), L"dxgi.dll")) {
+                SKSE::log::warn("Magelight: late composite unavailable - the loaded dxgi.dll is not the system one (a "
+                                "proxy such as ReShade's), so dxgi's own Present cannot be reached");
                 return;
             }
             // A proxy's swapchain wraps a real dxgi one: detour dxgi's own functions, found through a throwaway
@@ -7054,8 +7197,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     void ForceExitUIMode()
     {
         // Safety valve for load boundaries: never carry a suspended-controls /
-        // cursor-up state across a save load. Game thread.
+        // cursor-up state across a save load, a VR button hold included. Game thread.
+        s_exitWithoutHold = true;
         SetUIMode(false);
+        s_exitWithoutHold = false;
+        EndControlsHold("load boundary", s_heldGen.load());
     }
 
     void EnterUIMode(ViewId view) { EnterUIModeEx(view, false); }

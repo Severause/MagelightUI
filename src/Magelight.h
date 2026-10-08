@@ -27,10 +27,10 @@ namespace Magelight {
     // Arm the first-chance vectored exception logger (diagnostics).
     void InstallCrashTelemetry();
 
-    // VR laser (MagelightVR.cpp, present thread) injects synthetic pointer
+    // VR laser (src/MagelightVR/Laser.cpp, present thread) injects synthetic pointer
     // input through the same thread-safe queue DrainInputQueue drains. Typed
     // with stdint, not the Win32 aliases, because this header is parsed before
-    // <windows.h> in the VR translation unit. msg is a WM_* value; w/l are the
+    // <windows.h> in the VR translation units. msg is a WM_* value; w/l are the
     // WPARAM/LPARAM payload. Mutex-guarded; callable from the present thread.
     void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam);
 

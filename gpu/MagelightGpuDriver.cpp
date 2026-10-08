@@ -793,6 +793,18 @@ namespace {
 
 extern "C" {
 
+    const MgGpuInfo* MgGpu_GetInfo()
+    {
+        static const MgGpuInfo info{
+            static_cast<std::uint32_t>(sizeof(MgGpuInfo)),
+            MGGPU_CONTRACT,
+            static_cast<std::uint32_t>(sizeof(ultralight::GPUState)),
+            static_cast<std::uint32_t>(sizeof(ultralight::Command)),
+            ULTRALIGHT_VERSION,
+        };
+        return &info;
+    }
+
     void* MgGpu_Create(ID3D11Device* device, ID3D11DeviceContext* context, MgGpuLogFn log)
     {
         if (!device || !context) return nullptr;

@@ -83,7 +83,7 @@ Diagnostics and build hygiene, after a review of langfod's fork.
   the game's own marked. DXGI is loaded from the system folder by full path, so a proxy `dxgi.dll` is
   never asked, and no game device is touched.
 - **Paths in the log show the user folder as `%USERPROFILE%`**, so a posted log does not name the
-  Windows user.
+  Windows user. Ultralight's own startup lines (its cache folder) are covered too.
 - **A Windows user name the ANSI code page cannot spell no longer ends the game at load.** The log file
   was opened by a narrow path, which throws for such a name, and the failure ended the game; it is now
   opened by its wide path, and every logged path is written as UTF-8.
@@ -94,6 +94,17 @@ Diagnostics and build hygiene, after a review of langfod's fork.
   stack overflow gets the one line only, and when the overflowed thread has too little stack left to
   write it, another thread writes it a moment later: logging there could overflow it again and kill a
   process that handles it. CrashLogger's own probes while it writes a report are skipped.
+- **A `MagelightGPU.dll` from another build is refused.** The GPU backend now reports its C ABI revision,
+  the size of Ultralight's draw state and commands, and the Ultralight version it was built against
+  (`MgGpu_GetInfo`), and the host compares them with its own. A mod manager could pair this
+  `Magelight.dll` with another mod's `MagelightGPU.dll`; one built for another Ultralight SDK reads every
+  draw command at the wrong offsets. A mismatch, including any `MagelightGPU.dll` from before 0.31.6, is
+  one log line, and pages draw on the CPU instead.
+- **No throwaway device behind a `dxgi.dll` proxy (ReShade).** To draw inside dxgi's own Present behind a
+  swapchain wrapper (`presentHook: "late"`, or Smooth Motion with engine mode off), Magelight finds it
+  through a throwaway device. Behind a `dxgi.dll` proxy that device binds to the proxy, so the search
+  could only find the proxy's swapchain again: it is now skipped with one log line, and pages draw in the
+  vtable hook.
 - Build: the Ultralight headers are a system include (their hundred-odd unreferenced-parameter
   warnings are gone), CommonLib is a precompiled header for the host (an edit to `Magelight.cpp`
   rebuilds in about 8 s instead of 15), CommonLib is built without xbyak, the unused `directxtex` and
@@ -139,6 +150,21 @@ Found while testing Magelight against the Ultralight 2.0 beta; every item is a 1
   claim was wrong; `.mjs` and query strings are why Magelight has its own), the request hook runs on
   the render thread, and with no `cache_path` WebKit writes page storage under the game root, not in
   memory.
+
+## 0.31.4
+
+- **VR: closing a page with a controller button no longer hands that button to the game.** A page
+  closes on the press of the button that closes it (a mod's chord such as Trigger + Y, or the B/Y
+  back button), and the game got its menu context and
+  controls back while the button was still held, so it acted on it: closing with Trigger + Y also
+  did whatever Y does in the game. When a page closes with a controller button down that was
+  pressed while the page was open, Magelight's engine menu and the suspended controls now stay
+  until those buttons have been up for 100 ms (1.5 s at most; a button resting down from before
+  the page opened, or pressed after the close, does not count, and a paused page keeps the game
+  paused that long). The log says so: `controls held off until the controller
+  buttons are released`, then `controls restored (controller buttons released)`. A load ends the
+  hold at once. Flat play is unchanged.
+- The VR presenter is now six source files (`src/MagelightVR/`) instead of one; no behaviour change.
 
 ## 0.31.3
 
