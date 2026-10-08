@@ -71,7 +71,14 @@ add_library(${PROJECT_NAME} SHARED
     src/MagelightSound.cpp       # host-played UI sounds
     src/MagelightDevWatch.cpp
     src/MagelightPapyrus.cpp
-    src/MagelightVR.cpp          # Skyrim VR presenter (docs/VR_PRESENTER.md); runtime-gated, no openvr link
+    # Skyrim VR presenter (docs/VR_PRESENTER.md; shared state in src/MagelightVR/State.h);
+    # runtime-gated, no openvr link
+    src/MagelightVR/Runtime.cpp
+    src/MagelightVR/Overlays.cpp
+    src/MagelightVR/Laser.cpp
+    src/MagelightVR/Input.cpp
+    src/MagelightVR/Bindings.cpp
+    src/MagelightVR/Lifecycle.cpp
     src/MagelightFonts.cpp       # the font loader whose last resort always loads
     src/MagelightSysInfo.cpp     # game, Windows, CPU and GPU lines at the top of the log
     src/MagelightFonts.rc        # the bundled fallback font (src/fonts/DejaVuSans.ttf)
@@ -138,7 +145,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive- /utf-8 /Zc:preprocessor)
+    # /we4211: a `static` redefinition of a name declared extern is an error, not a
+    # warning that quietly gives that translation unit its own copy.
+    target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive- /utf-8 /Zc:preprocessor /we4211)
 endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

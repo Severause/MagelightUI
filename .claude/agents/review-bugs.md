@@ -5,7 +5,7 @@ Skyrim's D3D11 device, plus a Vite/React demo frontend and a desktop harness. Re
 first. These classes have each shipped or been caught in the field — treat matches as
 high-confidence.
 
-## Host (src/Magelight.cpp)
+## Host (src/Magelight.cpp, and the VR presenter in src/MagelightVR/)
 
 - **D3D state hygiene**: `StateBackup::Capture/Neutralize/Restore` bracket everything we do to
   the game's immediate context per frame. A new draw or a new state set (shaders, RTs, samplers,

@@ -200,7 +200,11 @@ movement/looking/activate/fighting…); a finer approach masks combat
 controls only while the trigger is over a panel ("masking combat controls
 (trigger on panel)"). We start with the existing whole-UI-mode suspension
 and refine only if VR users need to keep moving while a HUD-class view is
-up. Whatever we do goes through `GameTask::Post` (section 4).
+up. Whatever we do goes through `GameTask::Post` (section 4). A page closes on
+a button's press, so an exit with a controller button down that was pressed
+while the page was open keeps the focus menu and the suspended controls until
+those buttons have been up 100 ms (1.5 s at most; `EndControlsHold`): otherwise
+the game acts on the button that closed the page.
 
 **Keyboard/text.** UI mode raises the engine text-entry flag; on VR that is
 precisely the signal that pops OCU's auto keyboard and SteamVR's overlay
@@ -250,10 +254,13 @@ restart) drops every overlay and re-initialises next frame.
 
 ## 8. Build and packaging
 
-- `src/MagelightVR.cpp` joins the host target; no new link libraries
-  (`vr::` types come from `openvr.h`, already propagated by the NG port into
-  `vcpkg_installed/.../include`). The header is included ONLY by
-  `MagelightVR.cpp`.
+- `src/MagelightVR/` (Runtime, Overlays, Laser, Input, Bindings, Lifecycle)
+  joins the host target; no new link libraries (`vr::` types come from
+  `openvr.h`, already propagated by the NG port into
+  `vcpkg_installed/.../include`). The header is included ONLY through
+  `src/MagelightVR/State.h`, which declares what those files share and the
+  rules for it (which file inserts and erases overlay records, which thread
+  each part runs on).
 - `ENABLE_SKYRIM_VR=1` is already on for every consumer of the NG target;
   the VR code is guarded by runtime checks, not `#ifdef`, so the flat build
   compiles and links it too (as SA's `VRImmersiveMode` does).
@@ -371,7 +378,7 @@ BOUNDS-CHECKED against `k_unTrackedDeviceIndexInvalid`/max (an off controller
 returns 0xFFFFFFFF → OOB pose read → CTD, the most likely first-cut crash);
 `heightM = widthM * texH/texW`; topmost-first hit (reverse frame order, matches
 the host hitTest); pixel injected through a new `Magelight::QueueSyntheticInput`
-bridge (the file-static `QueueInput` is invisible to the VR TU); trigger drives
+bridge (the file-static `QueueInput` is invisible to the VR translation units); trigger drives
 clicks off the LEVEL not the edge counter; the sink swallows the VR trigger +
 thumbstick while a page is focused so they can't also fire the weapon / turn
 the player (B/Y stays linked for the exit). A fixed `kAimPitchDeg = -35°`

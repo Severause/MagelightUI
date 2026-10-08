@@ -126,6 +126,21 @@ Found while testing Magelight against the Ultralight 2.0 beta; every item is a 1
   the render thread, and with no `cache_path` WebKit writes page storage under the game root, not in
   memory.
 
+## 0.31.4
+
+- **VR: closing a page with a controller button no longer hands that button to the game.** A page
+  closes on the press of the button that closes it (a mod's chord such as Trigger + Y, or the B/Y
+  back button), and the game got its menu context and
+  controls back while the button was still held, so it acted on it: closing with Trigger + Y also
+  did whatever Y does in the game. When a page closes with a controller button down that was
+  pressed while the page was open, Magelight's engine menu and the suspended controls now stay
+  until those buttons have been up for 100 ms (1.5 s at most; a button resting down from before
+  the page opened, or pressed after the close, does not count, and a paused page keeps the game
+  paused that long). The log says so: `controls held off until the controller
+  buttons are released`, then `controls restored (controller buttons released)`. A load ends the
+  hold at once. Flat play is unchanged.
+- The VR presenter is now six source files (`src/MagelightVR/`) instead of one; no behaviour change.
+
 ## 0.31.3
 
 - **A PC whose last-resort font cannot be loaded no longer turns the UI off.** When none of the
