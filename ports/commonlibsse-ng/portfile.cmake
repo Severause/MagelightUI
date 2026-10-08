@@ -24,6 +24,8 @@
 # into runtime VR_GetGenericInterface lookups; a mismatch makes the VR
 # presenter go dormant silently. openvr stays at ebdea152 (SDK 1.0.10).
 
+vcpkg_check_linkage(ONLY_STATIC_LIBRARY)
+
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO MinLL/CommonLibVR
@@ -71,7 +73,8 @@ vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
     OPTIONS
         -DBUILD_TESTS=OFF
-        -DSKSE_SUPPORT_XBYAK=ON
+        # No xbyak: the consumers' only trampoline use, write_call, does not need it.
+        -DSKSE_SUPPORT_XBYAK=OFF
         # SE + AE + VR universal build (openvr staged above; VR handle-id fix
         # applied above). The plugin delay-loads openvr_api.dll so the flat
         # SE/AE build has no hard dependency on it — see Native/CMakeLists.txt.

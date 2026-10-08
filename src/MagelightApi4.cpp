@@ -22,6 +22,7 @@
 #include <SKSE/SKSE.h>
 
 #include "Magelight.h"
+#include "MagelightSysInfo.h"
 #include "MagelightApi4.h"
 #include "MagelightSound.h"
 #include "MagelightVR.h"
@@ -269,7 +270,7 @@ namespace Magelight::Api4 {
             if (f << lower << '\n')
                 SKSE::log::info("Magelight[v4]: storage jar '{}' recorded as a plugin's", lower);
             else
-                SKSE::log::warn("Magelight[v4]: could not record storage jar '{}' in {}", lower, file.string());
+                SKSE::log::warn("Magelight[v4]: could not record storage jar '{}' in {}", lower, Magelight::SysInfo::ForLog(file));
         }
 
         // s_mutex held. A script-owned mod whose storage jar a plugin's pages

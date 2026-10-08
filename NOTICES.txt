@@ -41,8 +41,8 @@ Please see the accompanying NOTICES.txt for full text.
    its own DLL behind a C ABI so the LGPL applies to that library alone.
    Corresponding source: the gpu/ folder of the Magelight UI repository at
    the tag of this release, built by CMakeLists.txt and build.ps1 in the
-   same tree. For Magelight UI 0.31.5 that is tag v0.31.5:
-   https://github.com/Severause/MagelightUI/tree/v0.31.5/gpu
+   same tree. For Magelight UI 0.31.6 that is tag v0.31.6:
+   https://github.com/Severause/MagelightUI/tree/v0.31.6/gpu
    You may replace MagelightGPU.dll with your own build. A replacement must
    import Magelight1.dll and Magelight1Core.dll rather than Ultralight.dll
    and UltralightCore.dll; build.ps1 makes that rename for its own build.
@@ -65,7 +65,6 @@ Please see the accompanying NOTICES.txt for full text.
    - MinHook, with the Hacker Disassembler Engine (BSD 2-Clause)
      https://github.com/TsudaKageyu/minhook
    - rapidcsv (BSD 3-Clause)  https://github.com/d99kris/rapidcsv
-   - Xbyak (BSD 3-Clause)  https://github.com/herumi/xbyak
    - DirectXMath and DirectX Tool Kit's SimpleMath, Microsoft (MIT);
      DirectXMath is also compiled into MagelightGPU.dll
    - The DejaVu Sans font, embedded unmodified in Magelight.dll (Bitstream

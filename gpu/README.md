@@ -31,5 +31,9 @@ Modifications vs upstream (marked `// MG:` in source):
 - A draw whose source texture is the texture behind the bound render buffer leaves that sampler slot null:
   binding it resolved the MSAA target mid-layer and dropped the layer's last draws (a missing border segment).
 - MessageBox error reporting replaced with a host-provided log callback.
+- `MgGpu_GetInfo` reports what the DLL was built with: the C ABI revision (`MGGPU_CONTRACT` in
+  `MagelightGpuApi.h`), `sizeof(GPUState)`, `sizeof(Command)` and the SDK's `ULTRALIGHT_VERSION`. The
+  host refuses a DLL whose values differ from its own. Bump `MGGPU_CONTRACT` whenever an `MgGpu_*`
+  signature or meaning changes; append to `MgGpuInfo`, never reorder it.
 - Shaders always load from the embedded fxc bytecode (no file-system path).
 - Everything else is kept as close to upstream as practical for diffability.

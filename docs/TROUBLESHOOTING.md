@@ -6,7 +6,11 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v0.31.5 loading`).
+version (`Magelight v0.31.6 loading`); the lines after it name the game (SE, AE or VR, its version and
+SKSE's), Windows (or the Wine under Proton), the CPU and RAM, and, once the game's data has loaded,
+every graphics adapter with its driver version, the one the game renders on marked. Paths in the
+log show your user folder as `%USERPROFILE%`. Each line starts with the date and time, a level
+letter (`I`, `W`, `E`) and the thread id.
 
 ## Nothing from any Magelight mod appears
 
@@ -102,7 +106,9 @@ A mod such as SeverActions can ship its own copy of Magelight. If you also insta
 by itself, the copy that wins the file conflict is the one that runs; in MO2 that is the mod
 lower in the left pane. Let the newer copy win, and let it win every file: a `Magelight.dll` from one
 copy over the runtime DLLs of another is refused at load (0.31.5; the log names both versions)
-and the host stays off. Line one of `Magelight.log` names the running version, and a "Magelight
+and the host stays off. A `MagelightGPU.dll` built for another Ultralight SDK or GPU contract, or from
+before 0.31.6, is refused too (0.31.6): pages still show, drawn on the CPU, which costs frame time, and
+the log says `MagelightGPU.dll does not match this Magelight.dll - ...` with what differs. Line one of `Magelight.log` names the running version, and a "Magelight
 UI needs updating" page means an older copy won.
 
 ## Text fields do not type / paste
@@ -197,7 +203,7 @@ it read, or says that defaults are in effect.
 | `consoleLog` | `"warnings"` | Which page console messages go into the log (0.31.0): `none`, `errors`, `warnings` (warnings and errors) or `all` (`console.log`, `info` and `debug` too). Unset, it is `all` with `devMode` and `warnings` otherwise. See "A page's console lines are missing from the log" |
 | `logLevel` | `"info"` | `trace`, `debug`, `info`, `warn` or `error` |
 | `forceCpu` | `false` | Skip the GPU driver and use Ultralight's CPU renderer |
-| `presentHook` | `"auto"` | Where pages are drawn onto the frame. `auto` draws inside dxgi's own Present only when another mod hooked Present first (an upscaler, for one) and could otherwise draw over the pages, never behind a d3d11.dll or dxgi proxy (ENB, ReShade, Skyrim Upscaler) and never on VR. `late` always does, `vtable` never. Try `late` when a page opens (sound, paused game) but stays invisible, but not with ENB: behind ENB's `d3d11.dll`, `late` can crash the game at start |
+| `presentHook` | `"auto"` | Where pages are drawn onto the frame. `auto` draws inside dxgi's own Present when another mod hooked Present first on a plain dxgi swapchain (an upscaler, for one) and could otherwise draw over the pages, or for NVIDIA Smooth Motion when engine mode is off and d3d11.dll is not a proxy such as ENB's; never on VR. `late` tries it wherever dxgi's own Present can be reached: not behind a dxgi.dll proxy such as ReShade's, where it logs why and draws in the vtable hook. `vtable` never does. Try `late` when a page opens (sound, paused game) but stays invisible, but not with ENB: behind ENB's `d3d11.dll`, `late` can crash the game at start |
 | `composite` | `"auto"` | The stage pages are drawn at. `present` draws them over the finished frame at Present; `ui` draws them in the game's own UI pass, as part of the game's menus (click-through HUD pages stay at Present). `auto` uses `ui` when Skyrim Upscaler is installed or the game's swapchain is NVIDIA Streamline's (`sl.interposer.dll`: Skyrim Upscaler, Community Shaders' and Open Shaders' upscaling), since a HUD Fix keeps the game's UI apart from the scene and frame generation drops anything drawn at Present; never on VR. Try `ui` when a page opens but stays invisible behind an upscaler or frame generation |
 | `freezeWorld` | `true` | Lets mods stop the game's 3D world render behind a paused fullscreen page (0.31.0; flat only). `false` turns it off for every mod and restores 0.30.6's menu flags; try it if the background behind a page goes black or a page stops answering when it opens |
 | `freezeWorldSkipCapture` | `true` | In UI-pass composite (`composite` `ui`, or `auto` behind an upscaler), keeps pages out of the frame the game freezes as the background. `false` if a page flickers when the freeze starts. No effect with composite `present` or `engine`, or with `freezeWorld` `false` |
@@ -227,16 +233,20 @@ hide OpenComposite's own menu laser over Magelight pages), `aimUseTip` (`true`) 
 crashed inside a frame, in Ultralight or in Magelight's own frame code. Magelight caught the crash so
 the game keeps running, and turned its overlay off for the rest of the session: restart the game to
 bring the UI back (loading a save does not). Post the whole log with the report. The
-`Magelight VEH: exception ... (module <dll> +0x...)` line just before it names the module and
-offset: `MgWCore.dll` is Ultralight's web engine (see the VEH section below; the VEH line is
-missing when the session already logged eight exceptions). `MgWCore.dll +0xFB7F77` before 0.31.3
+`Magelight VEH: exception ... (module <dll> +0x...)` line above it (with its `#NN` caller lines under
+it) names the module and offset; a place that faulted earlier in the session is named by its first
+line, and new places stop being logged after 64: `MgWCore.dll` is Ultralight's web engine (see the VEH section below). `MgWCore.dll +0xFB7F77` before 0.31.3
 was a PC where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near the top of the log
 name the last-resort font the session uses and, when Arial could not be used, why.
 
 ## "Magelight VEH" and "Magelight stall" lines
 
-`Magelight VEH: exception ...` records the first few serious exceptions raised on any thread
-of the game, including ones another mod raises and handles itself; `Magelight stall: ...`
+`Magelight VEH: exception ...` records each serious exception raised on any thread of the
+game, once per place it happens (up to 64 places a session), including ones another mod raises and
+handles itself. The `Magelight VEH:   #01 <module>+0x...` lines under it are the calls that led
+there, most recent first: they tell a fault Magelight caused from another mod's or the game's own
+(a stack overflow gets the one line only, written a moment later by another thread when the
+overflowed one has too little stack left to write it). `Magelight stall: ...`
 records the stacks of the present and main threads when no frame was presented for longer than
 `stallThresholdMs` (a long save or a hitch can do that). The first sample of a session also
 records every other game thread (up to 64, labelled `other`), which names the thread a hang is

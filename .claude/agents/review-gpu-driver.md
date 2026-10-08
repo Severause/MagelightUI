@@ -14,7 +14,11 @@ is a rendering bug waiting for a page to hit it) and **the license boundary**.
   (bound to the game's), the host-chosen MSAA count (`MgGpu_SetSampleCount`, `Magelight.json`
   `msaa`, default 4; upstream is 8x), logging via callback instead of MessageBox, embedded fxc
   bytecode only, external textures (`MgGpu_RegisterExternalTexture`, ImageSource) and the
-  compositor SRV getter. Anything else that differs needs a `// MG:` marker AND a reason.
+  compositor SRV getter, and the version handshake (`MgGpu_GetInfo`). Anything else that differs
+  needs a `// MG:` marker AND a reason.
+- The handshake: a change to any `MgGpu_*` signature or meaning bumps `MGGPU_CONTRACT`
+  (`gpu/MagelightGpuApi.h`); `MgGpuInfo` only grows at the end; `tools/check_stage.ps1` lists every
+  export the host resolves.
 - Shader blobs (`gpu/shaders/*_fxc.h`) must stay byte-identical to the SDK's
   (`extern/ultralight/shaders/hlsl/bin`) — an SDK bump re-checks this (the 1.3→1.4 bump found
   them identical; do not assume).

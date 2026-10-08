@@ -10,7 +10,7 @@ endif()
 
 project(
     Magelight
-    VERSION 0.31.5
+    VERSION 0.31.6
     LANGUAGES CXX
 )
 
@@ -21,18 +21,17 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 endif()
 
-# CommonLibSSE-NG (same pinned overlay port + colorglass registry as
-# SeverActionsNative). The fork's exported targets re-export DirectXTK /
-# DirectXMath / fmt / spdlog / xbyak as interface dependencies, so each must be
-# findable here; rapidcsv rides in vcpkg.json for the port's internal sources.
+# CommonLibSSE-NG from the pinned overlay port (ports/commonlibsse-ng). Its
+# exported target re-exports DirectXTK / DirectXMath / fmt / spdlog as interface
+# dependencies, so each must be findable here; rapidcsv rides in vcpkg.json for
+# the port's internal sources. Built without xbyak (SKSE_SUPPORT_XBYAK off):
+# Magelight's only trampoline use, write_call, does not need it.
 find_package(directxtk CONFIG REQUIRED)
-find_package(directxtex CONFIG REQUIRED)
 find_package(directxmath CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(minhook CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
-find_package(xbyak CONFIG REQUIRED)
 find_package(CommonLibSSE CONFIG REQUIRED)
 
 set(PLUGIN_NAME "${PROJECT_NAME}")
@@ -57,10 +56,10 @@ configure_file(
 )
 set(PROJECT_NAME "${_host_project_name}")
 
-# Vendored Ultralight SDK (extern/ultralight â€” fetched by setup, see build.ps1).
+# Vendored Ultralight SDK (extern/ultralight — fetched by setup, see build.ps1).
 set(ULTRALIGHT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/ultralight")
 if(NOT EXISTS "${ULTRALIGHT_DIR}/include/Ultralight/Ultralight.h")
-    message(FATAL_ERROR "Ultralight SDK not found at ${ULTRALIGHT_DIR} â€” fetch it per extern/README.md, then run build.ps1.")
+    message(FATAL_ERROR "Ultralight SDK not found at ${ULTRALIGHT_DIR} — fetch it per extern/README.md, then run build.ps1.")
 endif()
 
 add_library(${PROJECT_NAME} SHARED
@@ -81,6 +80,7 @@ add_library(${PROJECT_NAME} SHARED
     src/MagelightVR/Bindings.cpp
     src/MagelightVR/Lifecycle.cpp
     src/MagelightFonts.cpp       # the font loader whose last resort always loads
+    src/MagelightSysInfo.cpp     # game, Windows, CPU and GPU lines at the top of the log
     src/MagelightFonts.rc        # the bundled fallback font (src/fonts/DejaVuSans.ttf)
     ${CMAKE_CURRENT_BINARY_DIR}/version.rc
 )
@@ -89,10 +89,15 @@ add_library(${PROJECT_NAME} SHARED
 set_source_files_properties(src/MagelightFonts.rc PROPERTIES
     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/DejaVuSans.ttf)
 
-target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${ULTRALIGHT_DIR}/include
-)
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# SYSTEM: the SDK's headers are third-party code (/external:W0). Their unreferenced-parameter
+# warnings (over a hundred per build) otherwise bury the host's own.
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${ULTRALIGHT_DIR}/include)
+
+# CommonLib, precompiled once for every host TU (it is most of each TU's parse time). Not for
+# MagelightFonts.cpp: tools/font-test compiles it with no CommonLib, so it must not come to rely on one.
+target_precompile_headers(${PROJECT_NAME} PRIVATE cmake/PCH.h)
+set_source_files_properties(src/MagelightFonts.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 target_link_directories(${PROJECT_NAME} PRIVATE ${ULTRALIGHT_DIR}/lib)
 
@@ -113,7 +118,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 # The Ultralight runtime DLLs live in Data/SKSE/Plugins/Magelight/, NOT next to
-# the game exe â€” the loader would fail our import table at plugin-load time.
+# the game exe — the loader would fail our import table at plugin-load time.
 # Delay-load all four; Magelight::PreloadRuntime() LoadLibrary's them from the
 # right directory before any Ultralight symbol is touched, and the delay-load
 # thunks then resolve against the already-loaded modules.
@@ -128,7 +133,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     PLUGIN_NAME="${PLUGIN_NAME}"
     PLUGIN_AUTHOR="${PLUGIN_AUTHOR}"
     PLUGIN_VERSION="${PLUGIN_VERSION}"
-    # SKSE declaration version derives from CMake â€” the single-source rule
+    # SKSE declaration version derives from CMake — the single-source rule
     # SeverActionsNative adopted after its declaration sat at 3.0.7.0 for ~30
     # releases. Bake the lesson in from day one.
     PLUGIN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
@@ -154,7 +159,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
-# â”€â”€ MagelightGPU.dll â€” the LGPL-isolated GPU backend (see gpu/README.md) â”€â”€â”€â”€â”€
+# ── MagelightGPU.dll — the LGPL-isolated GPU backend (see gpu/README.md) ─────
 # Adapted from AppCore v1.3.0's D3D11 reference GPUDriver. Built as its OWN
 # dynamically-loaded DLL so the LGPL obligations stay contained; the host talks
 # to it only through the C ABI in gpu/MagelightGpuApi.h and falls back to the
@@ -162,10 +167,8 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 # the host loads it AFTER preloading the (namespaced) runtime, and the stage
 # step patches this DLL's Ultralight import names like every other binary.
 add_library(MagelightGPU SHARED gpu/MagelightGpuDriver.cpp ${CMAKE_CURRENT_BINARY_DIR}/version_gpu.rc)
-target_include_directories(MagelightGPU PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/gpu
-    ${ULTRALIGHT_DIR}/include
-)
+target_include_directories(MagelightGPU PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
+target_include_directories(MagelightGPU SYSTEM PRIVATE ${ULTRALIGHT_DIR}/include)
 target_link_directories(MagelightGPU PRIVATE ${ULTRALIGHT_DIR}/lib)
 target_link_libraries(MagelightGPU PRIVATE Ultralight UltralightCore d3d11)
 target_compile_definitions(MagelightGPU PRIVATE MGGPU_BUILD NOMINMAX WIN32_LEAN_AND_MEAN)
