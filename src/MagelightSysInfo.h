@@ -20,8 +20,8 @@ namespace Magelight::SysInfo {
     // Windows user. UTF-8 because path::string() throws for a name the ANSI code page cannot spell.
     std::string ForLog(const std::filesystem::path& p);
 
-    // UTF-8 text with every path under the user's profile folder shown as %USERPROFILE%: for text we do not
-    // format ourselves (Ultralight's own log lines name its cache folder).
+    // UTF-8 text with the user's profile folder shown as %USERPROFILE% wherever it appears as a path (either
+    // separator, any case): for text we do not format ourselves (Ultralight's own log lines name its cache folder).
     std::string RedactProfile(std::string text);
 
 }

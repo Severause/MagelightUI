@@ -19,10 +19,6 @@ letter (`I`, `W`, `E`) and the thread id.
   (two mods bundle Magelight and neither wins every file). The host stays off for the session
   rather than running a runtime it was not built for. Let ONE copy win every Magelight file: in MO2
   the newer copy lowest in the left pane.
-- **`MagelightGPU.dll does not match this Magelight.dll - ...`** (0.31.6): the same pairing for the
-  GPU backend: `MagelightGPU.dll` comes from another copy of Magelight (or another build of it). The
-  host draws pages on the CPU instead, which works but costs frame time. The line says what differs.
-  Let ONE copy win every Magelight file.
 - **`failed to load <runtime DLL> (GetLastError=126)`**: Windows could not load the Ultralight
   runtime. With no Visual C++ redistributable at all the line names `Magelight1Core.dll` (the
   first one loaded); with an old one it usually names `MgWCore.dll`. First check that `Magelight1Core.dll`, `MgWCore.dll`,
@@ -107,8 +103,9 @@ A mod such as SeverActions can ship its own copy of Magelight. If you also insta
 by itself, the copy that wins the file conflict is the one that runs; in MO2 that is the mod
 lower in the left pane. Let the newer copy win, and let it win every file: a `Magelight.dll` from one
 copy over the runtime DLLs of another is refused at load (0.31.5; the log names both versions)
-and the host stays off. A `MagelightGPU.dll` from another copy is refused too (0.31.6), and pages
-then draw on the CPU. Line one of `Magelight.log` names the running version, and a "Magelight
+and the host stays off. A `MagelightGPU.dll` built for another Ultralight SDK or GPU contract, or from
+before 0.31.6, is refused too (0.31.6): pages still show, drawn on the CPU, which costs frame time, and
+the log says `MagelightGPU.dll does not match this Magelight.dll - ...` with what differs. Line one of `Magelight.log` names the running version, and a "Magelight
 UI needs updating" page means an older copy won.
 
 ## Text fields do not type / paste
@@ -203,7 +200,7 @@ it read, or says that defaults are in effect.
 | `consoleLog` | `"warnings"` | Which page console messages go into the log (0.31.0): `none`, `errors`, `warnings` (warnings and errors) or `all` (`console.log`, `info` and `debug` too). Unset, it is `all` with `devMode` and `warnings` otherwise. See "A page's console lines are missing from the log" |
 | `logLevel` | `"info"` | `trace`, `debug`, `info`, `warn` or `error` |
 | `forceCpu` | `false` | Skip the GPU driver and use Ultralight's CPU renderer |
-| `presentHook` | `"auto"` | Where pages are drawn onto the frame. `auto` draws inside dxgi's own Present only when another mod hooked Present first (an upscaler, for one) and could otherwise draw over the pages, never behind a d3d11.dll or dxgi proxy (ENB, ReShade, Skyrim Upscaler) and never on VR. `late` always does, `vtable` never. Try `late` when a page opens (sound, paused game) but stays invisible, but not with ENB: behind ENB's `d3d11.dll`, `late` can crash the game at start |
+| `presentHook` | `"auto"` | Where pages are drawn onto the frame. `auto` draws inside dxgi's own Present when another mod hooked Present first on a plain dxgi swapchain (an upscaler, for one) and could otherwise draw over the pages, or for NVIDIA Smooth Motion when engine mode is off and d3d11.dll is not a proxy such as ENB's; never on VR. `late` tries it wherever dxgi's own Present can be reached: not behind a dxgi.dll proxy such as ReShade's, where it logs why and draws in the vtable hook. `vtable` never does. Try `late` when a page opens (sound, paused game) but stays invisible, but not with ENB: behind ENB's `d3d11.dll`, `late` can crash the game at start |
 | `composite` | `"auto"` | The stage pages are drawn at. `present` draws them over the finished frame at Present; `ui` draws them in the game's own UI pass, as part of the game's menus (click-through HUD pages stay at Present). `auto` uses `ui` when Skyrim Upscaler is installed or the game's swapchain is NVIDIA Streamline's (`sl.interposer.dll`: Skyrim Upscaler, Community Shaders' and Open Shaders' upscaling), since a HUD Fix keeps the game's UI apart from the scene and frame generation drops anything drawn at Present; never on VR. Try `ui` when a page opens but stays invisible behind an upscaler or frame generation |
 | `freezeWorld` | `true` | Lets mods stop the game's 3D world render behind a paused fullscreen page (0.31.0; flat only). `false` turns it off for every mod and restores 0.30.6's menu flags; try it if the background behind a page goes black or a page stops answering when it opens |
 | `freezeWorldSkipCapture` | `true` | In UI-pass composite (`composite` `ui`, or `auto` behind an upscaler), keeps pages out of the frame the game freezes as the background. `false` if a page flickers when the freeze starts. No effect with composite `present` or `engine`, or with `freezeWorld` `false` |

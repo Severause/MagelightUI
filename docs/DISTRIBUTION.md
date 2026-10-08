@@ -52,8 +52,9 @@ mods), MO2 gives each file both copies carry to the mod that sits lower in the
 left pane. The runtime files are the same set in every copy, so the lower mod's
 Magelight is the one that runs (a copy's `Magelight.dll` over another copy's
 runtime DLLs of a different Ultralight version is refused at load since 0.31.5,
-with both versions in the log, and since 0.31.6 another copy's `MagelightGPU.dll`
-is refused and pages draw on the CPU, so one copy must win every file); an **older**
+with both versions in the log, and since 0.31.6 a `MagelightGPU.dll` built for
+another Ultralight SDK or GPU contract, or from before 0.31.6, is refused and
+pages draw on the CPU, so one copy must win every file); an **older**
 copy winning silently drops newer
 features, and mods that need the newer host show the "needs updating" page.
 Tell users: if they have Magelight from more than one source, let the

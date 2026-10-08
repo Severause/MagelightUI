@@ -23,14 +23,15 @@ struct ID3D11ShaderResourceView;
 #endif
 
 // The C ABI's revision: bump it whenever an MgGpu_* signature or meaning changes. The host refuses a backend built
-// with another revision.
+// with another revision. A contract-1 backend exports every function below; the host treats a missing one as a
+// broken build.
 #define MGGPU_CONTRACT 1u
 
 extern "C" {
 
     // What a backend was built with, for the host's version check (MgGpu_GetInfo). A backend built for another
     // Ultralight SDK reads every command at the wrong offsets, and a crash inside a frame is the first sign, so the
-    // host compares the command layout itself, not only the version text. Fields may be appended, never reordered:
+    // host compares the command sizes too, not only the version text. Fields may be appended, never reordered:
     // `size` tells the host how much of the struct the backend filled.
     struct MgGpuInfo {
         std::uint32_t size;               // sizeof(MgGpuInfo) in the backend's build
@@ -62,8 +63,7 @@ extern "C" {
 
     // MSAA sample count (1, 2, 4 or 8) for render targets created from now on;
     // a count the device cannot do steps down. Returns the count in effect,
-    // 0 for a null handle. Optional export: a backend without it draws
-    // without MSAA. Render thread, before the first view is best.
+    // 0 for a null handle. Render thread, before the first view is best.
     MGGPU_API int MgGpu_SetSampleCount(void* handle, int samples);
 
     // ID3D11ShaderResourceView* for a driver texture id (a View's

@@ -366,9 +366,9 @@ namespace Magelight {
     static std::atomic<int>  s_imeCaretX{ -1 }, s_imeCaretY{ -1 }, s_imeCaretH{ 0 };   // client px; x<0 = unknown
 
     static std::filesystem::path s_runtimeDir;  // Data/SKSE/Plugins/Magelight
-    // Magelight.json "presentHook": "auto" (late composite only behind an earlier Present hook on a plain dxgi
-    // swapchain; never behind a proxy, never on VR), "late" (always try it), "vtable" (never). See
-    // InstallLatePresent.
+    // Magelight.json "presentHook": "auto" (late composite behind an earlier Present hook on a plain dxgi
+    // swapchain, or for Smooth Motion without engine mode; never on VR), "late" (try it wherever dxgi's own Present
+    // can be reached), "vtable" (never). See InstallLatePresent.
     static std::string s_presentHookMode = "auto";
     // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
     // at Present; "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
@@ -561,9 +561,9 @@ namespace Magelight {
     using MgGpuHasFn      = int (*)(void*);
     using MgGpuDrawFn     = void (*)(void*);
     using MgGpuSrvFn      = void* (*)(void*, std::uint32_t);
-    using MgGpuSamplesFn  = int (*)(void*, int);   // optional (MSAA); absent = no MSAA
-    // External textures (ImageSource) — optional exports; absent = images unsupported.
-    using MgGpuRegExtFn   = std::uint32_t (*)(void*, ID3D11ShaderResourceView*);
+    using MgGpuSamplesFn  = int (*)(void*, int);   // MSAA sample count
+    // External textures (ImageSource).
+    using MgGpuRegExtFn  = std::uint32_t (*)(void*, ID3D11ShaderResourceView*);
     using MgGpuSetExtFn   = int (*)(void*, std::uint32_t, ID3D11ShaderResourceView*);
     using MgGpuUnregExtFn = void (*)(void*, std::uint32_t);
 
@@ -593,9 +593,17 @@ namespace Magelight {
         const char* ul = info->ultralightVersion ? info->ultralightVersion : "?";
         if (info->gpuStateSize != sizeof(ultralight::GPUState) || info->commandSize != sizeof(ultralight::Command)
             || std::strcmp(ul, ULTRALIGHT_VERSION) != 0)
-            return std::format("it was built for Ultralight {} ({}-byte commands), this host for {} ({}-byte commands)",
-                               ul, info->commandSize, ULTRALIGHT_VERSION, sizeof(ultralight::Command));
+            return std::format("it was built for Ultralight {} ({}-byte state, {}-byte commands), this host for {} "
+                               "({}-byte state, {}-byte commands)", ul, info->gpuStateSize, info->commandSize,
+                               ULTRALIGHT_VERSION, sizeof(ultralight::GPUState), sizeof(ultralight::Command));
         return {};
+    }
+
+    static const MgGpuInfo* QueryGpuInfo(HMODULE gpu)
+    {
+        using MgGpuInfoFn = const MgGpuInfo* (*)();
+        const auto get = reinterpret_cast<MgGpuInfoFn>(GetProcAddress(gpu, "MgGpu_GetInfo"));
+        return get ? get() : nullptr;
     }
 
     static void GpuLogBridge(const char* msg)
@@ -1627,7 +1635,7 @@ namespace Magelight {
         if (REL::Module::IsVR()) return false;
         if (s_engineMode || s_compositeMode == "ui") return true;
         if (s_compositeMode == "present") return false;
-        if (SmoothMotionLoaded()) return false;   // no engine mode: drawn late, inside dxgi's own Present
+        if (SmoothMotionLoaded()) return false;   // no engine mode: drawn at Present (late when InstallLatePresent can)
         return streamlineSwapChain || GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
     }
 
@@ -2779,20 +2787,13 @@ namespace Magelight {
         // Optional GPU backend. Loaded AFTER the runtime so its (namespaced)
         // Ultralight imports bind to the modules already in the process.
         // Missing/failed = CPU surface fallback, never fatal.
-        HMODULE gpu = LoadLibraryW((s_runtimeDir / L"MagelightGPU.dll").c_str());
-        const DWORD gpuLoadError = gpu ? 0 : GetLastError();
-        bool gpuRefused = false;
-        if (gpu) {
-            using MgGpuInfoFn = const MgGpuInfo* (*)();
-            const auto getInfo = reinterpret_cast<MgGpuInfoFn>(GetProcAddress(gpu, "MgGpu_GetInfo"));
-            const std::string mismatch = GpuBuildMismatch(getInfo ? getInfo() : nullptr);
-            if (!mismatch.empty()) {
-                SKSE::log::error("Magelight: MagelightGPU.dll does not match this Magelight.dll - {}. Pages draw on "
-                                 "the CPU; another mod's copy of MagelightGPU.dll is installed over this one", mismatch);
-                gpuRefused = true;
-            }
-        }
-        if (gpu && !gpuRefused) {
+        if (HMODULE gpu = LoadLibraryW((s_runtimeDir / L"MagelightGPU.dll").c_str()); !gpu) {
+            SKSE::log::info("Magelight: no GPU backend (MagelightGPU.dll not found, GetLastError={}) — CPU fallback",
+                GetLastError());
+        } else if (const std::string mismatch = GpuBuildMismatch(QueryGpuInfo(gpu)); !mismatch.empty()) {
+            SKSE::log::error("Magelight: MagelightGPU.dll does not match this Magelight.dll - {}. Pages draw on "
+                             "the CPU; another mod's copy of MagelightGPU.dll is installed over this one", mismatch);
+        } else {
             s_gpuCreate    = reinterpret_cast<MgGpuCreateFn>(GetProcAddress(gpu, "MgGpu_Create"));
             s_gpuDestroy   = reinterpret_cast<MgGpuDestroyFn>(GetProcAddress(gpu, "MgGpu_Destroy"));
             s_gpuGetDriver = reinterpret_cast<MgGpuGetDrvFn>(GetProcAddress(gpu, "MgGpu_GetGPUDriver"));
@@ -2803,20 +2804,15 @@ namespace Magelight {
             s_gpuRegExt    = reinterpret_cast<MgGpuRegExtFn>(GetProcAddress(gpu, "MgGpu_RegisterExternalTexture"));
             s_gpuSetExtSrv = reinterpret_cast<MgGpuSetExtFn>(GetProcAddress(gpu, "MgGpu_SetExternalTextureSRV"));
             s_gpuUnregExt  = reinterpret_cast<MgGpuUnregExtFn>(GetProcAddress(gpu, "MgGpu_UnregisterExternalTexture"));
-            if (!(s_gpuRegExt && s_gpuSetExtSrv && s_gpuUnregExt)) {
-                s_gpuRegExt = nullptr;  // all-or-nothing: texture images unsupported
-                SKSE::log::warn("Magelight: GPU backend predates external textures — texture images unavailable");
-            }
-            if (s_gpuCreate && s_gpuDestroy && s_gpuGetDriver && s_gpuHas && s_gpuDraw && s_gpuSrv) {
+            // Every contract-1 backend exports all of them; one that does not is a broken build.
+            if (s_gpuCreate && s_gpuDestroy && s_gpuGetDriver && s_gpuHas && s_gpuDraw && s_gpuSrv && s_gpuSamples
+                && s_gpuRegExt && s_gpuSetExtSrv && s_gpuUnregExt) {
                 SKSE::log::info("Magelight: GPU backend loaded (MagelightGPU.dll, contract {}, Ultralight {})",
                                 MGGPU_CONTRACT, ULTRALIGHT_VERSION);
             } else {
                 SKSE::log::error("Magelight: MagelightGPU.dll is missing exports — CPU fallback");
                 s_gpuCreate = nullptr;
             }
-        } else if (!gpu) {
-            SKSE::log::info("Magelight: no GPU backend (MagelightGPU.dll not found, GetLastError={}) — CPU fallback",
-                gpuLoadError);
         }
 
         s_runtimeReady.store(true);
@@ -4212,13 +4208,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                 if (auto* drv = static_cast<ultralight::GPUDriver*>(s_gpuGetDriver(s_gpu))) {
                     // The sample count applies to targets created from now on, so it is set before the renderer
                     // exists: no view (staggered or not) can have made one yet.
-                    if (s_gpuSamples) {
-                        const int got = s_gpuSamples(s_gpu, s_msaa);
-                        if (got == s_msaa) SKSE::log::info("Magelight: MSAA {}x", got);
-                        else SKSE::log::info("Magelight: MSAA {}x (Magelight.json asks {}x, which this graphics card cannot do for page targets)", got, s_msaa);
-                    } else {
-                        SKSE::log::info("Magelight: the GPU backend predates MSAA — page shapes draw without anti-aliasing");
-                    }
+                    const int got = s_gpuSamples(s_gpu, s_msaa);
+                    if (got == s_msaa) SKSE::log::info("Magelight: MSAA {}x", got);
+                    else SKSE::log::info("Magelight: MSAA {}x (Magelight.json asks {}x, which this graphics card cannot do for page targets)", got, s_msaa);
                     ultralight::Platform::instance().set_gpu_driver(drv);
                     s_gpuActive = true;
                 }
@@ -6366,9 +6358,10 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // "auto" turns it on behind an earlier Present hook on a plain dxgi swapchain, and for Smooth Motion without
-    // engine mode, never on VR. Behind a d3d11.dll proxy (ENB's or ReShade's, Skyrim Upscaler) only "late" looks for
-    // dxgi's own Present: the throwaway device it takes for that killed the game at start behind ENB. Behind a
-    // dxgi.dll proxy nothing does: the search could only find the proxy's swapchain again.
+    // engine mode when d3d11.dll is the system one; never on VR. Behind a swapchain wrapper (a d3d11.dll proxy such
+    // as ENB's, Streamline, Skyrim Upscaler) dxgi's own Present is found through a throwaway device, which only
+    // "late" and Smooth Motion take: it killed the game at start behind ENB. Behind a dxgi.dll proxy (ReShade's)
+    // nothing takes it: the device binds to the proxy, so the search could only find the proxy's swapchain again.
     static void InstallLatePresent(void* const* vtbl, void* const* vtbl1)
     {
         const std::string& mode = s_presentHookMode;
@@ -6384,19 +6377,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             return;
         }
         const bool earlierHook = ModuleAt(reinterpret_cast<const void*>(s_origPresent)) != ModuleAt(vtbl);
-        // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind a
-        // d3d11.dll or dxgi.dll proxy (ENB, ReShade): the throwaway device the dxgi search takes killed the game at
-        // start behind ENB, and behind a dxgi.dll proxy it would find the proxy's swapchain anyway.
-        const bool proxied = !IsSystemModule(GetModuleHandleW(L"d3d11.dll"), L"d3d11.dll")
-            || !IsSystemModule(GetModuleHandleW(L"dxgi.dll"), L"dxgi.dll");
-        const bool smoothMotionAuto = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded();
-        const bool smoothMotion = smoothMotionAuto && !proxied;
+        // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind
+        // ENB's or ReShade's d3d11.dll: the throwaway device the dxgi search takes killed the game at start there.
+        const bool smoothMotion = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded()
+            && IsSystemModule(GetModuleHandleW(L"d3d11.dll"), L"d3d11.dll");
         if (smoothMotion)
             SKSE::log::info("Magelight: NVIDIA Smooth Motion is loaded and engine mode is off - drawing late, inside "
                             "dxgi's own Present (pages flicker while it is on)");
-        else if (smoothMotionAuto)
-            SKSE::log::info("Magelight: NVIDIA Smooth Motion is loaded and engine mode is off, but d3d11.dll or "
-                            "dxgi.dll is a proxy - not drawing late");
         if (mode != "late" && !smoothMotion && (!earlierHook || REL::Module::IsVR())) {
             SKSE::log::info("Magelight: presentHook 'auto' - {}, compositing in the vtable hook",
                 REL::Module::IsVR() ? "VR" : "no earlier Present hook");

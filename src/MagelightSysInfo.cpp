@@ -30,6 +30,24 @@ namespace Magelight::SysInfo {
             return out;
         }
 
+        std::wstring Widen(std::string_view u)
+        {
+            if (u.empty()) return {};
+            const int n = MultiByteToWideChar(CP_UTF8, 0, u.data(), static_cast<int>(u.size()), nullptr, 0);
+            std::wstring out(static_cast<std::size_t>(n > 0 ? n : 0), L'\0');
+            if (n > 0) MultiByteToWideChar(CP_UTF8, 0, u.data(), static_cast<int>(u.size()), out.data(), n);
+            return out;
+        }
+
+        // The form two paths are compared in: upper case (one UTF-16 unit for one, so indexes carry over to the
+        // original) and one separator.
+        std::wstring MatchKey(std::wstring s)
+        {
+            for (auto& c : s) if (c == L'/') c = L'\\';
+            if (!s.empty()) CharUpperBuffW(s.data(), static_cast<DWORD>(s.size()));
+            return s;
+        }
+
         std::string Trimmed(std::string s)
         {
             const auto first = s.find_first_not_of(' ');
@@ -112,40 +130,31 @@ namespace Magelight::SysInfo {
 
     std::string ForLog(const std::filesystem::path& p)
     {
-        static const std::wstring s_profile = UserProfile();
-        std::wstring w = p.native();
-        if (!s_profile.empty() && w.size() >= s_profile.size() &&
-            CompareStringOrdinal(w.data(), static_cast<int>(s_profile.size()), s_profile.data(),
-                                 static_cast<int>(s_profile.size()), TRUE) == CSTR_EQUAL &&
-            (w.size() == s_profile.size() || w[s_profile.size()] == L'\\' || w[s_profile.size()] == L'/'))
-            w.replace(0, s_profile.size(), L"%USERPROFILE%");
-        return Narrow(w);
+        return RedactProfile(Narrow(p.native()));
     }
 
     std::string RedactProfile(std::string text)
     {
-        static const std::string s_profile = Narrow(UserProfile());
-        if (s_profile.empty()) return text;
-        const auto fold = [](char a, char b) {
-            const auto lower = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; };
-            return lower(a) == lower(b);
-        };
-        constexpr std::string_view kToken = "%USERPROFILE%";
-        std::size_t from = 0;
-        for (;;) {
-            const auto it = std::search(text.begin() + static_cast<std::ptrdiff_t>(from), text.end(),
-                                        s_profile.begin(), s_profile.end(), fold);
-            if (it == text.end()) break;
-            const auto at = static_cast<std::size_t>(it - text.begin());
-            const std::size_t end = at + s_profile.size();
-            if (end == text.size() || text[end] == '\\' || text[end] == '/') {
-                text.replace(at, s_profile.size(), kToken);
-                from = at + kToken.size();
+        static const std::wstring s_key = MatchKey(UserProfile());
+        if (s_key.empty() || text.empty()) return text;
+        const std::wstring w = Widen(text);
+        const std::wstring key = MatchKey(w);
+        std::wstring out;
+        std::size_t copied = 0;
+        for (std::size_t at = key.find(s_key); at != std::wstring::npos;) {
+            const std::size_t end = at + s_key.size();
+            if (end == key.size() || key[end] == L'\\') {   // the folder itself, not a longer name it begins
+                out.append(w, copied, at - copied);
+                out += L"%USERPROFILE%";
+                copied = end;
+                at = key.find(s_key, end);
             } else {
-                from = end;
+                at = key.find(s_key, at + 1);
             }
         }
-        return text;
+        if (copied == 0) return text;   // no match: the text is returned untouched, not round-tripped
+        out.append(w, copied, std::wstring::npos);
+        return Narrow(out);
     }
 
     void LogPlatform(const SKSE::LoadInterface* skse)

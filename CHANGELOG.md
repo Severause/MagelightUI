@@ -69,17 +69,17 @@ Diagnostics and build hygiene, after a review of langfod's fork.
   stack overflow gets the one line only, and when the overflowed thread has too little stack left to
   write it, another thread writes it a moment later: logging there could overflow it again and kill a
   process that handles it. CrashLogger's own probes while it writes a report are skipped.
-- **A `MagelightGPU.dll` from another build is refused.** The GPU backend now reports the C ABI revision
-  and the Ultralight command layout it was built against (`MgGpu_GetInfo`), and the host compares them
-  with its own. A mod manager could pair this `Magelight.dll` with another mod's `MagelightGPU.dll`;
-  one built for another Ultralight SDK reads every draw command at the wrong offsets. A mismatch is one
-  log line, and pages draw on the CPU instead.
-- **Smooth Motion behind a `dxgi.dll` proxy (ReShade) no longer takes the late path.** With engine mode
-  off, Smooth Motion draws inside dxgi's own Present, which needs a throwaway device to find. That was
-  already skipped behind a `d3d11.dll` proxy (ENB). Behind a `dxgi.dll` proxy the device binds to the
-  proxy too, so the search could only find the proxy's swapchain again: pages now draw in the vtable
-  hook there. `presentHook: "late"` behind a `dxgi.dll` proxy says so in one line instead of taking the
-  device for nothing.
+- **A `MagelightGPU.dll` from another build is refused.** The GPU backend now reports its C ABI revision,
+  the size of Ultralight's draw state and commands, and the Ultralight version it was built against
+  (`MgGpu_GetInfo`), and the host compares them with its own. A mod manager could pair this
+  `Magelight.dll` with another mod's `MagelightGPU.dll`; one built for another Ultralight SDK reads every
+  draw command at the wrong offsets. A mismatch, including any `MagelightGPU.dll` from before 0.31.6, is
+  one log line, and pages draw on the CPU instead.
+- **No throwaway device behind a `dxgi.dll` proxy (ReShade).** To draw inside dxgi's own Present behind a
+  swapchain wrapper (`presentHook: "late"`, or Smooth Motion with engine mode off), Magelight finds it
+  through a throwaway device. Behind a `dxgi.dll` proxy that device binds to the proxy, so the search
+  could only find the proxy's swapchain again: it is now skipped with one log line, and pages draw in the
+  vtable hook.
 - Build: the Ultralight headers are a system include (their hundred-odd unreferenced-parameter
   warnings are gone), CommonLib is a precompiled header for the host (an edit to `Magelight.cpp`
   rebuilds in about 8 s instead of 15), CommonLib is built without xbyak, the unused `directxtex` and
