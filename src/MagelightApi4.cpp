@@ -99,6 +99,8 @@ namespace Magelight::Api4 {
         std::map<ViewId, ModId> s_viewOwner;
         ModId s_nextMod = 1;
         ModId s_uiOwner = 0;      // mirrored from UIModeEntered/Exited (0 = none / a v1-v3 or host view)
+        // The image base of s_uiOwner's DLL, for the polled-key filter, which runs on any thread and must not lock.
+        std::atomic<const void*> s_uiOwnerModule{ nullptr };
         ViewId s_uiPending = 0;   // a RequestUIMode whose game-thread entry has not been decided yet
         bool s_sinkInstalled = false;
 
@@ -109,6 +111,20 @@ namespace Magelight::Api4 {
         {
             for (auto it = s_uiQueue.begin(); it != s_uiQueue.end();)
                 it = (it->view == view) ? s_uiQueue.erase(it) : it + 1;
+        }
+
+        // The module of a mod's callbacks (its event handler, else its log sink); a manifest-only or Papyrus mod has
+        // neither and so no module. Call after every write of s_uiOwner, under s_mutex.
+        void PublishUiOwnerLocked()
+        {
+            const void* base = nullptr;
+            if (const auto it = s_mods.find(s_uiOwner); s_uiOwner != 0 && it != s_mods.end()) {
+                const void* code = it->second.onEvent ? reinterpret_cast<const void*>(it->second.onEvent)
+                                                      : reinterpret_cast<const void*>(it->second.onLog);
+                PVOID image = nullptr;
+                if (code && RtlPcToFileHeader(const_cast<void*>(code), &image)) base = image;
+            }
+            s_uiOwnerModule.store(base);
         }
 
         void DrainUIQueue();
@@ -423,17 +439,20 @@ namespace Magelight::Api4 {
                 case HostEvent::UIModeSwitched:
                     // Same owner by construction (RequestUIMode only switches within a mod).
                     s_uiOwner = OwnerLocked(view);
+                    PublishUiOwnerLocked();
                     ownerSink(view, Event::UIModeEntered);
                     break;
                 case HostEvent::UIModeEntered:
                     // The host decided: the entered view's owner (0 for a host/v3 view) holds UI mode.
                     s_uiOwner = OwnerLocked(view);
+                    PublishUiOwnerLocked();
                     if (s_uiPending == view || s_uiPending != 0) s_uiPending = 0;
                     if (Mod* m = FindLocked(s_uiOwner)) targets.emplace_back(SinkOf(*m), Event::UIModeEntered);
                     break;
                 case HostEvent::UIModeExited:
                     if (Mod* m = FindLocked(s_uiOwner)) targets.emplace_back(SinkOf(*m), Event::UIModeExited);
                     s_uiOwner = 0;
+                    PublishUiOwnerLocked();
                     s_uiPending = 0;
                     if (!s_uiQueue.empty()) drainQueue = true;
                     break;
@@ -708,7 +727,7 @@ namespace Magelight::Api4 {
             m->alive->store(false);   // queued deliveries drop
             for (const auto& [v, rec] : m->views) { views.push_back(v); DropQueuedLocked(v); DropHotkeysLocked(v); }
             ownsUi = (s_uiOwner == mod);
-            if (ownsUi) { s_uiOwner = 0; s_uiPending = 0; }
+            if (ownsUi) { s_uiOwner = 0; s_uiPending = 0; PublishUiOwnerLocked(); }
             SKSE::log::info("Magelight[v4]: mod {} ('{}') unregistered — {} view(s) queued for destruction",
                 mod, m->modId, views.size());
             s_mods.erase(mod);
@@ -895,7 +914,7 @@ namespace Magelight::Api4 {
             for (const auto& [v, rec] : m->views) DropQueuedLocked(v);
             if (!active) {
                 // Nothing to exit; make sure no stale claim survives.
-                if (s_uiOwner == mod) s_uiOwner = 0;
+                if (s_uiOwner == mod) { s_uiOwner = 0; PublishUiOwnerLocked(); }
                 if (s_uiPending && OwnerLocked(s_uiPending) == mod) s_uiPending = 0;
                 return Result::Ok;
             }
@@ -912,6 +931,11 @@ namespace Magelight::Api4 {
     {
         std::lock_guard<std::mutex> lk(s_mutex);
         return s_uiOwner;
+    }
+
+    const void* GetUIModeOwnerModule()
+    {
+        return s_uiOwnerModule.load();
     }
 
     Result RaiseView(ViewId view)
