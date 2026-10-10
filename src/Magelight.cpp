@@ -1983,7 +1983,7 @@ namespace Magelight {
     // ── Polled keys (0.31.10) ───────────────────────────────────────────
     // Muting the engine's keyboard and taking the window's key messages hides a key from everything that reads
     // the game's input, but not from a plugin that asks Windows for the key state itself (GetAsyncKeyState /
-    // GetKeyState): SkyrimNet polls its hotkeys that way, so a letter typed into a page opened its chat behind it.
+    // GetKeyState), so a plugin that polls its hotkeys that way acted on letters typed into a page.
     // While a page holds UI mode both calls answer "up" for keyboard keys to another mod's SKSE plugin (a DLL
     // under SKSE\Plugins), except the DLL that owns the page, which may poll its own close key. Magelight, its
     // runtime folder, the game and Windows itself (the IME reads modifier state) are never filtered, nor are the
