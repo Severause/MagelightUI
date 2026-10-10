@@ -324,7 +324,7 @@ change it or destroy the view; the host applies it on the game thread.
 - **Never set menu flags yourself.** `kFreezeFrameBackground` and
   `kTopmostRenderedMenu` on `MagelightFocus` (the PrismaUI recipe) would not
   outlive a pause retarget safely, and `kTopmostRenderedMenu` stops the UI
-  pass that draws your page behind an upscaler.
+  pass that draws your page behind an upscaler or a swapchain wrapper.
 
 ```cpp
 if (v4()->hostVersionNumber >= 3100 && v4()->QueryCapability("freezeworld") == 1)

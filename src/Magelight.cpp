@@ -373,9 +373,11 @@ namespace Magelight {
     // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
     // at Present; "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
     // the game's UI apart from the scene (Skyrim Upscaler's HUD Fix) keeps ours with it. "auto" picks "ui" when
-    // Skyrim Upscaler is loaded or the game swapchain is NVIDIA Streamline's (sl.interposer.dll: Skyrim
-    // Upscaler, Community Shaders' and Open Shaders' upscaling, whose frame generation drops what is drawn at
-    // Present), never on VR. See UiPassActive.
+    // Skyrim Upscaler is loaded or the game swapchain is not dxgi's own: NVIDIA Streamline's (sl.interposer.dll:
+    // Skyrim Upscaler, Community Shaders' and Open Shaders' upscaling, whose frame generation drops what is drawn
+    // at Present) or another wrapper (a d3d11.dll or dxgi.dll proxy, which may present a buffer other than the one
+    // we draw into), unless it is untrusted (frame generation on Direct3D 12: Present draws into the engine's own
+    // framebuffer there, DrawOverlay). Never on VR. See UiPassActive.
     static std::string s_compositeMode = "auto";
     // Magelight.json "freezeWorld" (0.31.0, default true): false turns SetViewFreezeWorld off for every mod
     // (QueryCapability("freezeworld") answers 0). "freezeWorldSkipCapture" (default true) keeps MagelightOverlay out
@@ -1647,14 +1649,16 @@ namespace Magelight {
     };
     static_assert(sizeof(MagelightOverlayMenu) == 0x40, "MagelightOverlayMenu must match the VR IMenu size (0x40)");
 
-    // `streamlineSwapChain`: the game swapchain's vtable is in sl.interposer.dll (InstallHook reads it).
-    static bool UiCompositeWanted(bool streamlineSwapChain)
+    // `chain`: what the game swapchain's vtable says it is (InstallHook reads it).
+    enum class SwapChainKind { kDxgi, kStreamline, kWrapper };
+
+    static bool UiCompositeWanted(SwapChainKind chain)
     {
         if (REL::Module::IsVR()) return false;
         if (s_engineMode || s_compositeMode == "ui") return true;
         if (s_compositeMode == "present") return false;
         if (SmoothMotionLoaded()) return false;   // no engine mode: drawn at Present (late when InstallLatePresent can)
-        return streamlineSwapChain || GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
+        return chain != SwapChainKind::kDxgi || GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
     }
 
     using EngineEndFn = void (*)(std::uint32_t);
@@ -1682,9 +1686,9 @@ namespace Magelight {
         return true;
     }
 
-    static void RegisterOverlayMenu(bool streamlineSwapChain)
+    static void RegisterOverlayMenu(SwapChainKind chain)
     {
-        if (!UiCompositeWanted(streamlineSwapChain)) {
+        if (!UiCompositeWanted(chain)) {
             SKSE::log::info("Magelight: composite '{}' - views draw at Present", s_compositeMode);
             return;
         }
@@ -1696,8 +1700,10 @@ namespace Magelight {
         if (auto* ui = RE::UI::GetSingleton()) {
             ui->Register(MagelightOverlayMenu::MENU_NAME, MagelightOverlayMenu::Create);
             s_overlayMenuRegistered = true;
-            SKSE::log::info("Magelight: composite '{}' - views draw in the game's UI pass ('{}')", s_compositeMode,
-                MagelightOverlayMenu::MENU_NAME);
+            SKSE::log::info("Magelight: composite '{}' - views draw in the game's UI pass ('{}'){}", s_compositeMode,
+                MagelightOverlayMenu::MENU_NAME,
+                s_compositeMode == "auto" && chain == SwapChainKind::kWrapper && !s_engineMode
+                    ? " - the game swapchain is a wrapper, not dxgi's own" : "");
         }
     }
 
@@ -6746,7 +6752,14 @@ float4 ps_straight(VSOut i) : SV_Target {
             SKSE::log::info("Magelight: engine mode - the engine's device, drawn from its end-of-frame call{}",
                 SmoothMotionLoaded() ? " (NVIDIA Smooth Motion is loaded)" : "");
         InstallLatePresent(vtbl, vtbl1);
-        RegisterOverlayMenu(ModuleBaseNameIs(ModuleAt(vtbl), L"sl.interposer.dll"));
+        {
+            // An untrusted wrapper (frame generation on Direct3D 12, set above) keeps drawing at Present, into the
+            // engine's framebuffer: the UI pass has not been tried behind one.
+            const HMODULE chain = ModuleAt(vtbl);
+            RegisterOverlayMenu(ModuleBaseNameIs(chain, L"sl.interposer.dll")                ? SwapChainKind::kStreamline
+                                : IsSystemModule(chain, L"dxgi.dll") || s_untrustedChain.load() ? SwapChainKind::kDxgi
+                                                                                              : SwapChainKind::kWrapper);
+        }
         RegisterFocusMenu();
         // Manifest mods (Data/Magelight/<ModId>/manifest.json): folders that
         // are mods. Registered through the v4 path like any DLL consumer.
