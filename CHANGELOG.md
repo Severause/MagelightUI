@@ -44,6 +44,23 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 0.31.8
+
+- **Pages show behind a swapchain wrapper without a `Magelight.json`.** When the game's swapchain is
+  not dxgi's own (a `d3d11.dll` or `dxgi.dll` proxy such as ENB's or ReShade's, or another wrapper in
+  front of it), `"composite": "auto"` now draws pages in the game's own UI pass, as it already did
+  behind NVIDIA Streamline and Skyrim Upscaler. Not behind a frame-generation swapchain on Direct3D 12
+  (Community Shaders' frame generation, for one), which keeps drawing at Present into the engine's
+  framebuffer, nor with NVIDIA Smooth Motion when engine mode is off. Drawn at Present, a page could be lost: a wrapper may
+  present a buffer other than the one Magelight draws into, so a hotkey paused the game and nothing
+  appeared (a LoreRim report: a `d3d11.dll` proxy with ShadowBoost and SSE Display Tweaks hooking
+  Present), and the cure was `"composite": "ui"` by hand. Click-through HUD pages draw at Present
+  while no interactive page is open, and the UI pass still falls back to Present when the game's menus
+  are hidden or it finds nothing to draw on. While an interactive page is up, Escape does not open the
+  Journal (the carrier menu that hosts the UI pass is open), as behind an upscaler. `"composite": "present"` restores the old behaviour. The log line says why:
+  `composite 'auto' - views draw in the game's UI pass ('MagelightOverlay') - the game swapchain is a
+  wrapper, not dxgi's own`.
+
 ## 0.31.7
 
 - **`RebuildViewAtScale(view, scale)`: a new device scale for a loaded page without a live re-layout.**
