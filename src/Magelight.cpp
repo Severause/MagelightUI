@@ -49,6 +49,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_set>
@@ -649,6 +650,24 @@ namespace Magelight {
             return true;
         }
     };
+    // 0.31.9: per-view log lines for a page's hostTheme. A page may send its theme on every change of its own (a
+    // colour picker, an animated fade), so the first accepted change is logged, then at most one a second, which
+    // counts the changes it did not log; refusals are logged up to kThemeRefusalsLogged per view, and counted.
+    static constexpr std::uint32_t kThemeRefusalsLogged = 32;
+    struct ThemeLogRate {
+        std::uint64_t lastLine = 0;   // GetTickCount64 of the last change line; 0 = none yet
+        std::uint32_t held = 0;       // accepted changes since that line, not logged
+        std::uint32_t refusals = 0;   // every refusal, logged or not
+        // True when this change may be logged; `skipped` = the changes held back since the last line.
+        bool Admit(std::uint64_t now, std::uint32_t& skipped)
+        {
+            if (lastLine && now - lastLine < 1000) { ++held; return false; }
+            skipped = held;
+            held = 0;
+            lastLine = now ? now : 1;
+            return true;
+        }
+    };
 
     struct MlView {
         ViewId id = 0;
@@ -704,6 +723,9 @@ namespace Magelight {
         CursorSet cursorOwn;            // 0.31.0: the view's own cursor (SetViewCursor / SetCursor / manifest view)
         CursorSet cursorMod;            // 0.31.0: its mod's manifest default, used while cursorOwn is empty
         CursorTintSet cursorTint;       // 0.31.1: the drawn cursor's colours over this view (SetViewCursorTint)
+        std::optional<HostTheme::KbTheme> kbTheme;   // 0.31.9: the VR keyboard's colours while this view holds UI mode
+        ThemeLogRate themeLog;          // 0.31.9: this page's hostTheme log lines (OnPageHostTheme)
+        bool outboundDropLogged = false;   // the outbound cap's one warning for this view (QueueOutboundLocked)
         bool destroyPending = false;
         bool reloadPending = false;
         bool reloadedFlag = false;      // tag the next DOM-ready as a ViewReloaded
@@ -758,6 +780,32 @@ namespace Magelight {
         for (auto& v : s_views)
             if (v->ul.get() == ul) return v.get();
         return nullptr;
+    }
+
+    // s_viewsMutex must be held. ShowView's body, for a caller that must change visibility in the same critical
+    // section as something else (ShowOwnKeyboard).
+    static void ShowViewLocked(MlView& v, bool show)
+    {
+        if (v.visible != show) v.hiddenSince = show ? 0 : GetTickCount64();
+        v.visible = show;
+        if (!v.ul) v.loadNow = show;   // an open never waits behind the load queue
+        if (!show) v.pageCursor = 0;   // reopened, the page reports again on the first mouse move
+    }
+
+    // s_viewsMutex must be held. A C++ -> JS call waits here until the page reaches DOM ready (DrainBridgeQueues);
+    // past kOutboundCap the rest are dropped, so a page that never loads cannot grow the queue without bound.
+    static constexpr std::size_t kOutboundCap = 256;
+    static void QueueOutboundLocked(MlView& v, OutboundCall call)
+    {
+        if (v.outbound.size() < kOutboundCap) {
+            v.outbound.push_back(std::move(call));
+            return;
+        }
+        if (v.outboundDropLogged) return;
+        v.outboundDropLogged = true;
+        SKSE::log::warn("Magelight: view {} has {} calls waiting for its page (domReady={}) - {} was dropped, as is "
+                        "every call over that while the queue is full (logged once per view)", v.id, v.outbound.size(),
+                        v.domReady, call.raw ? std::string("a script") : "'" + call.fn + "'");
     }
 
     // ── Texture-backed image registry (Ultralight ImageSource) ──────────────
@@ -898,6 +946,25 @@ namespace Magelight {
         SKSE::log::info("Magelight: own keyboard view {} created ({}x{} at {},{})", id, kKbW, kKbH, x, y);
     }
 
+    // Keyboard theme (0.31.9). Every change the keyboard page should know of queues one message holding the whole
+    // state, {"shown":bool,"theme":<the UI-mode view's theme>|null}, built here from the stored numbers (the page
+    // never sees a page's text) on this host-only channel. It replaces any message of the channel still queued, so
+    // the page always ends on the stored state, and it is exempt from the outbound cap, which would drop the newest.
+    // Queued whether or not the keyboard is up, so the hidden page is already current when it is next shown, and
+    // under s_viewsMutex together with each store and visibility change, so an older state cannot overtake a newer.
+    // "shown" false puts the page back in its blank wait: a show stays blank until its own message lands.
+    static constexpr const char* kKbThemeChannel = "__kbtheme";
+    static void QueueKeyboardThemeLocked()
+    {
+        MlView* kb = FindViewLocked(static_cast<ViewId>(s_kbViewId.load()));
+        if (!kb || kb->destroyPending) return;
+        const MlView* ui = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+        std::string msg = std::string("{\"shown\":") + (kb->visible ? "true" : "false") + ",\"theme\":" +
+                          ((ui && ui->kbTheme) ? HostTheme::KeyboardJson(*ui->kbTheme) : "null") + "}";
+        std::erase_if(kb->outbound, [](const OutboundCall& c) { return !c.raw && c.fn == kKbThemeChannel; });
+        kb->outbound.push_back({ kKbThemeChannel, std::move(msg), false });
+    }
+
     static void ShowOwnKeyboard(bool on)
     {
         if (on) {
@@ -905,7 +972,12 @@ namespace Magelight {
             if (!IsUIModeActive()) return;            // nothing is open to type into
             EnsureKeyboardView();
         }
-        if (const ViewId id = static_cast<ViewId>(s_kbViewId.load())) ShowView(id, on);
+        // The visibility and the message that says so change together (QueueKeyboardThemeLocked).
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        MlView* kb = FindViewLocked(static_cast<ViewId>(s_kbViewId.load()));
+        if (!kb) return;
+        ShowViewLocked(*kb, on);
+        QueueKeyboardThemeLocked();
     }
 
     // A key from that page: {"c":"a"} a character, {"vk":8} a virtual key,
@@ -951,6 +1023,7 @@ namespace Magelight {
     static void ImeOnTextFocus(bool focused);
 
     static void PlayPageSound(ViewId id, const std::string& arg);   // fwd (defined after the dispatcher)
+    static void OnPageHostTheme(ViewId id, const std::string& arg); // fwd (defined after the dispatcher)
 
     // `function` is the page's own __mlNative, which carries its view id as
     // private data (InstallBridgeShims). The id a page passes is only checked
@@ -1014,6 +1087,10 @@ namespace Magelight {
             PlayPageSound(id, arg);
             return JSValueMakeUndefined(ctx);
         }
+        if (name == "__hosttheme") {   // 0.31.9: the page's VR keyboard and cursor colours (magelight.hostTheme)
+            OnPageHostTheme(id, arg);
+            return JSValueMakeUndefined(ctx);
+        }
 
         MlView::Listener l;
         {
@@ -1047,6 +1124,128 @@ namespace Magelight {
         }
         if (hover && !Sound::HoverAllowed(id)) return;
         GameTask::Post([id, name]() { Sound::Play(name, id); });
+    }
+
+    // "lit FFD8CCB0 shade ..." or "none (the host's colours)", for the log.
+    static std::string DescribeCursorTint(const CursorTintSet& t)
+    {
+        if (t.Empty()) return "none (the host's colours)";
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "lit %08X shade %08X ink %08X glow %08X ibeam %08X", static_cast<unsigned>(t.lit),
+                      static_cast<unsigned>(t.shade), static_cast<unsigned>(t.ink), static_cast<unsigned>(t.glow),
+                      static_cast<unsigned>(t.ibeam));
+        return buf;
+    }
+
+    // 0.31.9, JS thread: magelight.hostTheme(obj | null). The keyboard page types into the UI-mode view, so a
+    // theme is checked here in full before anything is stored: one bad value refuses the whole message (no partial
+    // theme), and only the caller's own slots change. Log lines are rate-limited per view (ThemeLogRate).
+    static constexpr std::size_t kHostThemeMaxBytes = 2048;
+
+    static void RefuseHostTheme(ViewId id, const std::string& why)
+    {
+        std::uint32_t n = 0;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            if (MlView* v = FindViewLocked(id)) n = ++v->themeLog.refusals;
+        }
+        if (n && n <= kThemeRefusalsLogged)
+            SKSE::log::warn("Magelight: view {} hostTheme refused - {} (refusal {}{})", id, why, n,
+                            n == kThemeRefusalsLogged ? "; this view's later refusals are counted, not logged" : "");
+    }
+
+    static void OnPageHostTheme(ViewId id, const std::string& arg)
+    {
+        if (id == static_cast<ViewId>(s_kbViewId.load())) return RefuseHostTheme(id, "the keyboard page cannot set a theme");
+        if (arg.size() > kHostThemeMaxBytes) return RefuseHostTheme(id, "the message is over 2 KB");
+        enum class Part { Keep, Clear, Set };   // the part absent, null, or an object
+        Part kbPart = Part::Keep, cursorPart = Part::Keep;
+        HostTheme::KbTheme kb{};
+        std::string notes;   // optional colours ResolveKeyboard discarded, a low-contrast accent
+        CursorTintSet tint;
+        if (arg.empty()) {   // hostTheme(null)
+            kbPart = cursorPart = Part::Clear;
+        } else {
+            nlohmann::json j;
+            try {
+                j = nlohmann::json::parse(arg);
+            } catch (...) {
+                return RefuseHostTheme(id, "the message is not JSON");
+            }
+            if (!j.is_object()) return RefuseHostTheme(id, "the message is not a JSON object");
+            const auto ver = j.find("v");
+            if (ver == j.end() || !ver->is_number_integer() || ver->get<std::int64_t>() != 1)
+                return RefuseHostTheme(id, "\"v\" must be 1");
+            // A colour of a part: false when absent or bad; `bad` names the first bad one. Unknown keys are ignored.
+            std::string bad;
+            const auto colour = [&bad](const nlohmann::json& part, const char* partName, const char* key, std::uint32_t& rgb) {
+                const auto it = part.find(key);
+                if (it == part.end()) return false;
+                if (it->is_string() && HostTheme::ParseHex(it->get_ref<const std::string&>(), rgb)) return true;
+                if (bad.empty()) bad = std::string(partName) + "." + key + " is not a #rrggbb colour";
+                return false;
+            };
+            if (const auto k = j.find("keyboard"); k != j.end()) {
+                if (k->is_null()) {
+                    kbPart = Part::Clear;
+                } else if (!k->is_object()) {
+                    return RefuseHostTheme(id, "\"keyboard\" must be an object or null");
+                } else {
+                    HostTheme::KbInput in;
+                    for (int i = 0; i < HostTheme::kKbTokens; ++i)
+                        in.given[i] = colour(*k, "keyboard", HostTheme::kKbNames[i], in.rgb[i]);
+                    if (!bad.empty()) return RefuseHostTheme(id, bad);
+                    std::string why;
+                    if (!HostTheme::ResolveKeyboard(in, kb, why, &notes)) return RefuseHostTheme(id, "keyboard: " + why);
+                    kbPart = Part::Set;
+                }
+            }
+            if (const auto c = j.find("cursor"); c != j.end()) {
+                if (c->is_null()) {
+                    cursorPart = Part::Clear;
+                } else if (!c->is_object()) {
+                    return RefuseHostTheme(id, "\"cursor\" must be an object or null");
+                } else {
+                    std::uint32_t* const slots[] = { &tint.lit, &tint.shade, &tint.ink, &tint.glow, &tint.ibeam };
+                    static_assert(std::size(slots) == HostTheme::kCursorNames.size());
+                    for (std::size_t i = 0; i < std::size(slots); ++i) {
+                        std::uint32_t rgb = 0;
+                        if (colour(*c, "cursor", HostTheme::kCursorNames[i], rgb)) *slots[i] = 0xFF000000u | rgb;
+                    }
+                    if (!bad.empty()) return RefuseHostTheme(id, bad);
+                    cursorPart = Part::Set;   // a colour left out keeps the host's, as in CursorTint
+                }
+            }
+        }
+        // Both parts in one critical section. The cursor part is SetViewCursorTint's store without its per-call log
+        // line; the one line here is built from what is stored and written after unlocking.
+        std::string line;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(id);
+            if (!v || v->destroyPending) return;
+            bool kbChanged = false, cursorChanged = false;
+            if (kbPart != Part::Keep) {
+                const std::optional<HostTheme::KbTheme> next = kbPart == Part::Set ? std::optional(kb) : std::nullopt;
+                kbChanged = v->kbTheme != next;
+                v->kbTheme = next;
+                if (kbChanged && id == static_cast<ViewId>(s_uiModeView.load())) QueueKeyboardThemeLocked();
+            }
+            if (cursorPart != Part::Keep) {
+                cursorChanged = !(v->cursorTint == tint);
+                v->cursorTint = tint;
+            }
+            std::uint32_t skipped = 0;
+            if ((!kbChanged && !cursorChanged) || !v->themeLog.Admit(GetTickCount64(), skipped)) return;
+            if (kbChanged)
+                line = "keyboard " + (v->kbTheme ? HostTheme::KeyboardJson(*v->kbTheme) : std::string("none (the host's look)"));
+            if (cursorChanged) line += std::string(line.empty() ? "" : "; ") + "cursor tint " + DescribeCursorTint(v->cursorTint);
+            if (kbChanged && !notes.empty()) line += "; " + notes;
+            else notes.clear();
+            if (skipped) line += " (" + std::to_string(skipped) + " earlier changes not logged)";
+        }
+        if (!notes.empty()) SKSE::log::warn("Magelight: view {} hostTheme (page): {}", id, line);
+        else SKSE::log::info("Magelight: view {} hostTheme (page): {}", id, line);
     }
 
     // Render thread. full (OnWindowObjectReady, a fresh window object): the
@@ -1115,6 +1314,8 @@ namespace Magelight {
             "return{send:function(ch,p){var a=p==null?'':(typeof p==='string'?p:JSON.stringify(p));__mlNative(id,ch,a);},"
             // 0.29.0: magelight.sound('click') -> the reserved '__sound' channel (host plays it through the game's audio)
             "sound:function(n){try{__mlNative(id,'__sound',n==null?'':String(n));}catch(e){}},"
+            // 0.31.9: magelight.hostTheme({v:1,keyboard:{..},cursor:{..}}) or (null) -> the reserved '__hosttheme' channel
+            "hostTheme:function(o){try{__mlNative(id,'__hosttheme',o==null?'':JSON.stringify(o));}catch(e){}},"
             "on:function(ch,fn){(subs[ch]=subs[ch]||[]).push(fn);var b=buf[ch];if(b){delete buf[ch];for(var i=0;i<b.length;i++){try{fn(b[i]);}catch(e){console.error('[magelight] replay for '+ch+' threw',e);}}}"
             "return function(){window.magelight.off(ch,fn);};},"
             "off:function(ch,fn){var s=subs[ch];if(!s)return;var i=s.indexOf(fn);if(i>=0)s.splice(i,1);},"
@@ -3870,19 +4071,37 @@ float4 ps_straight(VSOut i) : SV_Target {
         return SetViewCursorSet(view, false, none);
     }
 
+    // The log lines of these two setters are built from the stored value inside the critical section: a page writes
+    // the same slots (OnPageHostTheme), and a line printed from the argument could name a value another writer replaced.
     bool SetViewCursorTint(ViewId view, const CursorTintSet& tint)
     {
+        std::string desc;
         {
             std::lock_guard<std::mutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending) return false;
             v->cursorTint = tint;
+            desc = DescribeCursorTint(v->cursorTint);
         }
-        if (tint.Empty())
-            SKSE::log::info("Magelight: view {} cursor tint: none (the host's colours)", view);
-        else
-            SKSE::log::info("Magelight: view {} cursor tint: lit {:08X} shade {:08X} ink {:08X} glow {:08X} ibeam {:08X}",
-                            view, tint.lit, tint.shade, tint.ink, tint.glow, tint.ibeam);
+        SKSE::log::info("Magelight: view {} cursor tint: {}", view, desc);
+        return true;
+    }
+
+    bool SetViewKeyboardTheme(ViewId view, const HostTheme::KbTheme* theme)
+    {
+        if (!view || view == static_cast<ViewId>(s_kbViewId.load())) return false;
+        const std::optional<HostTheme::KbTheme> next = theme ? std::optional(*theme) : std::nullopt;
+        std::string desc;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending) return false;
+            if (v->kbTheme == next) return true;   // unchanged: no message, no line
+            v->kbTheme = next;
+            if (view == static_cast<ViewId>(s_uiModeView.load())) QueueKeyboardThemeLocked();
+            desc = v->kbTheme ? HostTheme::KeyboardJson(*v->kbTheme) : "none (the host's look)";
+        }
+        SKSE::log::info("Magelight: view {} keyboard theme (API): {}", view, desc);
         return true;
     }
 
@@ -7203,6 +7422,10 @@ float4 ps_straight(VSOut i) : SV_Target {
                 return;
             }
             s_uiModeView.store(target);
+            {
+                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                QueueKeyboardThemeLocked();   // the hidden keyboard page takes this view's theme ahead of a show (0.31.9)
+            }
             SetUIMode(true);
         });
     }
@@ -7243,6 +7466,10 @@ float4 ps_straight(VSOut i) : SV_Target {
                 return;
             }
             s_uiModeView.store(view);
+            {
+                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                QueueKeyboardThemeLocked();   // the hidden keyboard page takes this view's theme ahead of a show (0.31.9)
+            }
             SetUIMode(true, true, pauseGame, noTextEntry);
         });
     }
@@ -7372,6 +7599,10 @@ float4 ps_straight(VSOut i) : SV_Target {
             const ViewId old = static_cast<ViewId>(s_uiModeView.load());
             if (old == view) { Emit(HostEvent::UIModeSwitched, view); return; }
             s_uiModeView.store(view);
+            {
+                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                QueueKeyboardThemeLocked();   // the keyboard page, up or not, follows the new view's theme (0.31.9)
+            }
             ApplyFreezeWorld("view switch");   // follows the new view's preference (the inspector has none)
             ShowView(view, true);
             QueueInput(0, 1, 0);   // re-run the focus marker: key focus follows s_uiModeView
@@ -7449,12 +7680,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     void ShowView(ViewId view, bool show)
     {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
-        if (MlView* v = FindViewLocked(view)) {
-            if (v->visible != show) v->hiddenSince = show ? 0 : GetTickCount64();
-            v->visible = show;
-            if (!v->ul) v->loadNow = show;   // an open never waits behind the load queue
-            if (!show) v->pageCursor = 0;   // reopened, the page reports again on the first mouse move
-        }
+        if (MlView* v = FindViewLocked(view)) ShowViewLocked(*v, show);
     }
 
     void SetViewCutout(ViewId view, int x, int y, int w, int h)
@@ -7574,9 +7800,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         if (!functionName || !*functionName) return;
         std::lock_guard<std::mutex> lk(s_viewsMutex);
-        if (MlView* v = FindViewLocked(view)) {
-            if (v->outbound.size() < 256) v->outbound.push_back({ functionName, argument, false });
-        }
+        if (MlView* v = FindViewLocked(view)) QueueOutboundLocked(*v, { functionName, argument, false });
     }
 
     void EvalJS(ViewId view, const std::string& script, JsResultFnInternal fn, void* user)
@@ -7595,9 +7819,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     void InvokeJS(ViewId view, const std::string& script)
     {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
-        if (MlView* v = FindViewLocked(view)) {
-            if (v->outbound.size() < 256) v->outbound.push_back({ script, {}, true });
-        }
+        if (MlView* v = FindViewLocked(view)) QueueOutboundLocked(*v, { script, {}, true });
     }
 
     void SetUIModeView(ViewId view)
@@ -7632,6 +7854,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->visible = false;
         v->destroyPending = true;
+        v->kbTheme.reset();
         if (s_toggleView.load() == view) s_toggleView.store(0);
         if (s_uiModeView.load() == view) s_uiModeView.store(0);
         return true;

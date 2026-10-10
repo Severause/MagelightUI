@@ -33,6 +33,7 @@ frontend/, views/           React demo (Vite, es2022) + probe/badge pages (dev s
 assets/, interface/         loose runtime files, the blank focus-menu SWF (the cursor is drawn in code: src/MagelightCursorArt.h)
 tools/desktop-harness/      run our driver (or AppCore's) on the desktop — no game needed
 tools/font-test/            the stock font loader vs ours on imitated broken systems (build.bat builds and runs it)
+tools/hosttheme-test/       src/HostThemeCore.h's keyboard-theme colour rules (build.bat builds and runs it)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
 build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <that>\stage (namespaced runtime patch)
 ```
@@ -157,3 +158,10 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     `MagelightFonts::CreateLoader`'s, never the bare platform one: it checks the
     last resort at startup and serves the bundled DejaVu Sans when nothing else
     loads. `tools/font-test` reproduces the crash on the stock loader.
+20. **The VR keyboard page never sees what a mod sent.** It is shared by every mod and its
+    keys go to the UI-mode view (`__key`), so a theme (`SetViewKeyboardTheme`, a page's
+    `__hosttheme`) is checked in full by `src/HostThemeCore.h` before anything is stored, a
+    message with one bad value changes nothing, and the keyboard gets a JSON the host builds from
+    the stored numbers (`QueueKeyboardThemeLocked`). The keyboard page itself may not set one.
+    Each message carries the whole state (shown + theme), replaces any still queued, and is
+    queued under `s_viewsMutex` with the store or visibility change it reports.

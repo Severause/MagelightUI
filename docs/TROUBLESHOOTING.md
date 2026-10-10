@@ -6,7 +6,7 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v0.31.7 loading`); the lines after it name the game (SE, AE or VR, its version and
+version (`Magelight v0.31.9 loading`); the lines after it name the game (SE, AE or VR, its version and
 SKSE's), Windows (or the Wine under Proton), the CPU and RAM, and, once the game's data has loaded,
 every graphics adapter with its driver version, the one the game renders on marked. Paths in the
 log show your user folder as `%USERPROFILE%`. Each line starts with the date and time, a level
@@ -222,7 +222,7 @@ The `vr` block: `enabled` (`true`), `mirror` (`true`: keep drawing pages on the 
 tuned by `followAngleDeg` 45, `followMinDeg` 80 and `followDistM` 0.5), `panelDistanceM` (1.2),
 `panelWidthM` (1.6), `panelHeightOffsetM` (-0.1), `panelWidth` / `panelHeight` (1600 / 900, the
 page size of fullscreen views), `keyboard` (`true`: Magelight's own laser keyboard for text
-fields), `runtimeKeyboard` (`false`), `beam` (`true`) and `beamAlpha` (0.55) for the laser,
+fields; since 0.31.9 in the colours of the mod whose page you type into when it gives some: `view N hostTheme` or `view N keyboard theme` in the log), `runtimeKeyboard` (`false`), `beam` (`true`) and `beamAlpha` (0.55) for the laser,
 `cursorScale` (0.012) and `cursorDot` (`true`) for its pointer, `suppressRuntimeLaser` (`true`:
 hide OpenComposite's own menu laser over Magelight pages), `aimUseTip` (`true`) and
 `aimPitchDeg` (-35) for the controller's aim.
