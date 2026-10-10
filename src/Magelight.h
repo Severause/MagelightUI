@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 
+#include "HostThemeCore.h"
+
 struct ID3D11ShaderResourceView;
 
 // Magelight UI — the host: Present hook, Ultralight on the game's D3D11
@@ -325,9 +327,14 @@ namespace Magelight {
     struct CursorTintSet {
         std::uint32_t lit = 0, shade = 0, ink = 0, glow = 0, ibeam = 0;
         bool Empty() const { return !((lit | shade | ink | glow | ibeam) & 0xFF000000u); }
+        bool operator==(const CursorTintSet&) const = default;
     };
     // False = no such view.
     bool SetViewCursorTint(ViewId view, const CursorTintSet& tint);
+    // Keyboard theme (0.31.9): the host's own VR keyboard in this view's colours while it holds UI mode. `theme`
+    // is complete (HostTheme::ResolveKeyboard); nullptr clears. False = no such view, or the keyboard's own. Any
+    // thread. A page sets the same slot through magelight.hostTheme (the reserved '__hosttheme' channel).
+    bool SetViewKeyboardTheme(ViewId view, const HostTheme::KbTheme* theme);
     ViewId GetUIModeView();                // the current/last UI-mode target (0 = none)
     std::uint32_t GetToggleKey();          // the host's own UI-mode toggle scancode (Magelight.json)
     bool IsUIModeActive();

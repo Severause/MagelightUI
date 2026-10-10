@@ -35,9 +35,9 @@ export function installMock(opts: MockOptions = {}): PageCore {
     // (loopback / networkPolicy). `mock` flags the mock itself.
     capabilities: { gpu: 0, textureImage: 0, clipPathHole: 0, pause: 1, events: 1, clipboard: 1,
                     networkDeny: 0, sessions: 1, manifest: 1, http: 0, vr: 0, hotkeys: 1, evaljs: 1,
-                    pagebridge: 1, cutout: 0, hibernate: 0, inspector: 0, ime: 0, loopback: 1,
+                    pagebridge: 1, cutout: 0, hibernate: 0, inspector: 0, ime: 0, loopback: 1, csp: 0,
                     escapeCapture: 0, viewOrder: 0, scrollStep: 0, networkPolicy: 1, sound: 0, freezeWorld: 0, consoleLog: 0,
-                    loadStagger: 0, loadOnShow: 0, cursor: 0, cursorTint: 0, rebuildScale: 0, mock: 1 },
+                    loadStagger: 0, loadOnShow: 0, cursor: 0, cursorTint: 0, rebuildScale: 0, keyboardTheme: 0, mock: 1 },
     dev: true,
     runtimeUrl: '',
     ...opts.info,
@@ -89,6 +89,13 @@ export function installMock(opts: MockOptions = {}): PageCore {
     },
     pending(channel) {
       return (buf[channel] ?? []).length;
+    },
+    // No VR keyboard or drawn cursor in a browser: record it as a send on the host's channel.
+    hostTheme(theme) {
+      const a = theme == null ? '' : JSON.stringify(theme);
+      sent.push({ channel: '__hosttheme', payload: a });
+      opts.onSend?.('__hosttheme', a);
+      log(`→ hostTheme(${a.length > 120 ? a.slice(0, 120) + '…' : a})`);
     },
     // No audio in a browser mock — just say what would have played.
     sound(name) {

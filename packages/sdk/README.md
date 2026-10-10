@@ -20,7 +20,8 @@ bridge.onUIMode((on) => on ? input.focus() : input.blur());
 
 - **`host`** — `present`, `version`, `versionNumber`, `modId`, `viewName`, `viewId`, `dev`,
   `can('textureImage')`, `atLeast(0, 15)`, `imageUrl(name)`, `sound('click')` (host 0.29.0 — through the
-  game's audio; a page cannot play sound itself).
+  game's audio; a page cannot play sound itself), `hostTheme({ v: 1, keyboard, cursor })` (host 0.31.9 —
+  your colours for the host's VR keyboard and drawn cursor; see the host's docs/SDK.md "Host theme").
 - **`bridge.on / send / onRaw / pending / onUIMode`**, **`channel<T>(name)`**, **`ready()`**.
 - **Pre-mount replay** — the host buffers any channel payload until someone subscribes, so a
   payload sent from `ViewDomReady` is never lost to a late React mount.

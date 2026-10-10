@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 0.31.9 | 3109 | `SetViewKeyboardTheme(view, theme)` with `KeyboardTheme` — Magelight's own VR keyboard in a view's colours while it holds UI mode (eight required colours, five filled in, text under 3:1 refused); page `magelight.hostTheme({ v: 1, keyboard, cursor })` sets the keyboard theme and the cursor tint; `QueryCapability("keyboardtheme")` |
 | 0.31.7 | 3107 | `RebuildViewAtScale(view, scale)` — change a loaded page's device scale by releasing its View and loading the page again in a new one created at that scale (the page reloads; `ViewReloaded` follows); `QueryCapability("rebuildscale")` |
 | 0.31.5 | 3105 | The network policy is a Content-Security-Policy written into every page: loopback = `localhost` / `127.0.0.1` over `http(s)` and `ws(s)` only (`[::1]` and other `127.x` no longer reach), a page cannot `fetch()` its own files, and a view shows only its own HTML files; `QueryCapability("csp")` |
 | 0.31.1 | 3101 | `SetViewCursorTint(view, tint)` with `CursorTint` — the host's drawn cursor (arrow, hover glow, I-beam) and the VR laser dot in your colours over a view; `QueryCapability("cursortint")` |
@@ -43,6 +44,51 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 0.31.9
+
+- **A view's theme reaches Magelight's VR keyboard.** The keyboard is one host page shared by every mod,
+  in Magelight's own brown and brass; nothing could change it, so a mod with its own themes had a
+  keyboard that matched none of them. `SetViewKeyboardTheme(view, theme)` (C++) and
+  `magelight.hostTheme({ v: 1, keyboard: { ... } })` (page) give a view thirteen keyboard colours,
+  shown whenever the keyboard is raised while that view holds UI mode; another view in UI mode shows
+  its own theme or the host's look, and the keyboard switches at once when UI mode moves. Eight
+  colours are required (`panel`, `panelBorder`, `key`, `keyBorder`, `keyHover`, `text`, `muted`,
+  `accent`); the host fills in `action`, `danger`, `pressed`, `pressedText` and `barHover` from them.
+  The theme stays with the view (hibernation and `RebuildViewAtScale` keep it) until it is changed or
+  the view is destroyed. Gate on `hostVersionNumber >= 3109` and `QueryCapability("keyboardtheme")`;
+  the page sees `capabilities.keyboardTheme`.
+- **Every label stays readable, light themes included.** Labels are held to 3:1 contrast (WCAG) on a key
+  and on a key under the laser, which in VR hovers every key before it is pressed. A theme whose text
+  has less on `key`, `keyHover` or `panel` is refused. The `action` fill-in copies `accent` only when it
+  reads there, else it takes `text`, and the red for Close must read on both too. A given `action` or
+  `danger` under 3:1, or a given `pressedText` under 4.5:1 on `pressed`, is replaced by its fill-in with
+  a warning, never refusing the theme for an optional colour; an `accent` under 3:1 on `key` is kept
+  with a warning. Under a theme, a held Bksp, Enter, Close, Shift or Caps shows `pressedText` like a
+  held letter.
+- **A page can tint the drawn cursor too.** The same `hostTheme` message takes a `cursor` part
+  (`lit`, `shade`, `ink`, `glow`, `ibeam`), which writes the slot `SetViewCursorTint` writes, with its
+  rules. Each part: an object sets it, `null` clears it, left out keeps it; `hostTheme(null)` clears
+  both.
+- **The keyboard page stays the host's.** Its keys go to the UI-mode view, so it never sees what a page
+  sent: the host takes the message only from the view that sends it and never from the keyboard,
+  refuses one over 2 KB, without `"v": 1`, with any colour that is not exactly `#rrggbb`, or with too
+  little text contrast (the whole message, never part of it), then sends the keyboard a message of its
+  own built from the numbers, which replaces any not yet delivered. The page sets only its thirteen
+  `--kb-*` properties, each checked again.
+- **No other view's colours on a show.** The keyboard page follows the UI-mode view's theme while it is
+  down too, and after a hide it stays blank until its next show's own message arrives (queued together
+  with the show), so it never shows another view's colours, the default look under a theme, or a theme
+  that has since changed; at worst it is blank for a frame. Its first load stays hidden until the first
+  message, or 150 ms. With no theme the keyboard looks exactly as before.
+- **The log keeps up with a busy page.** A page may send its theme on every change (a colour picker, a
+  fade): its first change is logged, then at most one line a second with a count of the changes between,
+  and a view's first 32 refusals. A plugin's `SetViewKeyboardTheme` logs each change.
+- **A page's dropped calls are logged.** Calls to a page that has not reached DOM ready wait in a queue
+  of 256 per view and the rest were dropped silently; the first drop per view now writes one warning.
+- `capabilities.csp` and the header's capability list now carry `csp`, which `QueryCapability` has
+  answered since 0.31.5; the page and the SDK mock never had it.
+- `tools/hosttheme-test` checks the colour rules (`src/HostThemeCore.h`) on the desktop.
 
 ## 0.31.8
 

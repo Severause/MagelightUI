@@ -461,7 +461,80 @@ if (v4()->hostVersionNumber >= 3101 && v4()->QueryCapability("cursortint") == 1)
   panel's next redraw (`"cursorForce": true` and `"modCursors": false` drop it
   there too). With `vr.cursorDot` false the laser end shows the view's image,
   the player's `cursorFile` or the baked arrow, none of them tinted.
-- C++ only: there is no manifest key or Papyrus call for the tint.
+- No manifest key or Papyrus call. Since 0.31.9 a page can set the same slot
+  itself: `magelight.hostTheme({ v: 1, cursor: { lit: '#dce6f0', ... } })`
+  ([SDK.md](SDK.md)); whichever of you sets it last wins.
+
+## Theming the VR keyboard (0.31.9)
+
+On VR, a text field that takes focus in the UI-mode view raises Magelight's
+own keyboard (`views/keyboard`, `vr.keyboard` in `Magelight.json`). It is one
+page shared by every mod, so it shows the theme of the view that holds UI mode
+whenever it is raised, and the host's look for a view that set none:
+
+```cpp
+if (v4()->hostVersionNumber >= 3109 && v4()->QueryCapability("keyboardtheme") == 1) {
+    MAGELIGHT_API::KeyboardTheme k{ sizeof(k) };
+    k.panel       = 0xFF101820;   // 0xAARRGGBB; alpha 0 = not given, any other alpha is drawn opaque
+    k.panelBorder = 0xFF3A4E62;
+    k.key         = 0xFF1A2633;
+    k.keyBorder   = 0xFF2C3D4F;
+    k.keyHover    = 0xFF233344;
+    k.text        = 0xFFDCE6F0;
+    k.muted       = 0xFF7F93A8;
+    k.accent      = 0xFF7CB2CE;
+    // action, danger, pressed, pressedText, barHover left at 0: the host fills them in
+    v4()->SetViewKeyboardTheme(view, &k);
+}
+// later: v4()->SetViewKeyboardTheme(view, nullptr) gives the host's look back
+```
+
+| Token | Where | Required |
+|---|---|---|
+| `panel`, `panelBorder` | the keyboard's background and border (the border colour also draws the drag grip and a hovered key's border) | yes |
+| `key`, `keyBorder`, `keyHover` | a key, its border, a key under the laser | yes |
+| `text`, `muted`, `accent` | key labels; the title bar's hints; the title, Shift and Caps, a pressed key's border | yes |
+| `action` | Bksp, Tab, Enter, Esc and the arrows | no: `accent` if it has 3:1 on `key` and `keyHover`, else `text` |
+| `danger` | Close | no: `#c0392b` or `#e74c3c`, whichever reads better on both `key` and `keyHover`, if it has 3:1 on both; else `text` |
+| `pressed` | a key held down, Shift or Caps on, the bar while dragged | no: `accent` 20% over `key` |
+| `pressedText` | the label of any key held down, and of Shift or Caps while on | no: `text`, or black or white (the one with more contrast) when `text` has under 4.5:1 on `pressed` |
+| `barHover` | the title bar under the laser | no: `panel` and `key` half and half |
+
+Contrast is WCAG 2's ratio. Labels are held to 3:1 on both `key` and
+`keyHover`, because in VR the laser hovers every key before it presses it:
+
+- **Refused** (`InvalidArgument`, the reason in `GetLastErrorMessage`, nothing
+  stored): a required colour with alpha 0, or a `text` with under 3:1 on
+  `key`, `keyHover` or `panel`. `size` must be at least the 0.31.9 struct's;
+  the host reads only the fields it knows, so a later, longer struct still
+  works.
+- **Replaced by the fill-in** (the theme is still stored, with a warning in the
+  log and through your `onLog`): a given `action` or `danger` with under 3:1
+  on `key` or `keyHover`, a given `pressedText` with under 4.5:1 on `pressed`.
+- **Kept, with a warning**: an `accent` with under 3:1 on `key`. Shift, Caps
+  and the title are drawn in it, so pick one that reads; the `action` fill-in
+  stops copying it.
+- So the fill-in makes a light theme work as well as a dark one: give the
+  eight required colours and every label the host fills in can be read.
+- Without a theme, the keyboard is drawn exactly as before 0.31.9, including
+  a held special key, which keeps its own colour there.
+- Per view: kept until you change it or destroy the view; hibernation and
+  `RebuildViewAtScale` keep it. It shows only while your view holds UI mode
+  with the keyboard up: when another view takes UI mode (including your own
+  other views) the keyboard switches to that view's theme at once. Any thread.
+- The font is the keyboard's own; there is no font token.
+- Flat has no on-screen keyboard (the player types on a real one): the theme
+  is stored there and never shown, so set it unconditionally.
+- A page can set the same slot itself with `magelight.hostTheme({ v: 1,
+  keyboard: { ... } })` ([SDK.md](SDK.md)), with the same rules, and the
+  cursor tint in the same message. Whichever of you sets it last wins.
+- The keyboard page is privileged (its keys go to the UI-mode view), so it
+  never sees what you or a page passed: the host checks the colours, builds a
+  fresh message from the numbers, and the page checks each value again.
+- The keyboard page is kept current while it is down, and after a hide it
+  stays blank until the message of its next show arrives, so a show never
+  paints another view's colours or a theme that has since changed (at worst
+  it is blank for one frame).
 
 ## When something doesn't work
 
