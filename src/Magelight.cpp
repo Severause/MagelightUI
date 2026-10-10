@@ -52,6 +52,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -99,6 +100,8 @@ namespace Magelight {
     //                              // log (unset: "all" in devMode, else "warnings")
     //   "stallWatchdog": true, "stallThresholdMs": 1500   // 0.28.3: log the stalled thread's stack when no
     //                                                     // frame presents this long (250-60000)
+    //   "blockPolledKeys": true   // 0.31.10: other plugins' GetAsyncKeyState / GetKeyState read keys as up while a
+    //                             // page holds UI mode (see InstallPolledKeyFilter)
     //   "loadStagger": true, "loadBudgetMs": 8   // 0.31.0: hidden views start their first load one per frame
     //                                            // (see MaterializeViews); false = all in one frame (1-100)
     //   "cursorFile": "", "cursorHeight": 24, "cursorHotspotX": 0, "cursorHotspotY": 0   // the host cursor
@@ -261,6 +264,7 @@ namespace Magelight {
     static std::atomic<long long> s_lastPresentMs{ 0 };
     static std::atomic<DWORD>     s_lastPresentTid{ 0 };
     static std::atomic<bool>      s_stallWatchdog{ true };
+    static bool                   s_blockPolledKeys = true;   // Magelight.json; read before InstallPolledKeyFilter
     static std::atomic<int>       s_stallThresholdMs{ 1500 };
     // Staggered view loading (0.31.0, MaterializeViews): "loadStagger" and "loadBudgetMs" in Magelight.json.
     static std::atomic<bool>      s_loadStagger{ true };
@@ -526,6 +530,8 @@ namespace Magelight {
                 s_imageProbe = it->get<bool>();
             if (auto it = j.find("stallWatchdog"); it != j.end() && it->is_boolean())
                 s_stallWatchdog.store(it->get<bool>());
+            if (auto it = j.find("blockPolledKeys"); it != j.end() && it->is_boolean())
+                s_blockPolledKeys = it->get<bool>();
             if (auto it = j.find("stallThresholdMs"); it != j.end() && it->is_number())
                 s_stallThresholdMs.store(std::clamp(it->get<int>(), 250, 60000));
             if (auto it = j.find("loadStagger"); it != j.end() && it->is_boolean())
@@ -1974,6 +1980,134 @@ namespace Magelight {
         if (s_inputQueue.size() < 512) s_inputQueue.push_back({ msg, w, l });
     }
 
+    // ── Polled keys (0.31.10) ───────────────────────────────────────────
+    // Muting the engine's keyboard and taking the window's key messages hides a key from everything that reads
+    // the game's input, but not from a plugin that asks Windows for the key state itself (GetAsyncKeyState /
+    // GetKeyState): SkyrimNet polls its hotkeys that way, so a letter typed into a page opened its chat behind it.
+    // While a page holds UI mode both calls answer "up" for keyboard keys to another mod's SKSE plugin (a DLL
+    // under SKSE\Plugins), except the DLL that owns the page, which may poll its own close key. Magelight, its
+    // runtime folder, the game and Windows itself (the IME reads modifier state) are never filtered, nor are the
+    // mouse buttons. GetKeyState keeps its toggle bit (Caps Lock, Num Lock). Magelight.json
+    // "blockPolledKeys": false leaves both calls alone (no hook is installed).
+    static std::string WideToUtf8(const std::wstring& w);
+    using KeyStateFn = SHORT(WINAPI*)(int);
+    static KeyStateFn           s_getAsyncKeyStateNext = nullptr;
+    static KeyStateFn           s_getKeyStateNext = nullptr;
+    static const void*          s_selfModule = nullptr;
+
+    // Another mod's SKSE plugin? Cached per image base. The file name is read outside the lock: a thread holding
+    // the loader lock can poll a key, and GetModuleFileNameW wants that lock.
+    static bool IsForeignPluginModule(const void* base)
+    {
+        static std::mutex s_mutex;
+        static std::unordered_map<const void*, bool> s_known;
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            if (const auto it = s_known.find(base); it != s_known.end()) return it->second;
+        }
+        wchar_t buf[1024]{};
+        const DWORD n = GetModuleFileNameW(reinterpret_cast<HMODULE>(const_cast<void*>(base)), buf, 1023);
+        std::wstring path(buf, n);
+        std::wstring lower(path);
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        // By folder name, not s_runtimeDir: under MO2 a module's file name is its real path in the mod's folder,
+        // while s_runtimeDir is the virtual Data path.
+        const bool ours = lower.find(L"\\skse\\plugins\\magelight\\") != std::wstring::npos;
+        const bool foreign = n > 0 && !ours && lower.find(L"\\skse\\plugins\\") != std::wstring::npos;
+        bool first = false;
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            first = s_known.emplace(base, foreign).second;
+        }
+        if (first && foreign) {
+            const auto slash = path.find_last_of(L"\\/");
+            SKSE::log::info("Magelight: keys {} polls are hidden while a page holds UI mode (Magelight.json "
+                            "\"blockPolledKeys\": false allows them)",
+                            WideToUtf8(slash == std::wstring::npos ? path : path.substr(slash + 1)));
+        }
+        return foreign;
+    }
+
+    static bool HidePolledKey(int vk, void* returnAddress)
+    {
+        if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2)
+            return false;
+        if (!IsUIModeActive()) return false;
+        PVOID base = nullptr;
+        if (!RtlPcToFileHeader(returnAddress, &base) || !base) return false;
+        if (base == s_selfModule || base == Api4::GetUIModeOwnerModule()) return false;
+        return IsForeignPluginModule(base);
+    }
+
+    // Magelight's own key-state reads. They call the originals behind the filter: a plugin that hooks these
+    // exports after Magelight puts its own DLL at the return address, so a read made through it would be taken
+    // for that plugin's and hidden.
+    static SHORT MlGetAsyncKeyState(int vk)
+    {
+        return s_getAsyncKeyStateNext ? s_getAsyncKeyStateNext(vk) : GetAsyncKeyState(vk);
+    }
+
+    static SHORT MlGetKeyState(int vk)
+    {
+        return s_getKeyStateNext ? s_getKeyStateNext(vk) : GetKeyState(vk);
+    }
+
+    static SHORT WINAPI HookGetAsyncKeyState(int vk)
+    {
+        const SHORT state = s_getAsyncKeyStateNext(vk);
+        return (state != 0 && HidePolledKey(vk, _ReturnAddress())) ? 0 : state;
+    }
+
+    static SHORT WINAPI HookGetKeyState(int vk)
+    {
+        const SHORT state = s_getKeyStateNext(vk);
+        return ((state & 0x8000) && HidePolledKey(vk, _ReturnAddress())) ? static_cast<SHORT>(state & 1) : state;
+    }
+
+    // kDataLoaded, after LoadHostSettings. Both or neither: a half-installed filter would be harder to reason about.
+    static void InstallPolledKeyFilter()
+    {
+        if (!s_blockPolledKeys) {
+            SKSE::log::info("Magelight: polled keys pass through while a page holds UI mode (blockPolledKeys false)");
+            return;
+        }
+        PVOID self = nullptr;
+        RtlPcToFileHeader(reinterpret_cast<PVOID>(&InstallPolledKeyFilter), &self);
+        s_selfModule = self;
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        void* async = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "GetAsyncKeyState")) : nullptr;
+        void* sync = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "GetKeyState")) : nullptr;
+        const MH_STATUS init = MH_Initialize();
+        if (!async || !sync || (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED)) {
+            SKSE::log::warn("Magelight: polled-key filter not installed ({}) - a plugin that polls the keyboard sees "
+                            "keys typed into a page", !async || !sync ? "user32 exports not found" : MH_StatusToString(init));
+            return;
+        }
+        MH_STATUS st = MH_CreateHook(async, reinterpret_cast<void*>(&HookGetAsyncKeyState),
+                                     reinterpret_cast<void**>(&s_getAsyncKeyStateNext));
+        if (st == MH_OK) {
+            st = MH_CreateHook(sync, reinterpret_cast<void*>(&HookGetKeyState), reinterpret_cast<void**>(&s_getKeyStateNext));
+            if (st != MH_OK) MH_RemoveHook(async);
+        }
+        if (st == MH_OK) {
+            st = MH_EnableHook(async);
+            if (st == MH_OK) {
+                st = MH_EnableHook(sync);
+                if (st != MH_OK) MH_DisableHook(async);
+            }
+            if (st != MH_OK) { MH_RemoveHook(async); MH_RemoveHook(sync); }
+        }
+        if (st != MH_OK) {
+            s_getAsyncKeyStateNext = nullptr;   // removed trampolines: MlGet* must fall back to the imports
+            s_getKeyStateNext = nullptr;
+            SKSE::log::warn("Magelight: polled-key filter not installed (MinHook: {}) - a plugin that polls the keyboard "
+                            "sees keys typed into a page", MH_StatusToString(st));
+            return;
+        }
+        SKSE::log::info("Magelight: polled-key filter on - other plugins' GetAsyncKeyState / GetKeyState read keys as up "
+                        "while a page holds UI mode");
+    }
+
     // ── Typing on VR: the engine's keyboard device, not the window ──────
     // In a headset the game window almost never holds OS focus, so it receives
     // NO keyboard messages at all — field-verified 2026-09-03: with a page
@@ -2015,7 +2149,7 @@ namespace Magelight {
         case VK_LMENU:    case VK_RMENU:    vk = VK_MENU;    break;
         default: break;
         }
-        if (!extended && make >= 0x47 && make <= 0x53 && (GetKeyState(VK_NUMLOCK) & 1)) {
+        if (!extended && make >= 0x47 && make <= 0x53 && (MlGetKeyState(VK_NUMLOCK) & 1)) {
             // Keypad 7 8 9 - 4 5 6 + 1 2 3 0 . ; minus and plus keep their own codes.
             static constexpr UINT kPad[13] = { VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, 0, VK_NUMPAD4, VK_NUMPAD5,
                 VK_NUMPAD6, 0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD0, VK_DECIMAL };
@@ -2030,10 +2164,10 @@ namespace Magelight {
         QueueInput(WM_KEYDOWN, vk, base | 1 | (phase == KeyPhase::Repeat ? (1 << 30) : 0));
         // Printable? Ask the active layout, with the live modifier state.
         BYTE ks[256]{};
-        if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
-        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
-        if (GetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
-        if (GetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
+        if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
+        if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
+        if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
+        if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
         wchar_t buf[8]{};
         const int n = ToUnicode(vk, make, ks, buf, 7, 0);
         for (int i = 0; i < n && i < 7; ++i) {
@@ -4930,10 +5064,10 @@ float4 ps_straight(VSOut i) : SV_Target {
     static unsigned CurrentKeyModifiers()
     {
         unsigned mods = 0;
-        if (GetAsyncKeyState(VK_MENU) & 0x8000)    mods |= ultralight::KeyEvent::kMod_AltKey;
-        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= ultralight::KeyEvent::kMod_CtrlKey;
-        if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   mods |= ultralight::KeyEvent::kMod_ShiftKey;
-        if ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000)
+        if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    mods |= ultralight::KeyEvent::kMod_AltKey;
+        if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= ultralight::KeyEvent::kMod_CtrlKey;
+        if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   mods |= ultralight::KeyEvent::kMod_ShiftKey;
+        if ((MlGetAsyncKeyState(VK_LWIN) | MlGetAsyncKeyState(VK_RWIN)) & 0x8000)
             mods |= ultralight::KeyEvent::kMod_MetaKey;
         return mods;
     }
@@ -6964,6 +7098,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // Host settings (toggle key, demo views) — s_runtimeDir is set by
         // PreloadRuntime, well before kDataLoaded lands here.
         LoadHostSettings();
+        InstallPolledKeyFilter();
         s_engineMode = !REL::Module::IsVR()
             && (s_compositeMode == "engine" || (s_compositeMode == "auto" && SmoothMotionLoaded()))
             && InstallEngineEndHook();

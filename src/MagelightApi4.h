@@ -37,6 +37,8 @@ namespace Magelight::Api4 {
     Result RequestUIMode(ViewId view, std::uint32_t flags);
     Result ReleaseUIMode(ModId mod);
     ModId  GetUIModeOwner();
+    // Image base of the DLL whose mod holds UI mode (nullptr: none, or a v1-v3/host view). Lock-free, any thread.
+    const void* GetUIModeOwnerModule();
     Result RaiseView(ViewId view);
     Result GetViewInfo(ViewId view, ViewDesc* out);
     void   GetDisplaySize(std::int32_t* w, std::int32_t* h);

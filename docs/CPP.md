@@ -154,6 +154,11 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
 - **One UI-mode owner.** Only one view holds UI mode (cursor + input) at a
   time; `RequestUIMode` returns `Busy` (or queues with `kUIModeFlagQueue`) if
   someone else holds it. A HUD/click-through view never takes UI mode.
+- **Polled keys read up under another mod's page.** From 0.31.10, while a page
+  holds UI mode, `GetAsyncKeyState` and `GetKeyState` called from an SKSE plugin
+  read every keyboard key as up (mouse buttons and toggle bits pass). Your DLL is
+  exempt while your own view holds UI mode, provided your `RegisterMod`
+  callbacks (`onEvent`, else `onLog`) live in that DLL.
 
 ## Trust model: views are addressable, not owned
 

@@ -97,7 +97,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   `...\Skyrim Special Edition\Data` and/or your mod-manager mod folder (e.g.
   `<modlist>\mods\Magelight UI`). Zip: `tools\package.ps1 -Version <ver> -Suffix -dev`
   (never `Compress-Archive`: it writes `\` into entry names).
-- Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`,
+- Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `blockPolledKeys`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
   `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `animationTimerDelay`). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
@@ -134,7 +134,10 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     not for Papyrus `OnKeyDown`. The text-entry flag is raised too, for the
     mods that check it. Typing, Escape and bound hotkeys all ride the window
     proc (WM_KEYDOWN / WM_CHAR are the OS, not DirectInput), so they keep
-    working. Mouse and gamepad devices are untouched. Two things the sink
+    working. Mouse and gamepad devices are untouched. A plugin that polls
+    user32 `GetAsyncKeyState` / `GetKeyState` itself gets keyboard keys as up
+    (the Polled keys block in Magelight.cpp), except the UI-mode owner's DLL,
+    Magelight and non-plugin modules. Two things the sink
     layer alone could NOT do, which is why the mute lives at the device:
     a sink cannot precede a dispatcher hook, and unlinking events only
     shields sinks registered later. An embedding mod's own engine menu
