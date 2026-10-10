@@ -49,17 +49,18 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 - **Typing into a page no longer fires other mods' hotkeys.** Magelight already mutes the game's
   keyboard and takes the window's key messages while a page is open, but a plugin that asks Windows
-  for the key state itself (`GetAsyncKeyState` / `GetKeyState`) still saw every key. SkyrimNet polls
-  its hotkeys that way, so with one bound to a letter, typing that letter into a page opened its chat
-  behind the page and took the keyboard: the field stopped taking input until Escape closed the chat
-  (a field report: three openings while typing one item name). While a page holds UI mode both calls
-  now read keyboard keys as up for another mod's SKSE plugin (a DLL under `SKSE\Plugins`). Not
+  for the key state itself (`GetAsyncKeyState` / `GetKeyState`) still saw every key. A plugin that
+  polls its hotkeys that way, with one bound to a letter, acted on that letter typed into a page: in
+  the field report it opened a chat window behind the page that took the keyboard, and the field
+  stopped taking input until Escape closed it (three openings while typing one item name). While a
+  page holds UI mode both calls now read keyboard keys as up for another mod's SKSE plugin (a DLL
+  under `SKSE\Plugins`). Not
   filtered: the DLL of the mod whose page holds UI mode (it may poll its own close key; the DLL its
   event or log callback lives in, so a v1-v3 view or a Papyrus or manifest mod exempts none), Magelight and its runtime
   folder, the game, Windows itself (the IME reads modifier state), and the mouse buttons;
   `GetKeyState` keeps the Caps Lock and Num Lock toggle bits. The log names each plugin once, the
-  first time it polls a held key with a page open: `keys SkyrimNet.dll polls are hidden while a page
-  holds UI mode`. `Magelight.json` `"blockPolledKeys": false` installs no filter.
+  first time it polls a held key with a page open: `keys <dll> polls are hidden while a page holds UI
+  mode`. `Magelight.json` `"blockPolledKeys": false` installs no filter.
 
 ## 0.31.9
 
