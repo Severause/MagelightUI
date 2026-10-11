@@ -375,6 +375,36 @@ if (v4()->hostVersionNumber >= 3100 && v4()->QueryCapability("loadonshow") == 1)
     v4()->SetViewLoadOnShow(settingsPanel, true);   // right after CreateViewEx
 ```
 
+## A painted first open (0.31.11)
+
+Magelight draws only visible views, so a hidden page's first show paints the
+whole page, decodes its images and may start Ultralight's worker threads, all
+in the frame the player opens it. `SetViewPrepaint(view, true)` paints it once
+while it is still hidden, about 1.5 s after its page reaches DOM ready (again
+after a reload or resize), so the first show composites a finished texture.
+One view is painted per frame, never on a frame already over the load budget.
+
+```cpp
+if (v4()->hostVersionNumber >= 3111 && v4()->QueryCapability("prepaint") == 1)
+    v4()->SetViewPrepaint(mainView, true);   // any time; the paint waits for the page
+```
+
+- The texture stays allocated while the view lives (about 74 MB for a
+  2560x1440 view with MSAA 4x), so opt in for the view the player opens often,
+  not every popup.
+- It paints what the page shows while hidden. A page that hides its own
+  content then (`display: none`, an empty shell until the first open) gets
+  nothing from it: keep the page laid out and pause its polling instead.
+- The paint is still one long frame. It moves from the open to a moment
+  about 1.5 s after the page loads, during play. Never in VR, where that frame
+  would be dropped in the headset: there the option is accepted and does
+  nothing.
+- A page that fills its content only when it opens (data it asks for on open)
+  is painted as that empty shell, so it saves the layout and the worker
+  start-up but not the paint of its content.
+- A page can opt in itself: `magelight.send('__prepaint', '1')`. A manifest
+  view takes `"prepaint": true`.
+
 ## Your own cursor (0.31.0)
 
 The flat cursor is the host's by default: a drawn arrow that glows over a

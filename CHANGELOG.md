@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 0.31.11 | 3111 | `SetViewPrepaint(view, on)` — paint a hidden view once about 1.5 s after its DOM ready (again after a reload or resize), so its first show composites a finished page; page `magelight.send('__prepaint', '1')`; manifest `"prepaint"`; never in VR; `QueryCapability("prepaint")` |
 | 0.31.9 | 3109 | `SetViewKeyboardTheme(view, theme)` with `KeyboardTheme` — Magelight's own VR keyboard in a view's colours while it holds UI mode (eight required colours, five filled in, text under 3:1 refused); page `magelight.hostTheme({ v: 1, keyboard, cursor })` sets the keyboard theme and the cursor tint; `QueryCapability("keyboardtheme")` |
 | 0.31.7 | 3107 | `RebuildViewAtScale(view, scale)` — change a loaded page's device scale by releasing its View and loading the page again in a new one created at that scale (the page reloads; `ViewReloaded` follows); `QueryCapability("rebuildscale")` |
 | 0.31.5 | 3105 | The network policy is a Content-Security-Policy written into every page: loopback = `localhost` / `127.0.0.1` over `http(s)` and `ws(s)` only (`[::1]` and other `127.x` no longer reach), a page cannot `fetch()` its own files, and a view shows only its own HTML files; `QueryCapability("csp")` |
@@ -44,6 +45,23 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 0.31.11
+
+- **`SetViewPrepaint(view, on)`: a page's first open no longer paints the whole page in one frame.** Magelight
+  draws only visible views, so the first show of a hidden page painted all of it, decoded its images and, the
+  first time in a session, started Ultralight's worker threads, in the frame the player opened it: one long
+  frame (192 ms for one mod's dashboard in a field log, 86 ms for another's main page). A view with
+  prepaint on is painted once while hidden, about 1.5 s after its page reaches DOM ready (again after a reload
+  or resize), one view per frame and never on a frame already over the load budget, so its first show
+  composites a finished texture. Opt in per view: the texture stays allocated while the view lives (about
+  74 MB for a 2560x1440 view with MSAA 4x). A page opts in itself with `magelight.send('__prepaint', '1')`, a
+  manifest view with `"prepaint": true`. A page that hides its content while hidden (`display: none`) gains
+  nothing, and a page that fills its content only when opened gains its layout and the worker start-up, not
+  its paint. The paint is still one long frame: it lands during play, about 1.5 s after the page loads, where
+  a frame is rarely missed, instead of on the open. Never in VR, where it would be a dropped frame in the
+  headset (the option is accepted and does nothing there). `QueryCapability("prepaint")`, host 3111. The log
+  notes each paint: `view N prepainted while hidden in X ms`.
 
 ## 0.31.10
 

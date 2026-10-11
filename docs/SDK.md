@@ -32,6 +32,9 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
   the game's audio (a page cannot itself); `hover:<name>` is throttled. `data-ml-sound="click"` /
   `data-ml-sound-hover="focus"` markup does it with no script. `capabilities.sound` says the host has it.
   The SDK's `host.sound` and React's `useSound()` call `magelight.sound` and do nothing on an older host.
+- **`__prepaint`** (host 0.31.11): `send('__prepaint', '1')` asks the host to paint this view once while it
+  is hidden, after it loads, so its first show is not one long frame ([CPP.md](CPP.md), "A painted first
+  open"); `'0'` turns it off. `capabilities.prepaint` says the host has it.
 - **`__hosttheme`** (host 0.31.9): `magelight.hostTheme(theme)` gives the host this view's colours for
   what the host draws itself. `capabilities.keyboardTheme` says the host has it; the SDK's `host.hostTheme`
   calls it and does nothing on an older host. See "Host theme" below.

@@ -698,6 +698,11 @@ namespace Magelight {
         bool loadNow = false;           // shown before its first load: skips the load queue (MaterializeViews)
         bool loadFailed = false;        // main frame failed to load since its last load (the load queue's settle test)
         bool loadOnShow = false;        // 0.31.0 SetViewLoadOnShow: no first load until the view is shown
+        // 0.31.11 SetViewPrepaint: paint the page once while hidden, kPrepaintSettleMs after its DOM ready (or a
+        // resize), so its first show composites a finished texture instead of painting the whole page that frame.
+        bool prepaint = false;
+        bool prepainted = false;        // painted since its last load or resize (shown, or prepainted)
+        std::uint64_t paintableAt = 0;  // GetTickCount64 of the last DOM ready / resize (0 = not since the last load)
         bool fullscreen = false;    // w/h track the backbuffer (0,0 at CreateView)
         // Ultralight device scale: CSS px -> view px. The page lays out and
         // rasterizes at this scale (real DPI — sharp), instead of a consumer
@@ -1063,6 +1068,10 @@ namespace Magelight {
         // ever reaches a mod's listeners.
         if (name == "__escapecapture") {   // 0.28.0: the page owns Escape ('1') or hands it back ('0')
             SetViewEscapeCapture(id, arg == "1");
+            return JSValueMakeUndefined(ctx);
+        }
+        if (name == "__prepaint") {   // 0.31.11: SetViewPrepaint from the page itself ('1' / '0')
+            SetViewPrepaint(id, arg == "1");
             return JSValueMakeUndefined(ctx);
         }
         // The IME, the caret and the host keyboard serve the page the user is
@@ -1465,6 +1474,8 @@ namespace Magelight {
                     id = v->id;
                     cb = v->onDomReady;
                     v->domReady = true;   // outbound calls held during the load flow now
+                    v->prepainted = false;
+                    v->paintableAt = GetTickCount64();
                 }
             }
             SKSE::log::info("Magelight: DOM ready (view {})", id);
@@ -4730,6 +4741,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         v.dormant = false;
         v.domReady = false;
         v.loadFailed = false;
+        v.prepainted = false;
+        v.paintableAt = 0;
         ultralight::ViewConfig vc;
         vc.is_accelerated = s_gpuActive;
         vc.is_transparent = true;
@@ -4794,6 +4807,30 @@ float4 ps_straight(VSOut i) : SV_Target {
     };
     static LoadStagger s_stagger;
     static double s_lastUlUpdateMs = 0.0;   // the previous frame's Renderer::Update, ms (FrameWork)
+
+    // The hidden view to prepaint this frame (nullptr: none), marked painted. One per frame, and not on a frame
+    // whose Update already ran over the load budget: the paint is the cost this moves off the first show, so it
+    // must not land on an already heavy frame. Render thread.
+    static constexpr std::uint64_t kPrepaintSettleMs = 1500;
+    static ultralight::View* TakePrepaintView(ViewId& id)
+    {
+        // Not in a headset: the paint is one long frame wherever it lands, and in VR that is a dropped frame the
+        // player sees, which the first open (a menu the player chose to raise) hides better.
+        if (VR::IsLive()) return nullptr;
+        if (s_lastUlUpdateMs > static_cast<double>(s_loadBudgetMs.load())) return nullptr;
+        const std::uint64_t now = GetTickCount64();
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        for (auto& vp : s_views) {
+            MlView& v = *vp;
+            if (!v.prepaint || v.prepainted || v.visible || !v.ul || !v.domReady || !v.paintableAt) continue;
+            if (v.dormant || v.destroyPending || v.rebuildPending || v.boundsDirty || v.isInspector) continue;
+            if (now - v.paintableAt < kPrepaintSettleMs) continue;
+            v.prepainted = true;
+            id = v.id;
+            return v.ul.get();
+        }
+        return nullptr;
+    }
 
     // Render thread: give every view that should have a page its View. Without staggering (Magelight.json
     // "loadStagger": false) every waiting view loads in this frame, as before 0.31.0. With it, a view loads at once
@@ -4887,6 +4924,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         v.texW = v.texH = 0;
         v.dormant = true;
         v.domReady = false;
+        v.prepainted = false;
+        v.paintableAt = 0;
         v.liveScale = 0.0f;
         released.push_back(std::move(v.ul));
         v.ul = nullptr;
@@ -4973,6 +5012,10 @@ float4 ps_straight(VSOut i) : SV_Target {
             MlView& v = *vp;
             if (!v.ul || !v.boundsDirty) continue;
             v.boundsDirty = false;
+            if (v.domReady) {   // a resize repaints the whole page: prepaint it again once it settles
+                v.prepainted = false;
+                v.paintableAt = GetTickCount64();
+            }
             if (v.scaleDirty) {   // 0.26.9 SetViewScale, applied here on the render thread
                 v.scaleDirty = false;
                 v.ul->set_device_scale(v.deviceScale > 0.f ? v.deviceScale : 1.f);
@@ -6195,6 +6238,22 @@ float4 ps_straight(VSOut i) : SV_Target {
         const auto stageAfterUpdate = ClockT::now();
         s_lastUlUpdateMs = stageMs(stageT0, stageAfterUpdate);   // the next frame's load-queue budget (MaterializeViews)
         double frameUlRender = 0.0;   // THIS frame's render, for the composite subtraction
+        const bool anyVisible = AnyViewVisible();   // one reading for the prepaint's accounting and the render below
+        if (ViewId preId = 0; ultralight::View* pre = TakePrepaintView(preId)) {
+            const auto preT0 = ClockT::now();
+            StateBackup pbackup;
+            pbackup.Capture(s_context);
+            s_ulRenderer->RenderOnly(&pre, 1);
+            StateBackup::Neutralize(s_context);
+            if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
+            pbackup.Restore(s_context);
+            frameUlRender = stageMs(preT0, ClockT::now());
+            // A visible frame measures its render from stageAfterUpdate, so it already includes this one.
+            if (!anyVisible) s_acc.ulRender += frameUlRender;
+            static std::atomic<int> s_preLog{ 0 };
+            if (s_preLog.fetch_add(1) < 32)
+                SKSE::log::info("Magelight: view {} prepainted while hidden in {:.1f} ms", preId, frameUlRender);
+        }
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
         // While the UI pass is live the composite records its quads for it instead of drawing them over the
         // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
@@ -6219,7 +6278,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (cutUV) { q.hasCut = true; std::memcpy(q.cut, cutUV, sizeof(q.cut)); }
             queued.push_back(q);
         };
-        if (AnyViewVisible()) {
+        if (anyVisible) {
             // RenderOnly(visible), not Render(): Render() paints EVERY view
             // whose page marked itself dirty, hidden ones included — a closed
             // popup with a spinner, a closed dashboard with a blinking caret,
@@ -6236,7 +6295,10 @@ float4 ps_straight(VSOut i) : SV_Target {
                     MlView& v = *vp;
                     const bool paint = v.visible && v.ul;
                     v.repaintedThisFrame = paint && v.ul->needs_paint();
-                    if (paint) toRender.push_back(v.ul.get());
+                    if (paint) {
+                        toRender.push_back(v.ul.get());
+                        v.prepainted = true;
+                    }
                 }
             }
             // One state capture brackets everything we do to the pipeline this
@@ -8002,6 +8064,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->reloadPending = true;
         v->domReady = false;   // hold outbound calls for the new page
+        v->prepainted = false;
+        v->paintableAt = 0;
         v->loadFailed = false;
         return true;
     }
@@ -8019,6 +8083,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->navigateUrl = u;
         v->domReady = false;   // hold outbound calls for the new page
+        v->prepainted = false;
+        v->paintableAt = 0;
         v->loadFailed = false;
         return true;
     }
@@ -8066,6 +8132,19 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         return s_loadStagger.load();
     }
+    bool SetViewPrepaint(ViewId view, bool on)
+    {
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending || v->isInspector) return false;
+            if (v->prepaint == on) return true;
+            v->prepaint = on;
+        }
+        SKSE::log::info("Magelight: view {} prepaint {}", view, on ? "on - painted once while hidden after it loads" : "off");
+        return true;
+    }
+
     bool SetViewLoadOnShow(ViewId view, bool onShow)
     {
         bool started = false;

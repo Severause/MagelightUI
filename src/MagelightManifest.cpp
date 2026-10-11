@@ -274,7 +274,7 @@ namespace Magelight::Manifest {
                     const std::string vctx = file.string() + " — view '" + vname + "': ";
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
-                                         "hotkeyPause", "sounds", "loadOnShow", "cursor" }, vctx);
+                                         "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor" }, vctx);
                     const std::string path = MJStr(v, "path", "", vctx);
                     if (!SafeRelative(path)) {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
@@ -312,6 +312,7 @@ namespace Magelight::Manifest {
                     if (dev) Dev::WatchView(id, modDir);
                     // 0.31.0: manifest views exist before the world loads, so this always lands before the first load.
                     if (MJBool(v, "loadOnShow", false, vctx)) Api4::SetViewLoadOnShow(id, true);
+                    if (MJBool(v, "prepaint", false, vctx)) Api4::SetViewPrepaint(id, true);   // 0.31.11
                     if (const int hib = MJInt(v, "hibernateMs", 0, vctx); hib > 0) Api4::SetViewHibernate(id, static_cast<std::uint32_t>(hib));
                     // 0.31.0: the view's own cursor, over the mod's default.
                     if (auto c = v.find("cursor"); c != v.end()) {
