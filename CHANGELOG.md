@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.0.0 | 10000 | No new API: 0.31.11's host under a stable version. Every gate above holds (10000 is above each packed number), and the npm packages follow at 1.0.0 |
 | 0.31.11 | 3111 | `SetViewPrepaint(view, on)` — paint a hidden view once about 1.5 s after its DOM ready (again after a reload or resize), so its first show composites a finished page; page `magelight.send('__prepaint', '1')`; manifest `"prepaint"`; never in VR; `QueryCapability("prepaint")` |
 | 0.31.9 | 3109 | `SetViewKeyboardTheme(view, theme)` with `KeyboardTheme` — Magelight's own VR keyboard in a view's colours while it holds UI mode (eight required colours, five filled in, text under 3:1 refused); page `magelight.hostTheme({ v: 1, keyboard, cursor })` sets the keyboard theme and the cursor tint; `QueryCapability("keyboardtheme")` |
 | 0.31.7 | 3107 | `RebuildViewAtScale(view, scale)` — change a loaded page's device scale by releasing its View and loading the page again in a new one created at that scale (the page reloads; `ViewReloaded` follows); `QueryCapability("rebuildscale")` |
@@ -45,6 +46,19 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.0.0
+
+- **Magelight UI 1.0.** The same host as 0.31.11, released under a stable version: no code,
+  behaviour or API change. The host number is now 10000 (major × 10000 + minor × 100 + patch),
+  above every earlier one, so a mod that gates on `hostVersionNumber >= 3111` (or any earlier
+  number) and a manifest's `"minHost"` keep working. The API stays append-only, as it has been
+  since API v4: nothing published moves, and a feature a mod needs is gated on its version and
+  its capability as before.
+- **The npm packages** (`@magelight/sdk`, `@magelight/react`, `@magelight/vite-plugin`,
+  `create-magelight-view`) move to 1.0.0 with the host, and the template and the example ask for
+  `^1.0.0`. From 1.0 a caret range takes every later 1.x, which the append-only page contract
+  allows; a project on `^0.30.0` stays on 0.30.x until it moves its range.
 
 ## 0.31.11
 

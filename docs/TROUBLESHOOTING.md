@@ -6,7 +6,7 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v0.31.11 loading`); the lines after it name the game (SE, AE or VR, its version and
+version (`Magelight v1.0.0 loading`); the lines after it name the game (SE, AE or VR, its version and
 SKSE's), Windows (or the Wine under Proton), the CPU and RAM, and, once the game's data has loaded,
 every graphics adapter with its driver version, the one the game renders on marked. Paths in the
 log show your user folder as `%USERPROFILE%`. Each line starts with the date and time, a level
