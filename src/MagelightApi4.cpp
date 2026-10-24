@@ -1084,7 +1084,7 @@ namespace Magelight::Api4 {
         if (n == "http") return 0;
         if (n == "vr") return Magelight::VR::IsLive() ? 1 : 0;   // the VR presenter is live (0.17.0)
         if (n == "hotkeys") return 1;       // BindHotkey registry (0.12.0)
-        if (n == "ime") return 1;           // native IME composition for CJK input (0.27.0)
+        if (n == "ime") return Magelight::VR::IsLive() ? 0 : 1;   // the IME attaches to text fields (0.27.0); flat only, VR has its keyboard
         if (n == "loopback") return 1;      // http(s)/ws(s) to localhost|127.0.0.1 at LoopbackOnly (0.28.0; opt-in since 0.30.0; a CSP since 0.31.5)
         if (n == "csp") return 1;           // the network policy is a Content-Security-Policy written into every page (0.31.5)
         if (n == "escapecapture") return 1; // SetEscapeCapture / __escapecapture (0.28.0)
@@ -1108,6 +1108,7 @@ namespace Magelight::Api4 {
         if (n == "uimodecancel") return 1;  // CancelUIModeRequest / kUIModeFlagReclaim (1.1.0)
         if (n == "hostthemereply") return 1; // hostTheme per-part refusal and its "reply" (1.1.0)
         if (n == "tooltips") return 1;      // page title tooltips, drawn by the page core (1.2.0)
+        if (n == "imecandidates") return Magelight::VR::IsLive() ? 0 : 1;   // the page core draws the IME's candidate list (opt out: data-ml-ime="off" / cancel magelight:ime); flat only
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1232,7 +1233,7 @@ namespace Magelight::Api4 {
                                         "loopback", "csp", "escapeCapture", "viewOrder", "scrollStep", "networkPolicy",
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
-                                        "hostThemeReply", "tooltips" };
+                                        "hostThemeReply", "tooltips", "imeCandidates" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {

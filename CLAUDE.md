@@ -35,6 +35,8 @@ tools/desktop-harness/      run our driver (or AppCore's) on the desktop — no 
 tools/font-test/            the stock font loader vs ours on imitated broken systems (build.bat builds and runs it)
 tools/hosttheme-test/       src/HostThemeCore.h's keyboard-theme colour rules (build.bat builds and runs it)
 tools/tooltip-test/         src/TooltipCore.h's coalescing, clipping and payload rules (build.bat builds and runs it)
+tools/ime-test/             src/ImeCore.h's candidate-list parsing and '__ime' payload rules (build.bat builds and runs it)
+tools/ime-box-test/         the page core's IME box placed in Ultralight's own WebKit, headless: zoom, iframe editor, width (build.bat)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
 build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <that>\stage (namespaced runtime patch)
 ```
@@ -177,3 +179,9 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     `s_faultEvent`, nothing else (no `SKSE::log`, no heap, no `GetModuleHandleEx`, no lock of its
     own), and never handles an exception. `DrainFaultReports` on the watchdog thread writes the
     lines. Logging from the handler could hang a crash on Magelight's own log lock.
+22. **No OS IME window.** The Windows IME windows do not draw over the game: players converted
+    blind. While UI mode is on, `WM_IME_SETCONTEXT` reaches DefWindowProc with lParam 0 and the
+    candidate list comes by `WM_IME_NOTIFY`; the composition, its caret, its clauses and the candidate page go
+    to the page on `__ime` (`src/ImeCore.h`), and the page core draws them unless the page opts out
+    (`data-ml-ime="off"`, or a cancelled `magelight:ime`). Restoring an `ISC_SHOW*` bit brings back
+    an invisible OS window under the drawn box.

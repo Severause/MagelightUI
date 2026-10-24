@@ -49,8 +49,9 @@ with the frontend essentially untouched.
   ready-handshakes (Magelight buffers sends that arrive before your app mounts).
 - **Marshalling:** pass raw JSON as one string arg, no extra escaping — same rule on both.
 - **Text input and IME:** Magelight detects text-field focus itself (`focusin`/`focusout`
-  on real inputs) and uses the Windows IME: the candidate list opens at the caret and the
-  composition shows inline in the field. PrismaUI's IME is the `prismaIME_state` page event, with
+  on real inputs) and uses the Windows IME, whose own windows it never shows: the page core draws
+  the composition inline in the field and the candidate list in a box at the caret
+  (`data-ml-ime="off"` opts a page out). PrismaUI's IME is the `prismaIME_state` page event, with
   the page drawing its own composition and candidate overlay; on Magelight delete that listener
   and overlay. For an "IME active" indicator, listen for `magelight:ime` ([CPP.md](CPP.md), "IME").
 - **UI sounds (Magelight-only gain, 0.29.0):** neither host's pages can play audio (Ultralight has no
