@@ -210,14 +210,84 @@ longer drive its views (see the trust model above).
 ## IME (Chinese, Japanese, Korean input)
 
 Nothing to do. When a text field in your page takes focus, the host attaches
-the window's IME context; the OS candidate list opens at the caret; the
-composition text shows inline in the field; the committed text arrives as
-ordinary keystrokes. While a composition is open, Enter, Space and Escape
-belong to the IME and your key handlers do not see them. For an "IME active"
-indicator, listen for the
-`magelight:ime` window event (`detail.state` is `start`, `compose`, `commit`
-or `end`). Feature-detect with `QueryCapability("ime")`. Not available in VR,
-where the runtime keyboard owns text entry.
+the window's IME context. The Windows IME windows do not draw over the game,
+so the host shows none; the page core draws the IME instead: the
+composition inline in a `textarea` or a text-like `input`, and the
+candidate list in a box at the composition, with the
+composition in the box when the field cannot show it inline (contentEditable,
+`email` and `number` inputs). As in a browser, the inline composition goes
+through the field's own `value` setter and each change fires an `input` event
+with `isComposing` (`insertCompositionText`, `deleteCompositionText` when it is
+cleared), so a controlled field (React) keeps it, and the focused field gets
+`compositionstart`, `compositionupdate` (with the composition) and
+`compositionend` (with the committed text, `''` for a cancel). When
+`compositionend` fires, the field already holds the committed text. The field's selection shows
+where the IME is, as in Notepad: a caret at the IME's caret while the reading
+is unconverted (Left and Right move it), then the clause the IME converts next
+once it is converted (Left and Right move to another clause, Shift+Left and
+Shift+Right resize it). An IME that reports no clauses, such as Korean composing
+a syllable, has the whole reading selected. The box opens at the reading's start, then at that
+clause. In the box, the composition is underlined, with the caret or the
+clause marked the same way. The committed text arrives
+as ordinary keystrokes (an `input` event with `insertText`) and replaces the
+whole inline composition as one edit, so `maxlength` and your own input
+filtering apply to it. A click in the field mid-composition keeps the
+composition as typed text, as a browser commits it on a click. Password fields
+get no IME (as in a browser) and no box. While a composition is open, Enter, Space, Escape, the arrow keys
+and the number keys belong to the IME and your key handlers do not see them.
+A field that already has focus when its view gains UI mode (a page that
+focuses its input as it opens) gets the IME then, and after a switch of UI
+mode to another view the IME follows that view's focused field. Not available
+in VR, where the runtime keyboard owns text entry.
+
+The box follows your theme through CSS custom properties: `--ml-ime-bg`,
+`--ml-ime-fg`, `--ml-ime-border`, `--ml-ime-font`, `--ml-ime-selected-bg`,
+`--ml-ime-selected-fg` and `--ml-ime-max-width` (480px by default; a longer
+candidate is cut with an ellipsis). The box lives in `<body>`, so a UI scale
+applied as a `zoom` on `<body>` scales it with the page, and it is placed in
+the page's own coordinates at any zoom. A field in a same-origin iframe (an
+editor written into `about:blank`, such as CodeMirror) counts as focused: the
+box is drawn in the top page at that field's caret, with the composition in
+the box. The host attaches the IME when focus moves into such an editor;
+an editor that takes focus with no focus change in the top page can send `'1'`
+on `__textfocus` itself (`window.magelight.send('__textfocus', '1')`, `'0'` on
+blur). `data-ml-ime="off"` on the iframe or an ancestor opts it out.
+
+Every change first fires a cancelable `magelight:ime` window event whose
+detail is the whole state. It fires before the page core applies the change,
+so the field does not hold the new composition yet:
+
+```json
+{ "state": "candidates", "text": "",
+  "composition": "東京", "caret": 2,
+  "candidates": ["東京", "とうきょう", "トウキョウ", "東京都"], "selectedIndex": 0,
+  "clauses": [0, 2], "target": 0 }
+```
+
+`state` is `start`, `compose`, `commit`, `candidates` or `end` (an `end` is
+empty: hide what you draw); `text` is the committed string on `commit` and
+the composition on `compose` (empty otherwise); `caret` counts UTF-16 units
+into `composition`; `candidates` is the page the IME shows and
+`selectedIndex` is within it: the row Space or Enter acts on, or `-1` for none
+(the Japanese IME's predictions before converting); `clauses` are the clause boundaries
+in UTF-16 units (`0` first, the composition's length last; `[]` when the IME
+reports none) and `target` is the index of the clause the IME converts next
+(`-1`: none, as while the reading is unconverted). A page that draws its own
+composition and candidate list sets `data-ml-ime="off"` on the field or an
+ancestor (`<html>` for the whole page), and the page core then draws neither
+the box nor the inline composition. Cancelling the event (`preventDefault()`)
+does the same for that one change only, so a page that opts out that way
+cancels every event. Feature-detect the drawn list and the full detail with
+`QueryCapability("imeCandidates")`
+(`window.__MAGELIGHT__.capabilities.imeCandidates`); `QueryCapability("ime")`
+says the host attaches the IME to text fields at all (flat only: 0 in VR).
+
+**Changed with the drawn list.** `magelight:ime` used to report the composition
+after the host drew its inline pre-edit, as `{state, text}`. It now fires before
+each change, is cancelable, carries the whole state, and has a `candidates`
+state for list changes. A page that drew its own composition (contentEditable,
+`email` or `number` fields) now gets the page core's box as well: set
+`data-ml-ime="off"` to keep drawing it alone.
 
 ## Escape, loopback, and the other 0.28.0 hooks
 

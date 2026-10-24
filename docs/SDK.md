@@ -35,6 +35,17 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
 - **`__prepaint`** (host 0.31.11): `send('__prepaint', '1')` asks the host to paint this view once while it
   is hidden, after it loads, so its first show is not one long frame ([CPP.md](CPP.md), "A painted first
   open"); `'0'` turns it off. `capabilities.prepaint` says the host has it.
+- **IME candidate list**: Chinese, Japanese and Korean input shows its composition inline in the field
+  (its selection on the IME's caret or target clause) and its candidate list in a box the page core draws at
+  the caret (the host passes them on the reserved
+  `__ime` channel; nothing to subscribe). `data-ml-ime="off"` on a field, an ancestor or `<html>` turns it
+  off there, a `magelight:ime` event (cancelable; `detail.state`, `text`, `composition`, `caret`,
+  `candidates`, `selectedIndex`, `clauses`, `target`) fires before each change, and `--ml-ime-bg`, `--ml-ime-fg`,
+  `--ml-ime-border`, `--ml-ime-font`, `--ml-ime-selected-bg`, `--ml-ime-selected-fg`, `--ml-ime-max-width` restyle
+  the box. It scales with a `zoom` on `<body>`, and follows the caret into a same-origin iframe editor.
+  `capabilities.imeCandidates` says the host has it; a page that draws its own IME opts out. The focused field also
+  gets `compositionstart`/`compositionupdate`/`compositionend`, and password fields get no IME. Flat only
+  ([CPP.md](CPP.md), "IME").
 - **Tooltips** (host 1.2.0): an element's `title` shows as a tooltip the page core draws (the host
   passes it on the reserved `__tooltip` channel; nothing to subscribe). `data-ml-tooltip="off"` on an
   element or on `<html>` turns it off there, a `magelight:tooltip` event (cancelable; `detail.text`,

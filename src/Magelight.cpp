@@ -12,6 +12,7 @@
 #include "MagelightSysInfo.h"
 #include "HotkeyNames.h"
 #include "TooltipCore.h"
+#include "ImeCore.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -367,19 +368,28 @@ namespace Magelight {
     // ── IME (0.27.0): native composition for CJK input ──────────────────
     // The window's IME context is ATTACHED only while a text field in the
     // UI-mode view has focus (the bridge's '__textfocus' signal) and DETACHED
-    // otherwise, so gameplay keys never raise a composition. The pre-edit is
-    // drawn INLINE in the field (it rides as the field's selection, so the
-    // commit — delivered as ordinary characters — replaces it and a cancel
-    // deletes it), the OS candidate list is placed at the caret the page
-    // reports, and keys the IME consumed (VK_PROCESSKEY) never reach the
-    // page. Text-field focus is detected automatically from the page's own
-    // focus events (focusin / focusout on real inputs), so a page needs no
-    // focus signalling of its own. VR is exempt: the OS IME UI is invisible in a headset
-    // and the runtime keyboard owns text there.
-    static constexpr UINT kImeCtlMsg = WM_APP + 0x4F46;   // wparam: 1 attach, 0 detach, 2 reposition candidates
-    static std::atomic<bool> s_imeAttached{ false };
+    // otherwise, so gameplay keys never raise a composition. No OS IME window
+    // shows (the OS one does not draw over the game): every change goes to
+    // the page core on '__ime' with the composition, its caret and the
+    // candidate page (ImeCore.h), and the page core draws them, the pre-edit
+    // INLINE in the field (it rides as the field's selection, so the commit —
+    // delivered as ordinary characters — replaces it and a cancel deletes
+    // it) and the candidate list at the caret, unless the page draws its own
+    // (data-ml-ime="off", or a cancelled 'magelight:ime'). Keys the IME
+    // consumed (VK_PROCESSKEY) never reach the page. Text-field focus is
+    // detected automatically from the page's own focus events (focusin /
+    // focusout on real inputs), so a page needs no focus signalling of its
+    // own. VR is exempt: the runtime keyboard owns text there.
+    // Posted to the window's thread: wparam is an ImeCtl; lparam the view, for kImeForgetView.
+    static constexpr UINT kImeCtlMsg = WM_APP + 0x4F46;
+    // kImeForgetView: detach if attached for that view. kImeCancel: drop the composition, the IME attached still.
+    enum ImeCtl : WPARAM { kImeDetach = 0, kImeAttach = 1, kImeForgetView = 2, kImeCancel = 3 };
     static std::atomic<bool> s_imeComposing{ false };
-    static std::atomic<int>  s_imeCaretX{ -1 }, s_imeCaretY{ -1 }, s_imeCaretH{ 0 };   // client px; x<0 = unknown
+    // The view the context was attached for (0: none), so a detach after UI mode is off or the view switched still
+    // reaches it.
+    static std::atomic<std::uint64_t> s_imeView{ 0 };
+    // Between IMN_OPENCANDIDATE and IMN_CLOSECANDIDATE: a detach closes a list still open.
+    static std::atomic<bool> s_imeCandidatesOpen{ false };
 
     static std::filesystem::path s_runtimeDir;  // Data/SKSE/Plugins/Magelight
     // Magelight.json "presentHook": "auto" (late composite behind an earlier Present hook on a plain dxgi
@@ -1077,8 +1087,10 @@ namespace Magelight {
     }
 
     // IME (0.27.0) — bodies live after the window statics they touch.
-    static void ImeOnCaret(ViewId id, const std::string& arg);
     static void ImeOnTextFocus(bool focused);
+    static void ImeCancelFromPage();
+    static void ImeFollowUiView(ViewId view);
+    static void ImeForgetView(ViewId view);
 
     static void PlayPageSound(ViewId id, const std::string& arg);   // fwd (defined after the dispatcher)
     static void OnPageHostTheme(ViewId id, const std::string& arg); // fwd (defined after the dispatcher)
@@ -1121,24 +1133,29 @@ namespace Magelight {
             SetViewPrepaint(id, arg == "1");
             return JSValueMakeUndefined(ctx);
         }
-        // The IME, the caret and the host keyboard serve the page the user is
-        // in: a background page's focus change, blur or caret must not
-        // attach, cancel or move them under it, nor hide the keyboard it raised.
+        // The IME and the host keyboard serve the page the user is in: a
+        // background page's focus answer ('__imefocus'), focus change or blur
+        // must not attach or cancel them under it, nor hide the keyboard it raised.
         const bool fromUiView = IsUIModeActive() && id == static_cast<ViewId>(s_uiModeView.load()) &&
                                 id != static_cast<ViewId>(s_kbViewId.load());
-        if (name == "__imecaret") {   // IME (0.27.0): the page's caret -> candidate placement
-            if (fromUiView) ImeOnCaret(id, arg);
+        if (name == "__imefocus") {   // the page's answer to ImeFollowUiView: a text field has focus now
+            if (fromUiView && arg == "1") ImeOnTextFocus(true);
             return JSValueMakeUndefined(ctx);
         }
         if (name == "__textfocus") {
-            const bool focused = (arg == "1");
+            // '1' a text field, 'p' a password field (a keyboard, but no IME, as in a browser), '0' none.
+            const bool focused = (arg == "1" || arg == "p");
             // Only the UI-mode view claims the runtime keyboard (typed keys go to it); a
             // blur from any view clears only that view's own claim.
             if (!focused || fromUiView) VR::NoteTextFocus(id, focused);
             if (fromUiView) {
-                ImeOnTextFocus(focused);   // IME (0.27.0)
+                ImeOnTextFocus(arg == "1");   // IME (0.27.0)
                 ShowOwnKeyboard(focused);
             }
+            return JSValueMakeUndefined(ctx);
+        }
+        if (name == "__imecancel") {   // the page kept the reading (a click mid-composition): drop the IME's composition
+            if (fromUiView) ImeCancelFromPage();
             return JSValueMakeUndefined(ctx);
         }
         if (name == "__key") {   // the host's own keyboard page only: the keys go to the UI-mode view
@@ -1425,11 +1442,17 @@ namespace Magelight {
             "var t=(e.tagName||'').toUpperCase();if(t==='TEXTAREA')return true;if(t!=='INPUT')return false;"
             "var y=(e.type||'text').toLowerCase();"
             "return ['text','search','url','tel','email','password','number'].indexOf(y)>=0;}"
-            "window.__mlIsText=isText;"   // shared with the IME block below (one predicate)
-            "function send(f){try{__mlNative('" + idStr0 + "','__textfocus',f?'1':'0');}catch(e){}}"
-            "document.addEventListener('focusin',function(ev){if(isText(ev.target))send(true);},true);"
-            "document.addEventListener('focusout',function(){setTimeout(function(){send(isText(document.activeElement));},0);},true);"
-            "if(isText(document.activeElement))send(true);})();"
+            "function isPassword(e){return !!e&&(e.tagName||'').toUpperCase()==='INPUT'&&(e.type||'').toLowerCase()==='password';}"
+            // The focused element through same-origin iframes (an editor written into about:blank), with the
+            // frames passed on the way.
+            "function chain(){var e=document.activeElement,fr=[];while(e&&(e.tagName||'').toUpperCase()==='IFRAME'){var d=null;"
+            "try{d=e.contentDocument;}catch(x){}if(!d||!d.activeElement)break;fr.push(e);e=d.activeElement;}return{e:e,frames:fr};}"
+            "window.__mlIsText=isText;window.__mlIsPassword=isPassword;window.__mlFocusChain=chain;"   // shared with the IME block below
+            // '1' a text field, 'p' a password field (the VR keyboard, no IME), '0' none.
+            "function send(e){var v=!isText(e)?'0':isPassword(e)?'p':'1';try{__mlNative('" + idStr0 + "','__textfocus',v);}catch(x){}}"
+            "document.addEventListener('focusin',function(ev){if(isText(ev.target))send(ev.target);},true);"
+            "document.addEventListener('focusout',function(){setTimeout(function(){send(chain().e);},0);},true);"
+            "if(isText(chain().e))send(chain().e);})();"
             // UI sounds (0.29.0): the markup convention. data-ml-sound="click"
             // plays on click (keyboard activation raises click too), data-ml-sound-hover
             // ="focus" on entering the element. Delegated on document so a manifest-only
@@ -1445,37 +1468,157 @@ namespace Magelight {
             "document.addEventListener('mouseover',function(ev){var t=up(ev.target,'data-ml-sound-hover');if(t===last)return;last=t;if(!t)return;"
             "var n=t.getAttribute('data-ml-sound-hover');if(n)try{__mlNative(id,'__sound','hover:'+n);}catch(e){}},true);"
             "})();"
-            // IME (0.27.0): caret reporting ('__imecaret', CSS px), the inline pre-edit
-            // (the composition rides as the field's SELECTION so the commit — ordinary
-            // characters — replaces it and a cancel deletes it) and a 'magelight:ime'
-            // window event for pages that want an indicator.
-            "(function(){var id='" + idStr0 + "',ime={el:null,base:null,pre:'',start:0,end:0};"
-            "var isText=window.__mlIsText;"
-            "function caret(){var e=document.activeElement;if(!isText(e))return;var r=e.getBoundingClientRect(),x=r.left,y=r.top,h=r.height;"
-            "try{if(e.isContentEditable){var s=window.getSelection();if(s&&s.rangeCount){var rr=s.getRangeAt(0).getBoundingClientRect();"
-            "if(rr.left||rr.top){x=rr.left;y=rr.top;h=rr.height||h;}}}"
-            "else{var cs=getComputedStyle(e),cv=document.createElement('canvas').getContext('2d');cv.font=cs.font;"
-            "var v=e.value||'',p=e.selectionStart||0,line=v.slice(0,p),nl=line.lastIndexOf('\\n');if(nl>=0)line=line.slice(nl+1);"
+            // IME: the page core draws what the host hands it on '__ime' (ImeCore.h): the composition INLINE in a
+            // plain field (the commit — ordinary characters — takes its place, and a cancel clears it), with the
+            // field's selection on the target clause or a caret at the IME's caret, and the
+            // candidate list in a box at the reading or its target clause, with the composition in the box when no
+            // inline pre-edit can show it. Every change is first a cancelable 'magelight:ime' window event
+            // carrying the whole state; a page that draws its own cancels it or sets data-ml-ime=off on the field
+            // or an ancestor (<html>: the whole page), and the page core then draws nothing. The
+            // --ml-ime-bg/-fg/-border/-font/-selected-bg/-selected-fg/-max-width properties style the box.
+            // A field inside a same-origin iframe (an editor written into about:blank) counts as focused; the box
+            // is drawn in the top page at its caret. Password fields get no IME. compositionstart/-update/-end fire
+            // on the focused field as a browser fires them.
+            "(function(){var id='" + idStr0 + "',ime={el:null,base:null,pre:'',start:0,end:0,selA:0,selB:0,cel:null},box=null,edge=null;"
+            "var isText=window.__mlIsText,isPassword=window.__mlIsPassword;"
+            // The focused element (window.__mlFocusChain) with the transform from its document's coordinates to the
+            // top page's: top = (fx, fy) + fs * inner.
+            "function deep(){var c=window.__mlFocusChain(),f={e:c.e,frames:c.frames,fx:0,fy:0,fs:1};"
+            "for(var i=0;i<c.frames.length;i++){var e=c.frames[i],r=e.getBoundingClientRect(),w=(e.contentWindow&&e.contentWindow.innerWidth)||r.width||1;"
+            "f.fx+=f.fs*(r.left+e.clientLeft);f.fy+=f.fs*(r.top+e.clientTop);f.fs*=(e.clientWidth||r.width)/w;}"
+            "return f;}"
+            // The host's question when the view gains UI mode: is a text field that takes the IME focused now
+            // (ImeFollowUiView)?
+            "window.__mlImeFocus=function(){var e=deep().e;if(isText(e)&&!isPassword(e))try{__mlNative(id,'__imefocus','1');}catch(x){}};"
+            // The caret of a contentEditable: the selection's rect, and where that is empty (collapsed at the end of a
+            // line, or on an empty line, WebKit reports 0x0) the right edge of the character before it, else the line.
+            "function selRect(dv){var s=dv.getSelection();if(!s||!s.rangeCount)return null;var g=s.getRangeAt(0),q=g.getBoundingClientRect();"
+            "if(q.left||q.top)return q;var rs=g.getClientRects();if(rs.length&&(rs[0].left||rs[0].top))return rs[0];"
+            // c: the node holding what is just before the caret; n: the element the caret starts when nothing is.
+            "var n=g.startContainer,o=g.startOffset,d=n.ownerDocument,c=null;"
+            "if(n.nodeType===3){if(o>0)c=n;else n=n.parentNode;}"
+            "else if(o>0){c=n.childNodes[o-1];while(c&&c.nodeType===1&&c.lastChild)c=c.lastChild;}"
+            "if(c&&c.nodeType===3&&c.length){var r=d.createRange(),k=c===g.startContainer?o:c.length;r.setStart(c,k-1);r.setEnd(c,k);"
+            "q=r.getBoundingClientRect();if(q.right||q.top)return{left:q.right,top:q.top,height:q.height};}"
+            "var el=c&&c.nodeType===1?c:n;if(el&&el.getBoundingClientRect){q=el.getBoundingClientRect();"
+            "if(q.left||q.top)return{left:q.left,top:q.top,height:q.height};}return null;}"
+            "function caretRect(f,pos){var e=f.e;if(!isText(e))return null;var dv=(e.ownerDocument&&e.ownerDocument.defaultView)||window;"
+            "var r=e.getBoundingClientRect(),x=r.left,y=r.top,h=r.height;"
+            "try{if(e.isContentEditable){var q=selRect(dv);if(q){x=q.left;y=q.top;h=q.height||h;}}"
+            "else{var cs=dv.getComputedStyle(e),cv=document.createElement('canvas').getContext('2d');cv.font=cs.font;"
+            "var v=e.value||'',p=pos!=null?pos:(e.selectionStart||0),line=v.slice(0,p),nl=line.lastIndexOf('\\n');if(nl>=0)line=line.slice(nl+1);"
             "var lh=parseFloat(cs.lineHeight);if(!(lh>0))lh=(parseFloat(cs.fontSize)||14)*1.3;h=lh;"
             "x=r.left+(parseFloat(cs.paddingLeft)||0)+(parseFloat(cs.borderLeftWidth)||0)+cv.measureText(line).width-(e.scrollLeft||0);"
-            "if(e.tagName.toUpperCase()==='TEXTAREA'){var ln=v.slice(0,p).split('\\n').length;y=r.top+(parseFloat(cs.paddingTop)||0)+(ln-1)*lh-(e.scrollTop||0);}"
-            "else{y=r.top+(r.height-lh)/2;}}}catch(err){}"
-            "try{__mlNative(id,'__imecaret',Math.round(x)+','+Math.round(y)+','+Math.round(h));}catch(err){}}"
-            "document.addEventListener('focusin',function(ev){if(isText(ev.target))setTimeout(caret,0);},true);"
-            "document.addEventListener('input',function(){caret();},true);"
-            "document.addEventListener('selectionchange',function(){caret();});"
-            "document.addEventListener('click',function(){setTimeout(caret,0);},true);"
+            "if(e.tagName.toUpperCase()==='TEXTAREA'){var ln=v.slice(0,p).split('\\n').length;y=r.top+(parseFloat(cs.paddingTop)||0)+(ln-1)*lh-(e.scrollTop||0);"
+            // Soft-wrapped lines are not counted: past the right edge, anchor under the field instead.
+            "if(x>r.right){x=r.left;y=r.bottom-lh;}}"
+            // A single-line input: the field's own edges, so the box never covers its border.
+            "else{y=r.top;h=r.height;}}}catch(err){}"
+            "return{x:f.fx+f.fs*x,y:f.fy+f.fs*y,h:f.fs*h};}"
+            "function off(e){while(e&&e.getAttribute){if(e.getAttribute('data-ml-ime')==='off')return true;e=e.parentNode;}return false;}"
+            "function offDeep(f){if(off(f.e))return true;for(var i=0;i<f.frames.length;i++)if(off(f.frames[i]))return true;return false;}"
+            // The box sits just below the tooltip (2147483646) and the devMode error banner (2147483647). It lives in
+            // <body>, so a page's UI-scale zoom on <body> scales it like the page.
+            // Page CSS stays out of the box and its rows (all:initial). `edge`, a zero-size marker at the window's
+            // bottom-right, measures the window in the same units as the box, whatever zoom or transform applies.
+            "function el(){if(box&&box.parentNode)return box;box=document.createElement('div');box.id='__ml_ime';box.setAttribute('aria-hidden','true');"
+            "edge=document.createElement('div');var es=edge.style;es.all='initial';es.position='fixed';es.right='0';es.bottom='0';"
+            "es.width='0';es.height='0';es.visibility='hidden';es.pointerEvents='none';"
+            "var s=box.style;s.all='initial';s.position='fixed';s.left='0';s.top='0';s.zIndex='2147483645';s.pointerEvents='none';s.display='none';"
+            "s.boxSizing='border-box';s.padding='3px 0';s.borderRadius='3px';s.overflow='hidden';"
+            "s.maxWidth='min(var(--ml-ime-max-width,480px),90vw)';"
+            "s.background='var(--ml-ime-bg,#1e1e20)';s.color='var(--ml-ime-fg,#f0f0f0)';"
+            "s.border='1px solid var(--ml-ime-border,#5c5c60)';s.font='var(--ml-ime-font,14px/1.4 sans-serif)';"
+            "s.boxShadow='0 2px 8px rgba(0,0,0,0.45)';var host=document.body||document.documentElement;host.appendChild(box);host.appendChild(edge);return box;}"
+            "function hide(){if(box)box.style.display='none';}"
+            "function row(t,on){var d=document.createElement('div'),s=d.style;s.all='initial';s.display='block';s.font='inherit';s.color='inherit';"
+            "s.padding='1px 10px';s.whiteSpace='nowrap';"
+            "s.overflow='hidden';s.textOverflow='ellipsis';d.textContent=t;"
+            "if(on){s.background='var(--ml-ime-selected-bg,#5c5c60)';s.color='var(--ml-ime-selected-fg,#ffffff)';}return d;}"
+            // The clauses and the target clause. An IME that reports no clauses (Korean composes one syllable at a
+            // time) has its whole reading as the target.
+            "function parts(m){var cl=m.clauses||[],s=m.composition||'';return cl.length>1?{cl:cl,t:m.target}:{cl:[0,s.length],t:s.length?0:-1};}"
+            "function span(d,t,css){var x=document.createElement('span'),s=x.style;s.all='initial';s.font='inherit';s.color='inherit';"
+            "x.textContent=t;for(var k in css)s[k]=css[k];d.appendChild(x);return x;}"
+            // The composition row when the field can't show it inline: before converting, a dotted underline and a
+            // caret bar at the IME's caret; once converted, one span per clause, underlined, the target clause
+            // highlighted as the selected row is.
+            "function reading(m){var d=row('',false),s=m.composition||'',p0=parts(m),cl=p0.cl,t=p0.t;d.setAttribute('data-ml-ime-reading','');"
+            "if(!(t>=0&&t+1<cl.length)){var p=Math.max(0,Math.min(m.caret||0,s.length)),u={textDecoration:'underline dotted'};span(d,s.slice(0,p),u);"
+            "span(d,'',{display:'inline-block',width:'1px',height:'1.1em',verticalAlign:'text-bottom',background:'currentColor'}).setAttribute('data-ml-ime-caret','');"
+            "span(d,s.slice(p),u);return d;}"
+            "for(var i=0;i+1<cl.length;i++){var on=i===t,x=span(d,s.slice(cl[i],cl[i+1]),{textDecoration:'underline',"
+            "background:on?'var(--ml-ime-selected-bg,#5c5c60)':'',color:on?'var(--ml-ime-selected-fg,#ffffff)':''});"
+            "if(i+2<cl.length)x.style.marginRight='2px';if(on)x.setAttribute('data-ml-ime-target','');}return d;}"
+            // Placement works in the units getBoundingClientRect reports, whatever a zoom does to them: `k` is those
+            // units per CSS px of the box (measured); the window's size in them is the edge marker's position.
+            "function draw(m,inline,f,pos){var c=m.candidates||[],comp=inline?'':(m.composition||''),r=caretRect(f,pos);"
+            "if((!c.length&&!comp)||!r){hide();return;}"
+            "var b=el();b.textContent='';if(comp)b.appendChild(reading(m));"
+            "for(var i=0;i<c.length;i++)b.appendChild(row((i+1)+'. '+c[i],i===m.selectedIndex));"
+            "b.style.display='block';b.style.left='0';b.style.top='0';var b0=b.getBoundingClientRect();b.style.left='100px';"
+            "var k=(b.getBoundingClientRect().left-b0.left)/100;if(!(k>0))k=1;b.style.left='0';"
+            "var er=edge.getBoundingClientRect(),w=er.left,h=er.top,br=b.getBoundingClientRect(),g=4*k,l=r.x,t=r.y+r.h+2*k;"
+            "if(l+br.width>w-g)l=w-g-br.width;if(l<g)l=g;if(t+br.height>h-g)t=Math.max(g,r.y-2*k-br.height);"
+            "b.style.left=Math.round((l-b0.left)/k)+'px';b.style.top=Math.round((t-b0.top)/k)+'px';}"
             "function sel(e,a,b){try{e.setSelectionRange(a,b);}catch(x){}}"
+            // The pre-edit is written as a browser writes a composition: through the element's own value setter (a
+            // framework's tracker on the instance would swallow the change) and announced with an input event
+            // (isComposing), so a controlled field (React) keeps it instead of rendering its old value over it.
+            "function setVal(e,v,type,data){var p=e.tagName.toUpperCase()==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,"
+            "d=Object.getOwnPropertyDescriptor(p,'value');if(d&&d.set)d.set.call(e,v);else e.value=v;"
+            "try{e.dispatchEvent(new InputEvent('input',{bubbles:true,isComposing:true,inputType:type,data:data}));}"
+            "catch(x){try{e.dispatchEvent(new Event('input',{bubbles:true}));}catch(y){}}}"
+            // Standing: the field still holds the pre-edit, with the selection mark() last set.
             "function preeditStanding(e){return ime.el===e&&ime.base!=null&&e.value===ime.base.slice(0,ime.start)+ime.pre+ime.base.slice(ime.end)"
-            "&&e.selectionStart===ime.start&&e.selectionEnd===ime.start+ime.pre.length;}"
-            "function clearPreedit(e){if(preeditStanding(e)){e.value=ime.base.slice(0,ime.start)+ime.base.slice(ime.end);sel(e,ime.start,ime.start);}}"
+            "&&e.selectionStart===ime.selA&&e.selectionEnd===ime.selB;}"
+            // The inline pre-edit shows the IME's position with the field's own selection: the target clause once
+            // converted (the syllable, for Korean), else a caret at the IME's caret. markAt: where the box anchors, as the Windows IME anchors
+            // its window: the reading's start, then the target clause's.
+            "function target(m){var p=parts(m),cl=p.cl,t=p.t;return t>=0&&t+1<cl.length?[cl[t],cl[t+1]]:null;}"
+            "function mark(e,m){var g=target(m),a,b;if(g){a=ime.start+g[0];b=ime.start+g[1];}"
+            "else{a=b=ime.start+Math.max(0,Math.min(m.caret||0,ime.pre.length));}sel(e,a,b);ime.selA=a;ime.selB=b;}"
+            "function markAt(m){var g=target(m);return ime.start+(g?g[0]:0);}"
+            "function cev(e,type,data){try{e.dispatchEvent(new CompositionEvent(type,{bubbles:true,cancelable:type==='compositionstart',data:data}));}catch(x){}}"
+            "function cend(data){var e=ime.cel;ime.cel=null;if(e)cev(e,'compositionend',data);}"
+            "function clearPreedit(e){if(preeditStanding(e)){setVal(e,ime.base.slice(0,ime.start)+ime.base.slice(ime.end),'deleteCompositionText',null);"
+            "sel(e,ime.start,ime.start);}}"
+            // The commit's characters reach the field before the commit reaches the page core. The IME's own keys
+            // never reach the page, so a character typed into a standing pre-edit is the commit: the whole pre-edit is
+            // selected first, and the commit replaces it as one edit (maxlength and the page's own filtering apply).
+            "document.addEventListener('keypress',function(ev){var e=ime.el;if(e&&ev.target===e&&preeditStanding(e)){"
+            "ime.selA=ime.start;ime.selB=ime.start+ime.pre.length;sel(e,ime.selA,ime.selB);}},true);"
+            // A click in the field mid-composition keeps the reading as typed, as a browser commits on a click, and
+            // the IME drops its composition ('__imecancel'), so nothing is typed after it.
+            "document.addEventListener('mousedown',function(ev){var e=ime.el;if(!e||ev.target!==e||!preeditStanding(e))return;"
+            "var r=ime.pre;ime.el=null;ime.base=null;ime.pre='';cend(r);try{__mlNative(id,'__imecancel','1');}catch(x){}},true);"
+            // Inline only where the field has a selection (not email or number inputs: the box shows those).
+            "function selectable(e){try{return typeof e.selectionStart==='number';}catch(x){return false;}}"
+            "function seed(e){ime.el=e;ime.base=e.value;ime.start=e.selectionStart||0;ime.end=e.selectionEnd||ime.start;ime.selA=ime.selB=ime.start;}"
             "if(window.magelight){window.magelight.on('__ime',function(a){var m;try{m=JSON.parse(a);}catch(e){return;}"
-            "var e=document.activeElement,t=(e&&e.tagName||'').toUpperCase(),plain=!!e&&(t==='INPUT'||t==='TEXTAREA')&&!e.isContentEditable;"
-            "if(m.state==='start'){ime.pre='';if(plain){ime.el=e;ime.base=e.value;ime.start=e.selectionStart||0;ime.end=e.selectionEnd||ime.start;}else{ime.el=null;ime.base=null;}}"
-            "else if(m.state==='compose'){if(plain&&ime.el===e&&ime.base!=null){ime.pre=m.text||'';e.value=ime.base.slice(0,ime.start)+ime.pre+ime.base.slice(ime.end);sel(e,ime.start,ime.start+ime.pre.length);}caret();}"
-            "else if(m.state==='commit'){if(plain)clearPreedit(e);ime.base=null;ime.pre='';}"
-            "else if(m.state==='end'){if(plain)clearPreedit(e);ime.el=null;ime.base=null;ime.pre='';}"
-            "try{window.dispatchEvent(new CustomEvent('magelight:ime',{detail:m}));}catch(x){}});}"
+            // Inline only in a plain field of the top page; in a frame the box carries the composition.
+            "var f=deep(),e=f.e,t=(e&&e.tagName||'').toUpperCase(),"
+            "plain=!!e&&!f.frames.length&&(t==='INPUT'||t==='TEXTAREA')&&!e.isContentEditable&&selectable(e);"
+            // Fired before the page core applies the change: cancelling it keeps the page core off this change.
+            "var go=true;try{go=window.dispatchEvent(new CustomEvent('magelight:ime',{cancelable:true,detail:m}));}catch(x){}"
+            "var draws=go&&!offDeep(f)&&!isPassword(e);"
+            "if(m.state==='start'){ime.pre='';if(draws&&plain)seed(e);else{ime.el=null;ime.base=null;}}"
+            // A partial commit (a Korean syllable, a Japanese clause) leaves the composition going without a new
+            // 'start': the rest is seeded again from the field, which already holds the committed text, and a new
+            // compositionstart opens it. An empty compose with nothing open (the IME dropping what a click kept)
+            // starts nothing.
+            "else if(m.state==='compose'){if(draws&&e&&(m.text||ime.cel)){if(!ime.cel){ime.cel=e;cev(e,'compositionstart','');}"
+            "cev(ime.cel,'compositionupdate',m.text||'');"
+            "if(plain&&(ime.el===e||!ime.el)){if(ime.base==null)seed(e);"
+            "ime.pre=m.text||'';setVal(e,ime.base.slice(0,ime.start)+ime.pre+ime.base.slice(ime.end),'insertCompositionText',ime.pre);"
+            "mark(e,m);}}}"
+            // A list opened, changed or closed: the target clause may have moved with no new text.
+            "else if(m.state==='candidates'){if(draws&&plain&&m.composition===ime.pre&&preeditStanding(e))mark(e,m);}"
+            // 'commit' and 'end' clear the field the composition started in, whoever draws: after a blur, focus has
+            // already moved on, and a page that opted out mid-composition leaves no text behind.
+            "else if(m.state==='commit'){if(ime.el)clearPreedit(ime.el);ime.base=null;ime.pre='';cend(m.text||'');}"
+            "else if(m.state==='end'){if(ime.el)clearPreedit(ime.el);ime.el=null;ime.base=null;ime.pre='';cend('');}"
+            "var inl=plain&&ime.el===e&&ime.base!=null;if(draws&&m.state!=='end')draw(m,inl,f,inl?markAt(m):null);else hide();});}"
             "})();"
             // Tooltips (1.2.0): the page draws the title the host hands it on '__tooltip' ({t, c}: the text, the
             // cursor's height in CSS px; {l:1} = the pointer left the page, so nothing shows until it moves here
@@ -1576,6 +1719,9 @@ namespace Magelight {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
                 v = FindViewByUlLocked(caller);
             }
+            // A new document, whoever asked for it (the host or the page itself): the old page's focused field went
+            // with it, and no focusout said so. The new page's bridge reports its own focus.
+            if (v) ImeForgetView(v->id);
             if (v) InstallBridgeShims(*v, true);
         }
         void OnDOMReady(ultralight::View* caller, uint64_t, bool is_main_frame,
@@ -2734,7 +2880,8 @@ namespace Magelight {
         s_focused.store(on);
         s_focusMenuHideSeen.store(false);   // a hide from an earlier session is no news about this one
         if (on) s_uiModeEnteredMs.store(GetTickCount64());
-        if (!on && s_hwnd) { s_imeCaretX.store(-1); PostMessageW(s_hwnd, kImeCtlMsg, 0, 0); }   // IME follows UI mode off
+        if (!on && s_hwnd) PostMessageW(s_hwnd, kImeCtlMsg, kImeDetach, 0);   // IME follows UI mode off
+        if (on) ImeFollowUiView(uiView);   // ... and on: a field focused before UI mode came gets it now
         // UI mode shows its target view; other views (HUD badges etc.) keep
         // their own visibility.
         if (on) ShowView(uiView, true);
@@ -2903,102 +3050,175 @@ namespace Magelight {
         return out;
     }
 
-    static std::wstring ImeGetString(HIMC hImc, DWORD what)
+    // The window's input context for one scope (ImmGetContext / ImmReleaseContext). Window thread; never inside an
+    // SEH wrapper (it has a destructor).
+    struct ImcLock {
+        HIMC h = s_hwnd ? ImmGetContext(s_hwnd) : nullptr;
+        ImcLock() = default;
+        ImcLock(const ImcLock&) = delete;
+        ImcLock& operator=(const ImcLock&) = delete;
+        ~ImcLock() { if (h) ImmReleaseContext(s_hwnd, h); }
+        explicit operator bool() const { return h != nullptr; }
+    };
+
+    // One composition property (GCS_*), sized then filled: the bytes the IME holds now.
+    static std::vector<unsigned char> ImeGetBytes(HIMC hImc, DWORD what)
     {
-        const LONG bytes = ImmGetCompositionStringW(hImc, what, nullptr, 0);
-        if (bytes <= 0) return {};
-        std::wstring out(static_cast<std::size_t>(bytes) / sizeof(wchar_t), L'\0');
-        ImmGetCompositionStringW(hImc, what, out.data(), static_cast<DWORD>(bytes));
+        const LONG n = ImmGetCompositionStringW(hImc, what, nullptr, 0);
+        if (n <= 0) return {};
+        std::vector<unsigned char> out(static_cast<std::size_t>(n));
+        ImmGetCompositionStringW(hImc, what, out.data(), static_cast<DWORD>(n));
         return out;
     }
 
-    // -> the UI-mode page's reserved '__ime' channel ({state, text}); the
-    // bridge script draws the pre-edit and re-emits it as 'magelight:ime'.
-    static void ImeNotifyPage(const char* state, const std::wstring& text)
+    static std::wstring ImeGetString(HIMC hImc, DWORD what)
     {
-        const std::string json = std::string("{\"state\":\"") + state + "\",\"text\":" + MlJsonQuote(WideToUtf8(text)) + "}";
-        InteropCall(static_cast<ViewId>(s_uiModeView.load()), "__ime", json);
+        const std::vector<unsigned char> b = ImeGetBytes(hImc, what);
+        std::wstring out(b.size() / sizeof(wchar_t), L'\0');
+        if (!out.empty()) std::memcpy(out.data(), b.data(), out.size() * sizeof(wchar_t));
+        return out;
     }
 
-    static void ImeRepositionCandidates()   // window thread
+    // What the page core draws: the composition, its caret, and the candidate page while the IME has one open.
+    // Window thread.
+    static Ime::Snapshot ImeReadSnapshot(HIMC hImc)
     {
-        const int x = s_imeCaretX.load(), y = s_imeCaretY.load(), h = s_imeCaretH.load();
-        if (x < 0 || !s_hwnd) return;
-        if (HIMC hImc = ImmGetContext(s_hwnd)) {
-            CANDIDATEFORM cf{};
-            cf.dwIndex = 0; cf.dwStyle = CFS_CANDIDATEPOS; cf.ptCurrentPos = { x, y + h };
-            ImmSetCandidateWindow(hImc, &cf);
-            COMPOSITIONFORM cpf{};
-            cpf.dwStyle = CFS_POINT; cpf.ptCurrentPos = { x, y };
-            ImmSetCompositionWindow(hImc, &cpf);
-            ImmReleaseContext(s_hwnd, hImc);
+        Ime::Snapshot snap;
+        const std::wstring comp = ImeGetString(hImc, GCS_COMPSTR);
+        snap.composition = WideToUtf8(comp);
+        const LONG cursor = ImmGetCompositionStringW(hImc, GCS_CURSORPOS, nullptr, 0);
+        snap.caret = std::clamp(static_cast<int>(cursor), 0, static_cast<int>(comp.size()));
+        // The clauses and the target clause, whether or not a list is open: moving to another clause closes it.
+        const std::vector<unsigned char> attrs = ImeGetBytes(hImc, GCS_COMPATTR);
+        const std::vector<unsigned char> clauses = ImeGetBytes(hImc, GCS_COMPCLAUSE);
+        snap.clauses = Ime::ReadClauses(clauses.data(), clauses.size(), comp.size());
+        snap.target = Ime::TargetClause(snap.clauses, attrs);
+        if (!s_imeCandidatesOpen.load()) return snap;
+
+        const DWORD bytes = ImmGetCandidateListW(hImc, 0, nullptr, 0);
+        if (bytes == 0) return snap;
+        std::vector<unsigned char> list(bytes);
+        const DWORD got = ImmGetCandidateListW(hImc, 0, reinterpret_cast<LPCANDIDATELIST>(list.data()), bytes);
+        const Ime::CandidatePage page = Ime::ReadCandidatePage(list.data(), got);
+        for (const auto& c : page.items) snap.candidates.push_back(WideToUtf8(c));
+        // The highlight is the row Space or Enter acts on (Ime::SelectedRow): none while a Japanese reading is
+        // unconverted and the list is predictions.
+        const auto lang = static_cast<std::uint16_t>(PRIMARYLANGID(LOWORD(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)))));
+        snap.selectedIndex = Ime::SelectedRow(page, Ime::Converted(attrs), lang);
+        return snap;
+    }
+
+    // The view IME messages go to: the one the context was attached for, else the UI-mode view (the window's own
+    // context composing with nothing attached).
+    static ViewId ImeView()
+    {
+        const ViewId attached = static_cast<ViewId>(s_imeView.load());
+        return attached ? attached : static_cast<ViewId>(s_uiModeView.load());
+    }
+
+    // -> the IME's page's reserved '__ime' channel: the state, its text and the snapshot. The page core draws
+    // them (or the page does, having opted out) and re-emits them as 'magelight:ime'. `text`: the committed
+    // string on 'commit'; on 'compose' the composition, from the snapshot. Window thread, from the window proc
+    // (SEH-guarded, where an escaping C++ exception would turn the overlay off) and from kImeCtlMsg (unguarded):
+    // a failure is logged here, the same for both.
+    static void ImeNotifyPage(const char* state, const std::wstring& text = {})
+    {
+        const ViewId view = ImeView();
+        if (!view) return;
+        try {
+            Ime::Snapshot snap;   // an 'end' is always empty: it clears what the page shows
+            if (std::strcmp(state, "end") != 0) {
+                if (ImcLock c; c) snap = ImeReadSnapshot(c.h);
+            }
+            const std::string payloadText = std::strcmp(state, "compose") == 0 ? snap.composition : WideToUtf8(text);
+            InteropCall(view, "__ime", Ime::Payload(state, payloadText, snap));
+        } catch (const std::exception& e) {
+            SKSE::log::error("Magelight: IME '{}' not sent to view {}: {}", state, view, e.what());
         }
     }
 
+    // The IME follows the view that gains UI mode (entry or a switch): the attached view's composition ends, and
+    // the page is asked whether a text field has focus now ('__imefocus', answered from the live document). A
+    // page that focuses its field as it opens reports that focus before it holds UI mode, and the field never
+    // blurs to report it again. The answer drives the IME only, never the VR keyboard. Later focus changes go
+    // through '__textfocus' as usual. Game thread: the answer comes on a later frame, after the detach.
+    static void ImeFollowUiView(ViewId view)
+    {
+        if (VR::IsLive() || !s_hwnd) return;
+        PostMessageW(s_hwnd, kImeCtlMsg, kImeDetach, 0);
+        InvokeJS(view, "window.__mlImeFocus&&window.__mlImeFocus();");
+    }
+
+    // A view whose page is gone (destroyed, reloaded, navigated, rebuilt): detach the IME if it is attached for
+    // that view. Decided on the window thread, after any attach still queued. Any thread, no lock taken.
+    static void ImeForgetView(ViewId view)
+    {
+        if (s_hwnd && view) PostMessageW(s_hwnd, kImeCtlMsg, kImeForgetView, static_cast<LPARAM>(view));
+    }
+
+    // Ends what the IME has open, the context still attached: the candidate list first (a cancel alone can leave
+    // it on screen), then the composition. Window thread.
+    static void ImeCancelComposition()
+    {
+        ImcLock c;
+        if (!c) return;
+        if (s_imeCandidatesOpen.load()) ImmNotifyIME(c.h, NI_CLOSECANDIDATE, 0, 0);
+        if (s_imeComposing.load()) ImmNotifyIME(c.h, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+    }
+
+    // Attached: s_imeView is the view the context was attached for, 0 when detached.
     static void ImeAttach(bool on)   // window thread only (kImeCtlMsg)
     {
-        if (!s_hwnd || s_imeAttached.load() == on) return;
+        if (!s_hwnd || (s_imeView.load() != 0) == on) return;
         if (on) {
+            const ViewId view = static_cast<ViewId>(s_uiModeView.load());
+            if (!view) return;
+            s_imeView.store(view);
             const BOOL ok = ImmAssociateContextEx(s_hwnd, nullptr, IACE_DEFAULT);
             // Diagnostics: did the window actually get a context, is the IME open,
             // and is it in a native (hiragana/kana) conversion mode or alphanumeric?
             // Field 2026-09-06: keys reached the page as plain letters with no
             // composition — this line tells 'A mode' apart from 'no context'.
-            if (HIMC hImc = ImmGetContext(s_hwnd)) {
+            if (ImcLock c; c) {
                 // OPEN the IME: the on/off state is per window, and a freshly
                 // attached context starts CLOSED — every key passed through
                 // untouched even in hiragana mode (field 2026-09-06 18:00:
                 // open=false, conversion=native). Opening on focus means the
                 // user never has to hit the IME on/off key inside the game.
-                if (!ImmGetOpenStatus(hImc)) ImmSetOpenStatus(hImc, TRUE);
+                if (!ImmGetOpenStatus(c.h)) ImmSetOpenStatus(c.h, TRUE);
                 DWORD conv = 0, sent = 0;
-                ImmGetConversionStatus(hImc, &conv, &sent);
+                ImmGetConversionStatus(c.h, &conv, &sent);
                 SKSE::log::info("Magelight: IME attach ok={} context=yes open={} conversion=0x{:X} ({})",
-                    ok != FALSE, ImmGetOpenStatus(hImc) != FALSE, conv,
+                    ok != FALSE, ImmGetOpenStatus(c.h) != FALSE, conv,
                     (conv & IME_CMODE_NATIVE) ? "native/hiragana" : "alphanumeric — composition will not start");
-                ImmReleaseContext(s_hwnd, hImc);
             } else {
                 SKSE::log::warn("Magelight: IME attach ok={} but the window has NO context — IME disabled on this thread?", ok != FALSE);
             }
         } else {
-            if (HIMC hImc = ImmGetContext(s_hwnd)) {
-                if (s_imeComposing.load()) ImmNotifyIME(hImc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
-                ImmReleaseContext(s_hwnd, hImc);
-            }
+            ImeCancelComposition();
             ImmAssociateContext(s_hwnd, nullptr);
-            s_imeComposing.store(false);
+            // The cancel need not send WM_IME_ENDCOMPOSITION: whatever the page still shows (the inline pre-edit,
+            // the candidate list) is cleared here, or it stays up after the field or UI mode is gone.
+            const bool wasComposing = s_imeComposing.exchange(false);
+            if (s_imeCandidatesOpen.exchange(false) || wasComposing) ImeNotifyPage("end");
+            s_imeView.store(0);
         }
-        s_imeAttached.store(on);
         SKSE::log::info("Magelight: IME context {}", on ? "attached (text field focused)" : "detached");
     }
 
-    // The page's caret, "x,y,h" in its CSS px -> client px of the game window,
-    // so the OS candidate list opens at the caret rather than the corner.
-    static void ImeOnCaret(ViewId id, const std::string& arg)
+    // The UI-mode page kept the reading (a click mid-composition): the IME drops its composition, on the window
+    // thread. Any thread.
+    static void ImeCancelFromPage()
     {
-        float cx = 0.f, cy = 0.f, ch = 0.f;
-        if (sscanf_s(arg.c_str(), "%f,%f,%f", &cx, &cy, &ch) == 3) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
-            if (MlView* v = FindViewLocked(id)) {
-                float ex = 0.f, ey = 0.f;
-                EffectivePos(*v, static_cast<float>(s_backbufferW.load()), static_cast<float>(s_backbufferH.load()), ex, ey);
-                const float ds = v->deviceScale > 0.f ? v->deviceScale : 1.f;
-                s_imeCaretX.store(static_cast<int>(ex + cx * ds));
-                s_imeCaretY.store(static_cast<int>(ey + cy * ds));
-                s_imeCaretH.store(static_cast<int>(ch * ds));
-            }
-        }
-        if (s_imeComposing.load() && s_hwnd) PostMessageW(s_hwnd, kImeCtlMsg, 2, 0);
+        if (!VR::IsLive() && s_hwnd) PostMessageW(s_hwnd, kImeCtlMsg, kImeCancel, 0);
     }
 
     // The window's IME context follows text-field focus in the UI-mode view
-    // (the caller filters other views); on VR the runtime keyboard owns text
-    // and the OS IME UI is invisible.
+    // (the caller filters other views); on VR the runtime keyboard owns text.
     static void ImeOnTextFocus(bool focused)
     {
         if (VR::IsLive() || !s_hwnd) return;
-        if (!focused) s_imeCaretX.store(-1);
-        PostMessageW(s_hwnd, kImeCtlMsg, focused ? 1 : 0, 0);
+        PostMessageW(s_hwnd, kImeCtlMsg, focused ? kImeAttach : kImeDetach, 0);
     }
 
     // 0.28.0: does the UI-mode page own Escape right now? (SetEscapeCapture /
@@ -3071,34 +3291,47 @@ namespace Magelight {
             if (msg == WM_SYSKEYDOWN) PeekHotkey(lparam);
             return false;
         // ── IME (0.27.0) ──
-        case WM_IME_STARTCOMPOSITION:
+        case WM_IME_STARTCOMPOSITION: {
             s_imeComposing.store(true);
-            SKSE::log::info("Magelight: IME composition started");
-            ImeNotifyPage("start", L"");
-            ImeRepositionCandidates();
-            return true;   // no DefWindowProc: it would open the OS composition window; the pre-edit lives in the page
+            static std::atomic<int> s_n{ 0 };   // one per typed word: the first few say the IME composes at all
+            if (s_n.fetch_add(1) < 6) SKSE::log::info("Magelight: IME composition started");
+            ImeNotifyPage("start");
+            return true;   // no DefWindowProc: it would open the OS composition window; the page core draws it
+        }
         case WM_IME_COMPOSITION: {
-            if (HIMC hImc = ImmGetContext(s_hwnd)) {
+            if (ImcLock c; c) {
                 if (lparam & GCS_RESULTSTR) {
-                    const std::wstring r = ImeGetString(hImc, GCS_RESULTSTR);
+                    const std::wstring r = ImeGetString(c.h, GCS_RESULTSTR);
                     ImeNotifyPage("commit", r);
                     for (wchar_t ch : r) QueueInput(WM_CHAR, static_cast<WPARAM>(ch), 0);   // pairs re-join in the drain
                     static std::atomic<int> s_n{ 0 };
                     if (s_n.fetch_add(1) < 6) SKSE::log::info("Magelight: IME commit ({} UTF-16 unit(s))", r.size());
                 }
-                if (lparam & GCS_COMPSTR) ImeNotifyPage("compose", ImeGetString(hImc, GCS_COMPSTR));
-                ImmReleaseContext(s_hwnd, hImc);
+                // Also when only the caret, the clauses or the target clause changed (the arrow keys, Shift+arrows).
+                if (lparam & (GCS_COMPSTR | GCS_CURSORPOS | GCS_COMPATTR | GCS_COMPCLAUSE)) ImeNotifyPage("compose");
             }
-            ImeRepositionCandidates();
             return true;   // never DefWindowProc: it would re-deliver the result as WM_CHARs (double insert)
         }
         case WM_IME_ENDCOMPOSITION:
             s_imeComposing.store(false);
-            ImeNotifyPage("end", L"");
+            s_imeCandidatesOpen.store(false);
+            ImeNotifyPage("end");
             return true;
         case WM_IME_SETCONTEXT:
-            // Keep the OS candidate list; drop the OS composition window (the pre-edit is inline).
-            DefWindowProcW(s_hwnd, msg, wparam, lparam & ~static_cast<LPARAM>(ISC_SHOWUICOMPOSITIONWINDOW));
+            // No OS IME window at all (lParam 0): it does not draw over the game. The IME reports the candidates
+            // through WM_IME_NOTIFY instead, and the page core draws them.
+            DefWindowProcW(s_hwnd, msg, wparam, 0);
+            return true;
+        case WM_IME_NOTIFY:
+            // The candidate list goes to the page, never to the OS window; every other notification goes on to
+            // the game's proc.
+            switch (wparam) {
+            case IMN_OPENCANDIDATE:
+            case IMN_CHANGECANDIDATE: s_imeCandidatesOpen.store(true); break;
+            case IMN_CLOSECANDIDATE: s_imeCandidatesOpen.store(false); break;
+            default: return false;
+            }
+            ImeNotifyPage("candidates");
             return true;
         default:
             return false;
@@ -3120,8 +3353,13 @@ namespace Magelight {
     {
         GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
         if (msg == kImeCtlMsg) {   // IME control, marshalled to the window's thread
-            if (wparam == 2) ImeRepositionCandidates();
-            else ImeAttach(wparam != 0);
+            if (wparam == kImeForgetView) {
+                if (static_cast<ViewId>(lparam) == static_cast<ViewId>(s_imeView.load())) ImeAttach(false);
+            } else if (wparam == kImeCancel) {
+                if (s_imeView.load()) ImeCancelComposition();
+            } else {
+                ImeAttach(wparam == kImeAttach);
+            }
             return 0;
         }
         if (s_focused.load() && !s_renderDead.load()) {
@@ -5351,7 +5589,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 v.rebuildPending = false;
                 if (!v.ul || v.destroyPending) continue;   // released meanwhile: the next load uses deviceScale
                 if (s_inspectorOf.count(v.id)) {
-                    v.deviceScale = v.liveScale;   // hit tests, the IME caret and GetViewInfo keep the View's scale
+                    v.deviceScale = v.liveScale;   // hit tests and GetViewInfo keep the View's scale
                     SKSE::log::warn("Magelight: view {} not rebuilt - it hosts a Web Inspector; it stays at device "
                                     "scale {:.3f}", v.id, v.liveScale);
                     continue;
@@ -5375,9 +5613,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         // The old page's focused text field went with it: clear its keyboard claims as a '__textfocus' '0' would.
         for (const ViewId id : rebuilt) {
             VR::NoteTextFocus(id, false);
+            ImeForgetView(id);   // whichever view the IME is attached for, UI-mode view or not
             if (IsUIModeActive() && id == static_cast<ViewId>(s_uiModeView.load()) &&
                 id != static_cast<ViewId>(s_kbViewId.load())) {
-                ImeOnTextFocus(false);
                 ShowOwnKeyboard(false);
             }
         }
@@ -5445,6 +5683,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                         SKSE::log::info("Magelight: [view {} console] {} more lines not logged (over {} a second)",
                             id, v.consoleRate.suppressed, kConsoleLinesPerSec);
                     destroyed.emplace_back(id, std::move(v.ul));   // released after the erase, outside the lock
+                    ImeForgetView(id);   // posts only: no lock, no wait
                     it = s_views.erase(it);
                     continue;
                 }
@@ -8422,6 +8661,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             const ViewId old = static_cast<ViewId>(s_uiModeView.load());
             if (old == view) { Emit(HostEvent::UIModeSwitched, view); return; }
             s_uiModeView.store(view);
+            ImeFollowUiView(view);   // the old view's composition ends; the new view's focused field gets the IME
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
                 QueueKeyboardThemeLocked();   // the keyboard page, up or not, follows the new view's theme (0.31.9)
