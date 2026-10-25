@@ -114,6 +114,8 @@ namespace Magelight {
     //                             // page holds UI mode (see InstallPolledKeyFilter)
     //   "skipGameCursor": true    // 1.2.0: the game's cursor is not drawn while a page holds UI mode, flat only
     //                             // (see InstallGameCursorSkip)
+    //   "clipCursor": true        // 1.5.1: the Windows cursor stays inside the game window while a page holds the
+    //                             // mouse, flat only (see ConfineCursor)
     //   "loadStagger": true, "loadBudgetMs": 8   // 0.31.0: hidden views start their first load one per frame
     //                                            // (see MaterializeViews); false = all in one frame (1-100)
     //   "cursorFile": "", "cursorHeight": 24, "cursorHotspotX": 0, "cursorHotspotY": 0   // the host cursor
@@ -280,6 +282,7 @@ namespace Magelight {
     static std::atomic<bool>      s_exceptionTelemetry{ true };
     static bool                   s_blockPolledKeys = true;   // Magelight.json; read before InstallPolledKeyFilter
     static bool                   s_skipGameCursor = true;    // Magelight.json "skipGameCursor"; read before InstallGameCursorSkip
+    static std::atomic<bool>      s_clipCursorCfg{ true };    // Magelight.json "clipCursor"
     static std::atomic<int>       s_stallThresholdMs{ 1500 };
     // Staggered view loading (0.31.0, MaterializeViews): "loadStagger" and "loadBudgetMs" in Magelight.json.
     static std::atomic<bool>      s_loadStagger{ true };
@@ -590,6 +593,8 @@ namespace Magelight {
                 s_blockPolledKeys = it->get<bool>();
             if (auto it = j.find("skipGameCursor"); it != j.end() && it->is_boolean())
                 s_skipGameCursor = it->get<bool>();
+            if (auto it = j.find("clipCursor"); it != j.end() && it->is_boolean())
+                s_clipCursorCfg.store(it->get<bool>());
             if (auto it = j.find("stallThresholdMs"); it != j.end() && it->is_number())
                 s_stallThresholdMs.store(std::clamp(it->get<int>(), 250, 60000));
             if (auto it = j.find("loadStagger"); it != j.end() && it->is_boolean())
@@ -3020,6 +3025,62 @@ namespace Magelight {
             nonExclusive ? "non-exclusive (bBackgroundMouse)" : "exclusive");
     }
 
+    // ── Cursor clip (1.5.1) ──────────────────────────────────────────────
+    // A page's cursor follows the game's mouse input (invariant 6), never the Windows cursor. When the game leaves the
+    // Windows cursor free (a non-exclusive mouse, another UI host holding focus), it wanders onto another monitor
+    // while the page's cursor goes on moving, and every click lands on both. So while a page holds the mouse and the
+    // game window is in front, the Windows cursor is clipped to the window's client area; the clip that was there
+    // before comes back when UI mode ends and when the window loses focus. Flat only.
+    static std::mutex s_clipMutex;    // leaf: guards the three below; nothing but Win32 cursor calls under it
+    static bool       s_cursorClipped = false;
+    static RECT       s_clipBefore{};
+    static RECT       s_clipOurs{};
+
+    static void ReleaseCursorClip(const char* why)   // any thread
+    {
+        std::lock_guard<std::mutex> lk(s_clipMutex);
+        if (!s_cursorClipped) return;
+        s_cursorClipped = false;
+        RECT now{};
+        // Only a clip that is still ours is put back: one set since then (the game's own, another mod's) stays.
+        if (!GetClipCursor(&now) || !EqualRect(&now, &s_clipOurs)) return;
+        const RECT desktop{ GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                            GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                            GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        ClipCursor(EqualRect(&s_clipBefore, &desktop) ? nullptr : &s_clipBefore);
+        static std::atomic<int> s_n{ 0 };
+        if (s_n.fetch_add(1) < 3) SKSE::log::info("Magelight: Windows cursor released ({})", why);
+    }
+
+    // Once a frame (FrameWork): clips while `want` (a page holds UI mode) and the game window is in front, else
+    // releases. Re-clipped each frame, so a moved or resized window and a clip someone else reset are followed.
+    static void ConfineCursor(bool want)
+    {
+        if (!want || !s_clipCursorCfg.load() || REL::Module::IsVR() || !s_hwnd || GetForegroundWindow() != s_hwnd) {
+            ReleaseCursorClip(want ? "the game window is not in front" : "UI mode ended");
+            return;
+        }
+        RECT client{};
+        POINT origin{ 0, 0 };
+        if (!GetClientRect(s_hwnd, &client) || !ClientToScreen(s_hwnd, &origin)) return;
+        OffsetRect(&client, origin.x, origin.y);
+        if (IsRectEmpty(&client)) return;
+        std::lock_guard<std::mutex> lk(s_clipMutex);
+        RECT now{};
+        if (!GetClipCursor(&now)) return;
+        if (!s_cursorClipped) s_clipBefore = now;
+        if (!EqualRect(&now, &client) && !ClipCursor(&client)) return;
+        s_clipOurs = client;
+        if (!s_cursorClipped) {
+            static std::atomic<int> s_n{ 0 };
+            if (s_n.fetch_add(1) < 3)
+                SKSE::log::info("Magelight: Windows cursor kept inside the game window ({},{} {}x{}) while a page "
+                                "holds the mouse", client.left, client.top, client.right - client.left,
+                                client.bottom - client.top);
+        }
+        s_cursorClipped = true;
+    }
+
     // ── World freeze (0.31.0) ─────────────────────────────────────────────
     // kFreezeFrameBackground on the focus menu: the engine shows a frozen frame instead of rendering the 3D
     // world. A freeze over a running game deadlocks or pins a stale frame, so it is set only while OUR menu
@@ -3756,6 +3817,9 @@ namespace Magelight {
     {
         GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
         if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) s_imeWindowFocused = msg == WM_SETFOCUS;
+        // A game that stops presenting in the background would otherwise leave the clip on the desktop.
+        if (msg == WM_KILLFOCUS || (msg == WM_ACTIVATEAPP && !wparam) || msg == WM_DESTROY)
+            ReleaseCursorClip("the game window lost focus");
         if (msg == kImeCtlMsg) {   // IME control, marshalled to the window's thread
             if (wparam == 2) ImeRepositionCandidates();
             else if (wparam == 3) {   // the page kept the composition as final text: cancel the IME's copy of it
@@ -7996,6 +8060,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // About 30 frames after an entry or exit, sample the Windows cursor (SampleCursorState).
         static int uiFrames = 0;
         static int offFrames = -1;   // frames since the last exit; -1 = no exit sample pending
+        ConfineCursor(s_focused.load());
         if (s_focused.load()) {
             if (s_focusMenuHideSeen.load()) CheckFocusMenuClosed();
             s_memAfterUi = {};   // back in UI mode: the after-UI memory line waits for this exit
