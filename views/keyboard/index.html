@@ -5,7 +5,7 @@
      being typed into (0.31.9, see the script). Blank ('wait') while the host has the keyboard down and until a
      show's own message lands, so a show never paints the colours of a theme that is no longer current. */
   html.wait { visibility: hidden; }
-  html.swap .k { transition: none; }   /* a theme lands at once, never as a fade from the last one */
+  html.swap .k, html.swap .cmd { transition: none; }   /* a theme lands at once, never as a fade from the last one */
   html, body { margin: 0; background: transparent; -webkit-user-select: none; user-select: none; }
   .kb {
     box-sizing: border-box; width: 980px; padding: 12px 14px 14px;
@@ -22,6 +22,19 @@
   .bar .grip { color: var(--kb-panelBorder, #5a4a2e); font-size: 15px; letter-spacing: 2px; }
   .bar .sub { color: var(--kb-muted, #8a7a5a); font-size: 12px; }
   .bar .spacer { flex: 1; }
+  /* The edit buttons sit in the bar: pressing one runs the command and never starts a drag. */
+  .cmds { display: flex; gap: 6px; }
+  .cmd {
+    padding: 3px 10px; border: 1px solid var(--kb-keyBorder, #3b3221); border-radius: 4px; cursor: pointer;
+    background: var(--kb-key, #292118); color: var(--kb-action, #e0925a); font: 12px Georgia, serif;
+    transition: background .06s linear, border-color .06s linear;
+  }
+  .cmd:hover { background: var(--kb-keyHover, #35291c); border-color: var(--kb-panelBorder, #5a4a2e); }
+  .cmd:active, .cmd.down {
+    background: var(--kb-pressed, #4a3a24); border-color: var(--kb-accent, #cba560); color: var(--kb-pressedText, #e0925a);
+  }
+  #rows.pad { width: 560px; margin: 0 auto; }
+  #rows.pad .k { height: 59px; font-size: 17px; }   /* four rows in the height of five: the panel keeps its size */
   .row { display: flex; gap: 6px; margin-bottom: 6px; }
   .row:last-child { margin-bottom: 0; }
   .k {
@@ -55,20 +68,33 @@
       <h1>Keyboard</h1>
       <span class="sub" id="hint">drag this bar to move me</span>
       <span class="spacer"></span>
-      <span class="sub">Magelight</span>
+      <span class="cmds">
+        <span class="cmd" data-cmd="undo">Undo</span>
+        <span class="cmd" data-cmd="redo">Redo</span>
+        <span class="cmd" data-cmd="selectAll">Select all</span>
+        <span class="cmd" data-cmd="cut">Cut</span>
+        <span class="cmd" data-cmd="copy">Copy</span>
+        <span class="cmd" data-cmd="paste">Paste</span>
+      </span>
     </div>
     <div id="rows"></div>
   </div>
 <script>
 (function () {
-  // The host's state for this page, on the host-only '__kbtheme' channel: {"shown":bool,"theme":{...}|null}, the
-  // theme being the thirteen tokens of the view being typed into, built by the host from colours it checked, or
-  // null for the look above. Each message is the whole state and the host keeps only the latest queued. Checked
-  // again here: only these names, only #rrggbb, set through setProperty. shown false (the host hid the keyboard)
-  // blanks the page until a message with shown true, which the host queues with every show.
+  // The host's state for this page, on the host-only '__kbtheme' channel:
+  // {"shown":bool,"theme":{...}|null,"field":{"mode","enter","multiline","secret"}|null}. The theme is the thirteen
+  // tokens of the view being typed into, built by the host from colours it checked, or null for the look above; the
+  // field is the focused field's kind, from fixed values (the page's inputmode and enterkeyhint), or null. Each message
+  // is the whole state and the host keeps only the latest queued. Checked again here: theme names and #rrggbb only,
+  // set through setProperty; a field value this page does not know is the plain QWERTY and its Enter. shown false
+  // (the host hid the keyboard) blanks the page until a message with shown true, which the host queues with every
+  // show.
   var THEME = ['panel', 'panelBorder', 'key', 'keyBorder', 'keyHover', 'text', 'muted', 'accent',
                'action', 'danger', 'pressed', 'pressedText', 'barHover'];
   var HEX = /^#[0-9a-fA-F]{6}$/;
+  var MODES = { text: 1, numeric: 1, decimal: 1, tel: 1, email: 1, url: 1, search: 1 };
+  var ENTER = { enter: 'Enter', done: 'Done', go: 'Go', next: 'Next', previous: 'Prev', search: 'Search', send: 'Send' };
+  function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
   var root = document.documentElement;
   function reveal() { root.classList.remove('wait'); }
   // First load only: a page that never hears from the host must not stay invisible.
@@ -84,29 +110,49 @@
       if (typeof v === 'string' && HEX.test(v)) root.style.setProperty('--kb-' + THEME[i], v);
       else root.style.removeProperty('--kb-' + THEME[i]);
     }
+    applyField(m.field);
     void root.offsetWidth;   // style the new colours now, with transitions off, so dropping 'swap' starts none
     root.classList.remove('swap');
     clearTimeout(fallback);
     if (m.shown === false) root.classList.add('wait');
     else reveal();   // shown true, or a message this page cannot read: better visible than stuck blank
   }
-  try { window.magelight.on('__kbtheme', onHost); } catch (e) {}
 
-  // [lower, upper, kind, vk, grow]. kind: '' normal, 'mod', 'act', 'close'.
-  var R = [
-    [['`','~'],['1','!'],['2','@'],['3','#'],['4','$'],['5','%'],['6','^'],['7','&'],['8','*'],
-     ['9','('],['0',')'],['-','_'],['=','+'],['Bksp','Bksp','act',8,'wide']],
-    [['Tab','Tab','act',9,'wide'],['q','Q'],['w','W'],['e','E'],['r','R'],['t','T'],['y','Y'],['u','U'],
-     ['i','I'],['o','O'],['p','P'],['[','{'],[']','}'],['\\','|']],
-    [['Caps','Caps','mod',0,'wide'],['a','A'],['s','S'],['d','D'],['f','F'],['g','G'],['h','H'],
-     ['j','J'],['k','K'],['l','L'],[';',':'],["'",'"'],['Enter','Enter','act',13,'wider']],
-    [['Shift','Shift','mod',0,'wider'],['z','Z'],['x','X'],['c','C'],['v','V'],['b','B'],['n','N'],
-     ['m','M'],[',','<'],['.','>'],['/','?'],['Shift','Shift','mod',0,'wider']],
-    [['Esc','Esc','act',27,'wide'],['Space','Space','',32,'space'],
-     ['←','←','act',37],['→','→','act',39],
-     ['↑','↑','act',38],['↓','↓','act',40],
-     ['Close','Close','close',0,'wide']]
-  ];
+  // A key is [lower, upper, kind, vk, grow]. kind: '' text, 'mod', 'act', 'close'.
+  var BKSP = ['Bksp', 'Bksp', 'act', 8, 'wide'], ENTERKEY = ['Enter', 'Enter', 'act', 13, 'wider'];
+  var ESC = ['Esc', 'Esc', 'act', 27, 'wide'], CLOSE = ['Close', 'Close', 'close', 0, 'wide'];
+  var LEFT = ['←', '←', 'act', 37], RIGHT = ['→', '→', 'act', 39];
+  var UP = ['↑', '↑', 'act', 38], DOWN = ['↓', '↓', 'act', 40];
+  function qwerty(before, after) {   // the text layout; before / after: keys beside Space
+    return [
+      [['`','~'],['1','!'],['2','@'],['3','#'],['4','$'],['5','%'],['6','^'],['7','&'],['8','*'],
+       ['9','('],['0',')'],['-','_'],['=','+'],BKSP],
+      [['Tab','Tab','act',9,'wide'],['q','Q'],['w','W'],['e','E'],['r','R'],['t','T'],['y','Y'],['u','U'],
+       ['i','I'],['o','O'],['p','P'],['[','{'],[']','}'],['\\','|']],
+      [['Caps','Caps','mod',0,'wide'],['a','A'],['s','S'],['d','D'],['f','F'],['g','G'],['h','H'],
+       ['j','J'],['k','K'],['l','L'],[';',':'],["'",'"'],ENTERKEY],
+      [['Shift','Shift','mod',0,'wider'],['z','Z'],['x','X'],['c','C'],['v','V'],['b','B'],['n','N'],
+       ['m','M'],[',','<'],['.','>'],['/','?'],['Shift','Shift','mod',0,'wider']],
+      [ESC].concat(before, [['Space','Space','',32,'space']], after, [LEFT, RIGHT, UP, DOWN, CLOSE])
+    ];
+  }
+  function pad(last) {   // the keypad; last: the bottom row's keys between Esc and Close
+    return [
+      [['7','7'],['8','8'],['9','9'],BKSP],
+      [['4','4'],['5','5'],['6','6'],LEFT,RIGHT],
+      [['1','1'],['2','2'],['3','3'],ENTERKEY],
+      [ESC].concat(last, [CLOSE])
+    ];
+  }
+  var PADS = { numeric: 1, decimal: 1, tel: 1 };
+  var LAYOUTS = {
+    text: function () { return qwerty([], []); },
+    email: function () { return qwerty([['@','@']], [['.com','.com']]); },
+    url: function () { return qwerty([['/','/']], [['.com','.com']]); },
+    numeric: function () { return pad([['-','-'],['0','0']]); },
+    decimal: function () { return pad([['-','-'],['0','0'],['.','.']]); },
+    tel: function () { return pad([['*','*'],['0','0'],['#','#'],['+','+']]); }
+  };
   // Keys that auto-repeat while held: erase and navigate, the two you never
   // want to click twenty times with a laser pointer.
   var REPEAT = { 8: 1, 37: 1, 38: 1, 39: 1, 40: 1 };
@@ -114,8 +160,9 @@
 
   var shift = false, caps = false;
   var rows = document.getElementById('rows');
-  var letterEls = [];
+  var letterEls = [], enterEls = [];
   var timers = null;
+  var layout = '', enterLabel = 'Enter';
 
   function send(o) { try { window.magelight.send('__key', JSON.stringify(o)); } catch (e) {} }
 
@@ -137,53 +184,96 @@
       var on = (t === 'Shift' && shift) || (t === 'Caps' && caps);
       if (on) mods[i].classList.add('on'); else mods[i].classList.remove('on');
     }
+    enterEls.forEach(function (el) { el.textContent = enterLabel; });
   }
 
-  R.forEach(function (row) {
-    var d = document.createElement('div');
-    d.className = 'row';
-    row.forEach(function (k) {
-      var lo = k[0], hi = k[1], kind = k[2] || '', vk = k[3] || 0, grow = k[4] || '';
-      var el = document.createElement('div');
-      el.className = 'k' + (kind ? ' ' + kind : '') + (grow ? ' ' + grow : '');
-      el.textContent = lo;
-      if (kind === 'mod') el.setAttribute('data-mod', lo);
-      if (!kind) letterEls.push({ el: el, lo: lo, hi: hi });
+  function build(name) {
+    stopRepeat();
+    letterEls = [];
+    enterEls = [];
+    while (rows.firstChild) rows.removeChild(rows.firstChild);
+    rows.className = own(PADS, name) ? 'pad' : '';
+    LAYOUTS[name]().forEach(function (row) {
+      var d = document.createElement('div');
+      d.className = 'row';
+      row.forEach(function (k) {
+        var lo = k[0], hi = k[1], kind = k[2] || '', vk = k[3] || 0, grow = k[4] || '';
+        var el = document.createElement('div');
+        el.className = 'k' + (kind ? ' ' + kind : '') + (grow ? ' ' + grow : '');
+        el.textContent = lo;
+        if (kind === 'mod') el.setAttribute('data-mod', lo);
+        if (!kind) letterEls.push({ el: el, lo: lo, hi: hi });
+        if (vk === 13) enterEls.push(el);
 
-      function fire() {
-        if (lo === 'Space') { send({ c: ' ' }); return; }
-        if (vk) { send({ vk: vk }); return; }
-        var isAlpha = /^[a-z]$/.test(lo);
-        var up = isAlpha ? (shift !== caps) : shift;
-        send({ c: up ? hi : lo });
-      }
+        function fire() {
+          if (lo === 'Space') { send({ c: ' ' }); return; }
+          if (vk) { send({ vk: vk }); return; }
+          var isAlpha = /^[a-z]$/.test(lo);
+          var up = isAlpha ? (shift !== caps) : shift;
+          send({ c: up ? hi : lo });   // '.com' is one string: one edit
+        }
 
+        el.addEventListener('mousedown', function (ev) {
+          ev.preventDefault();
+          el.classList.add('down');
+          if (kind === 'mod') {
+            if (lo === 'Shift') shift = !shift; else caps = !caps;
+            relabel();
+            return;
+          }
+          if (kind === 'close') { send({ close: true }); return; }
+          fire();
+          if (shift) { shift = false; relabel(); }   // shift is one-shot
+          if (REPEAT[vk]) {                          // hold to repeat
+            stopRepeat();
+            timers = {};
+            timers.t = setTimeout(function () {
+              timers.i = setInterval(fire, REPEAT_RATE);
+            }, REPEAT_DELAY);
+          }
+        });
+        el.addEventListener('mouseup', function () { el.classList.remove('down'); stopRepeat(); });
+        el.addEventListener('mouseleave', function () { el.classList.remove('down'); stopRepeat(); });
+        d.appendChild(el);
+      });
+      rows.appendChild(d);
+    });
+    layout = name;
+    relabel();
+  }
+
+  // The field being typed into picks the layout (inputmode) and the Enter key's label (enterkeyhint). The rows
+  // are rebuilt only when the layout changes, so Shift and Caps survive a move between fields of one kind.
+  function applyField(f) {
+    var mode = 'text', enter = '';
+    if (f && typeof f === 'object') {
+      if (typeof f.mode === 'string' && own(MODES, f.mode)) mode = f.mode;
+      if (typeof f.enter === 'string' && own(ENTER, f.enter)) enter = f.enter;
+    }
+    var name = own(LAYOUTS, mode) ? mode : 'text';
+    enterLabel = enter ? ENTER[enter] : (mode === 'search' ? 'Search' : 'Enter');
+    if (name !== layout) build(name);
+    else relabel();
+  }
+
+  build('text');
+  try { window.magelight.on('__kbtheme', onHost); } catch (e) {}
+
+  // ── Edit buttons ─────────────────────────────────────────────────────
+  // Undo, redo, select all, cut, copy and paste run on the page being typed into (the host's Editor commands).
+  var cmds = document.querySelectorAll('.cmd');
+  for (var c = 0; c < cmds.length; c++) {
+    (function (el) {
       el.addEventListener('mousedown', function (ev) {
         ev.preventDefault();
+        ev.stopPropagation();   // the bar's own mousedown starts a drag
         el.classList.add('down');
-        if (kind === 'mod') {
-          if (lo === 'Shift') shift = !shift; else caps = !caps;
-          relabel();
-          return;
-        }
-        if (kind === 'close') { send({ close: true }); return; }
-        fire();
-        if (shift) { shift = false; relabel(); }   // shift is one-shot
-        if (REPEAT[vk]) {                          // hold to repeat
-          stopRepeat();
-          timers = {};
-          timers.t = setTimeout(function () {
-            timers.i = setInterval(fire, REPEAT_RATE);
-          }, REPEAT_DELAY);
-        }
+        send({ cmd: el.getAttribute('data-cmd') });
       });
-      el.addEventListener('mouseup', function () { el.classList.remove('down'); stopRepeat(); });
-      el.addEventListener('mouseleave', function () { el.classList.remove('down'); stopRepeat(); });
-      d.appendChild(el);
-    });
-    rows.appendChild(d);
-  });
-  relabel();
+      el.addEventListener('mouseup', function () { el.classList.remove('down'); });
+      el.addEventListener('mouseleave', function () { el.classList.remove('down'); });
+    })(cmds[c]);
+  }
 
   // ── Drag the bar to move the keyboard ────────────────────────────────
   // The host does the moving: in VR it re-places the overlay along the ray

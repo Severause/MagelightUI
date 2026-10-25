@@ -209,19 +209,99 @@ longer drive its views (see the trust model above).
 
 ## IME (Chinese, Japanese, Korean input)
 
-Nothing to do. When a text field in your page takes focus, the host attaches
-the window's IME context; the OS candidate list opens at the caret; the
-composition text shows inline in the field; the committed text arrives as
-ordinary keystrokes. While a composition is open, Enter, Space and Escape
-belong to the IME and your key handlers do not see them. For an "IME active"
-indicator, listen for the
-`magelight:ime` window event (`detail.state` is `start`, `compose`, `commit`
-or `end`). Feature-detect with `QueryCapability("ime")`. Not available in VR,
-where the runtime keyboard owns text entry.
+Nothing to do. When a text field in your page takes focus while the page holds
+UI mode, the host attaches the window's IME context (never for a password
+field or an `<input type="number">`, where the player types plain digits with
+the IME on, as in a browser); the composition text shows inline in the field, a
+field in a same-origin iframe or a `contenteditable` region included, with the
+`compositionstart`, `compositionupdate` and `compositionend` events a browser
+fires; the committed text replaces it as the composition ends. While a
+composition is open, Enter, Space, Escape, the arrow keys and the number keys
+belong to the IME and your key handlers do not see them. Escape is the IME's
+whole: the first one closes the candidate list, the next cancels the reading
+(text already committed stays), and neither, nor the key-up or auto-repeat of
+the one that ended the composition, leaves UI mode or reaches your page as a
+key, captured Escape or not; only an Escape with no composition open does what
+Escape does. An IME that commits on Escape and passes the key on, as the
+Korean IME commits a syllable (and as IMEs pass on Enter and Space after a
+commit), gives your page that Escape like any other, after the commit is in the
+field: one Escape commits the syllable and closes or reaches the page. A click in the field mid-composition keeps the reading: it goes on
+composing where it was, and the IME commits it there; a click in another field
+keeps it as typed, and so does UI mode ending or moving to another view, and a
+composition the IME ends while the game window has lost the keyboard focus
+(Alt+Tab). Not
+available in VR, where the VR keyboards own text entry.
+
+The Windows IME windows do not draw over the game, so the host shows none and
+the page core draws the IME's candidate list in a box at the composition: below
+the reading's first character (the clause the IME converts next, once it has
+converted clauses), above it when there is no room below, kept in the window.
+The row the IME selected is highlighted: the one Space or Enter acts on (none
+for the Japanese IME's predictions before converting, where Space converts to
+its own choice). Since 1.5.0; `QueryCapability("imeCandidates")`
+(`window.__MAGELIGHT__.capabilities.imeCandidates`). The box follows your theme
+through CSS custom properties: `--ml-ime-bg`, `--ml-ime-fg`, `--ml-ime-border`,
+`--ml-ime-font`, `--ml-ime-selected-bg`, `--ml-ime-selected-fg` and
+`--ml-ime-max-width` (34em by default, never past 90% of the window; a longer
+candidate is cut with an ellipsis). Without `--ml-ime-font` the box takes the
+focused field's font family at the size the field's text is drawn at (in an
+iframe or under another zoom too), with a line height of 1.4, so the list
+matches the text being typed; with no field it is 14px sans-serif.
+`--ml-ime-font` (a `font` shorthand) replaces all of that. The box's padding is
+in em, so it follows the font. Each colour the page leaves unset comes from the
+first of: the page's matching `--ml-tooltip-bg`, `--ml-tooltip-fg` or
+`--ml-tooltip-border`; the focused field (its text colour; what is painted under
+its centre: the background colours and gradients of every element there, in
+front of it or behind it, `pointer-events: none` layers such as a backdrop or a
+vignette included, a linear gradient read at that point and a radial or conic
+one averaged, composited front to back down to an opaque ground, through an
+iframe into its page, over black where the game shows through; its border or a
+mix of the two; `url()` images and `backdrop-filter` are not read); the
+defaults (`#1e1e20` ground, `#f0f0f0` text, `#5c5c60`
+border). Unless the page sets `--ml-ime-bg` or `--ml-ime-fg`, text and ground
+under 3:1 apart fall back to the defaults. The selected row, without
+`--ml-ime-selected-*`, is the ground mixed toward the text with the text on it
+(the text and ground swapped when that would read under 3:1), and the default
+grey over the default colours. Colours are read each time the list changes. The box lives in `<body>`, so a UI scale applied as a `zoom` on
+`<body>` scales it with the page, and it is placed in the page's own
+coordinates at any zoom or device scale. A field in a same-origin iframe (an
+editor written into `about:blank`, such as CodeMirror) gets the box in the top
+page, at its composition.
+
+Every change first fires a cancelable `magelight:ime` window event whose detail
+is the whole state, before the page core draws the box for it:
+
+```json
+{ "state": "candidates", "text": "",
+  "composition": "東京", "caret": 2,
+  "candidates": ["東京", "とうきょう", "トウキョウ", "東京都"], "selectedIndex": 0,
+  "clauses": [0, 2], "target": 0,
+  "anchor": { "x": 222, "y": 104, "h": 24 } }
+```
+
+`state` is `start`, `compose`, `commit`, `candidates` (a list opened, changed
+or closed) or `end` (empty: hide what you draw); `text` is the committed string
+on `commit` and the composition on `compose` (empty otherwise), as before 1.5.0;
+`caret` counts UTF-16 units into `composition`; `candidates` is the page the IME
+shows and `selectedIndex` is within it (`-1` for none); `clauses` are the clause
+boundaries in UTF-16 units (`0` first, the composition's length last; `[]` when
+the IME reports none) and `target` is the index of the clause the IME converts
+next (`-1`: none, as while the reading is unconverted); `anchor` is where the
+IME's window would open, the top-left and height of the character it anchors
+on (else of the caret), in the view's CSS px (`getBoundingClientRect`'s at no
+zoom, for a field in an iframe too), or `null`. The composition is the field's
+own: when the event fires the field already holds it. A page that draws its own
+candidate list sets `data-ml-ime="off"` on the field, an ancestor or an iframe
+on the way to it (`<html>` for the whole page), and the page core then draws no
+box. Cancelling the event (`preventDefault()`) does the same for that one
+change only, so a page that opts out that way cancels every event.
+`QueryCapability("ime")` says the host attaches the IME to text fields at all
+(flat only: 0 in VR since 1.5.0).
 
 ## Escape, loopback, and the other 0.28.0 hooks
 
-- **Escape.** By default Escape leaves UI mode. When a modal or an editing
+- **Escape.** By default Escape leaves UI mode (never while an IME composition
+  is open: that Escape is the IME's, see "IME"). When a modal or an editing
   control should handle it instead, call `SetEscapeCapture(view, true)` (or
   from the page: `magelight.send('__escapecapture','1')`); Escape then
   arrives as an ordinary keydown/keyup and UI mode stays. Clear it when the
@@ -243,7 +323,31 @@ where the runtime keyboard owns text entry.
   2 KB, 20 lines a second per view). `QueryCapability("consolelog")` answers
   that level (0 none, 1 errors, 2 warnings, 3 all); forward your own lines
   from the event when you need them and it is below 3. Keep secrets out of a
-  page's console output either way.
+  page's console output either way. Since 1.5.0 (`QueryCapability("scripterrors")`)
+  an `Error` argument arrives as its message, the JSON of its own fields when
+  it has any (`Error: x {"code":"E_FOO"}`), and its stack (it was that JSON
+  alone, `{}` for an Error with no fields of its own), and an exception your
+  `InvokeJS` script or an `InteropCall` handler leaves uncaught arrives as a
+  level-2 `ConsoleMessage` too (`y` = the line it was made at, 0 when that is
+  not known, the detail its message and stack) and is logged as
+  `[view N InvokeJS/ERROR]` or `[view N InteropCall('fn')/ERROR]`; `EvalJS`
+  hands its exception to your callback instead. Your script runs unnamed,
+  which lets a relative `import()` in it resolve against the page, and its
+  stack frames carry no location. What decides the line is who is on the stack
+  when the error is made, not who owns the code. With no frame that names a
+  script, `y` and the log line (`line 3:31 of an unnamed script`) give the line
+  of the unnamed code that made it: your script's, or the line of a page's eval
+  or `new Function` code your script called directly. When a page file is on
+  the stack, `y` is the line in the page file that made the error, or 0 when
+  unnamed code it reached made it: eval or `new Function` code, or a function
+  of yours that the page's code called (a callback you passed it), whose frame
+  is a bare `@` above the page's; the first frame with a file is then where the
+  page reached it, and nothing gives the line in your function. An `Error`
+  subclass is made at its constructor's `super(...)` call, so one with no
+  constructor of its own, yours or the page's, made from your script reports
+  JSC's built-in constructor, `line 1:28`, and made from page code reports no
+  line. A value thrown with no stack (a string, a plain object, a
+  `DOMException` from a DOM call) has `y` 0 and no frames: only its text.
 
 ## UI sounds (0.29.0)
 
@@ -299,11 +403,40 @@ an older host ignores the flag.
 
 - **Real DPI (0.26.9).** `ViewDesc::uiScale` is Ultralight's device scale:
   the page's `devicePixelRatio`, rasterised at that scale (0 = the host
-  default). `SetViewScale(view, scale)` changes it on a live view — the
-  render thread applies it on its next frame, as a live re-layout of the
-  page. That re-layout has crashed the game for a consumer and has not been
-  verified since it moved to the render thread (0.28.5): on a page that has
-  loaded, use `RebuildViewAtScale` below. Clamped 1.0..3.0 since 0.30.3
+  default). `SetViewScale(view, scale)` changes it on a live view and keeps
+  the page (no reload): the render thread applies it at the start of its
+  next frame, in one Ultralight call with any size a `SetViewBounds` left
+  pending, the page lays out again in that frame and is painted at the new
+  scale. Its `resize`, `matchMedia` `change` and `ResizeObserver` callbacks
+  run once, in that frame's paint (a hidden view's in the paint of its next
+  show or prepaint, whichever comes first: a `SetViewPrepaint` view is
+  prepainted about 1.5 s after the change, still hidden, never in VR), never
+  inside the call. A `SetViewScale` with the scale the view already has, like
+  a `SetViewBounds` that ends at the size it has, makes no call from 1.5.0
+  (on 2.0 such a call lays the page out again; see below). Before 0.28.5 the
+  host made the change on the caller's
+  thread, where it crashed the game for a consumer three times out of three;
+  it has not run in game since, which is why `RebuildViewAtScale` below
+  exists. Offline, on real mod pages changed live from
+  1.0 to 1.25, 1.35 or 1.5 and back, on Magelight's GPU driver and the CPU
+  renderer, a live change draws like a page loaded at that scale, text
+  included, on Ultralight 1.4 (hosts before 1.5.0) and 2.0 (1.5.0) alike
+  wherever the view's width and height divided by the scale are whole
+  numbers (1.4 leaves a few small spots, 2.0 a few edge pixels a few levels
+  of anti-aliasing apart). Where they are not, as at most real UI scales,
+  1.4 still matches, but 2.0 lays the two out a pixel apart. On 2.0 a View
+  that is resized or rescaled after it was created gets that CSS size
+  rounded up, and a View created at that size and scale gets it rounded down
+  (`innerWidth` 1423 against 1422 for 1920 px at 1.35, 854 against 853 for
+  1280 px at 1.5; 1.4 rounds down both ways). That is not only `SetViewScale`:
+  a `SetViewBounds` to a new size and a fullscreen view following a new
+  resolution or VR panel size give the rounded-up size too (a view loaded at
+  1600x900 at 1.35 reads 1185x666, and 1423x800 once resized to 1920x1080), while its first
+  load, its wake from hibernation and `RebuildViewAtScale` create the View
+  and round down. So what fills the view can sit a pixel apart between two
+  opens, and the page created at the scale can leave its last pixel column or
+  row undrawn. Until a live change is confirmed in
+  game, prefer `RebuildViewAtScale` on a page that has loaded. Clamped 1.0..3.0 since 0.30.3
   (below 1 Ultralight clipped the page to scale squared of the view; shrink a
   page with a CSS transform instead). Cutout and
   image rects are in VIEW pixels = CSS px x scale. `GetViewInfo` reads it
@@ -321,7 +454,8 @@ an older host ignores the flag.
   `hostVersionNumber >= 3107` (the capability `rebuildscale` is 1 on every
   such host), e.g.
   `if (v4()->hostVersionNumber >= 3107) v4()->RebuildViewAtScale(view, 1.5f);`
-  reloads the page at 150 %.
+  reloads the page at 150 %. It still reloads on 1.5.0, `ViewReloaded`
+  included; `SetViewScale` is the call that keeps the page.
 - **Pause retarget (0.26.11).** Re-requesting UI mode on the view that
   already holds it re-targets `kUIModeFlagPause` in place: the live focus
   menu's pause flag and the engine's pause counter move on the game thread,
@@ -392,6 +526,28 @@ right after `CreateViewEx`, before the world loads (manifest views take the
 page stays loaded. Such a view's DOM ready comes after its first show, so
 never wait for it before showing the view.
 
+`ReloadView` and `Navigate` load the page again: calls made from then on wait
+for the new page's DOM ready, and `ViewReloaded` follows it. From 1.5.0 a
+`Navigate` to the page's own URL with only its fragment added or changed
+(`MyMod/index.html#settings` while `index.html` or `index.html#home` is shown)
+keeps the page, as a link to `#settings` would: the page scrolls and gets a
+`hashchange`, there is no DOM ready and no `ViewReloaded`, and calls keep
+flowing. The page's URL with the fragment it already has, or with none, loads
+the page again. On an older host such a `Navigate` leaves every later call to
+the view queued, so change the fragment from the page itself there
+(`location.hash`).
+
+A `ReloadView` or `Navigate` whose page does not load (its file is missing)
+keeps the page shown, as a failed link would: `ViewLoadFailed` reports the
+failure, there is no `ViewReloaded`, and from 1.5.0 calls flow to the page
+again and a focused text field keeps its VR keyboard and IME (an older host keeps
+every later call queued until a load succeeds). A view that wakes from
+hibernation or is rebuilt (`RebuildViewAtScale`) loads the URL its last
+`Navigate` loaded, query and fragment included, and `GetViewInfo`'s `htmlPath`
+names that page's file (no query or fragment, no percent-encoding). On an
+older host, a view navigated with a fragment, or to an absolute path with a
+space or `#` in it, wakes as the page-missing card.
+
 ```cpp
 if (v4()->hostVersionNumber >= 3100 && v4()->QueryCapability("loadonshow") == 1)
     v4()->SetViewLoadOnShow(settingsPanel, true);   // right after CreateViewEx
@@ -401,7 +557,7 @@ if (v4()->hostVersionNumber >= 3100 && v4()->QueryCapability("loadonshow") == 1)
 
 Magelight draws only visible views, so a hidden page's first show paints the
 whole page, decodes its images and may start Ultralight's worker threads, all
-in the frame the player opens it. `SetViewPrepaint(view, true)` paints it once
+in the frame the player opens it. `SetViewPrepaint(view, true)` paints it
 while it is still hidden, about 1.5 s after its page reaches DOM ready (again
 after a reload or resize), so the first show composites a finished texture.
 One view is painted per frame, never on a frame already over the load budget.
@@ -411,9 +567,11 @@ if (v4()->hostVersionNumber >= 3111 && v4()->QueryCapability("prepaint") == 1)
     v4()->SetViewPrepaint(mainView, true);   // any time; the paint waits for the page
 ```
 
-- The texture stays allocated while the view lives (about 74 MB for a
-  2560x1440 view with MSAA 4x), so opt in for the view the player opens often,
-  not every popup.
+- The texture stays allocated while the view lives. For a 2560x1440 view that
+  is about 74 MB with MSAA 4x on hosts before 1.5.0 (Ultralight 1.4), and on
+  1.5.0 (Ultralight 2.0) about 15 MB for the view's own target plus the tiles
+  of the layers the page composites. Opt in for the view the player opens
+  often, not every popup.
 - It paints what the page shows while hidden. A page that hides its own
   content then (`display: none`, an empty shell until the first open) gets
   nothing from it: keep the page laid out and pause its polling instead.
@@ -421,11 +579,170 @@ if (v4()->hostVersionNumber >= 3111 && v4()->QueryCapability("prepaint") == 1)
   about 1.5 s after the page loads, during play. Never in VR, where that frame
   would be dropped in the headset: there the option is accepted and does
   nothing.
+- From 1.5.0 the view is painted once more, at most once per load, when its
+  page settles: Ultralight's `OnPageSettled`, once network and layout have
+  stayed quiet for a moment
+  (about 120-150 ms after the first paint for a page that is already
+  complete). Ultralight 2.0 decodes a page's images only once the page is
+  painted, so the first paint draws none of them, and without the second one
+  their decode and paint landed on the first open (measured offline on
+  Magelight's GPU driver: 29 ms for a page with 5 images, 86 ms for one with
+  19, against 0.3 ms with it). The second paint is not gated on a change; one
+  of a page that did not change costs well under a millisecond. A page that
+  keeps changing its layout from a timer, or keeps making requests, never
+  settles while hidden and keeps only the first paint (CSS animations and
+  `requestAnimationFrame` are paused while it is hidden, so they do not keep
+  it from settling). So does a page whose URL's fragment changes after its
+  first paint (`location.hash` set from a `visibilitychange` handler, a timer
+  or a host call while hidden): it settles again only once it is painted
+  again, at its first open. Settling waits for no timer, request or host
+  call, so content the page fills in after it is painted at the first open,
+  as before. `Magelight.log` notes each settle: `view N page settled`. A settle
+  that comes while another thread holds Magelight's view registry (an API
+  call at that moment; rare) loses its paint for that load, and the log says
+  `a page settled while the view registry was busy` instead.
 - A page that fills its content only when it opens (data it asks for on open)
   is painted as that empty shell, so it saves the layout and the worker
   start-up but not the paint of its content.
 - A page can opt in itself: `magelight.send('__prepaint', '1')`. A manifest
   view takes `"prepaint": true`.
+- From 1.5.0 the page sees each paint: its view is shown for the one frame a
+  paint takes, usually twice a load (after DOM ready and when the page
+  settles, about 120-150 ms apart), so one round of `requestAnimationFrame`
+  callbacks runs in each such frame, and so do the `resize`, `scroll`,
+  `matchMedia` and observer callbacks held while it was hidden (what they
+  change, and work the page deferred to a `requestAnimationFrame` while
+  hidden, is in the texture), and in the frame after each it gets two
+  `visibilitychange` events that both read `'hidden'`. Code that treats its
+  first such callback as a one-time signal runs twice.
+  Inside such a frame's callbacks `document.visibilityState` reads
+  `'visible'`: the page is painted as shown. So a `'visible'` read in a
+  `requestAnimationFrame`, `resize`, `scroll` or observer callback does not
+  mean the player opened the page (do not mark notifications read or send an
+  "opened" from there); read the state in a `visibilitychange` handler, or
+  outside those callbacks, rather than counting events ("Hidden pages").
+
+## Hidden pages (1.5.0)
+
+From 1.5.0 (Ultralight 2.0) a hidden view's page is paused the way a browser
+pauses a background tab:
+
+- `document.visibilityState` is `'hidden'` and `document.hidden` is true while
+  the view is hidden, from the page's first script when it loads hidden.
+  `visibilitychange` fires on each hide and show, within a frame of the call;
+  a page that loads hidden gets none until its first show.
+- `requestAnimationFrame` callbacks, CSS animations and transitions stop.
+  `animationend` and `transitionend` wait for the next show, and a CSS
+  animation's time jumps to the wall clock then. A page that finishes its close
+  (unmounting, resetting) on one of those events now does that at its next
+  open.
+- The rest of what a browser runs when it paints waits too: the window's
+  `resize` and `scroll` events, `matchMedia` `change` events, and
+  `ResizeObserver` and `IntersectionObserver` callbacks. A hidden view that
+  the host resizes (a new resolution, a VR panel size) or whose page scrolls or
+  changes size gets them in the frame it is next shown or prepainted, before
+  that frame is painted, coalesced: one `resize` and one `scroll` however many
+  changes there were (the positions between are lost), and an observer
+  callback only for a target whose state differs from the last one reported.
+  What a script reads itself (`innerWidth`, a new `matchMedia(q)`'s `matches`,
+  `getBoundingClientRect()`, `scrollY`) is current while hidden, but a
+  `MediaQueryList` the page keeps (a `useMediaQuery` hook's) keeps its last
+  reported `matches` until its `change` event, in the render of that first
+  frame, so a page that re-renders while hidden from a kept list renders the
+  old branch. A handler that changes the page at once is in that first frame;
+  one that defers its work (a debounce timer) lands that much later, so a page
+  that fits its layout to the window shows its old layout for that long after
+  it opens.
+- Timers, messages and calls run at full rate: `setTimeout`, `setInterval`,
+  `MessageChannel` (React's scheduler), promises, `fetch`, `InteropCall`,
+  `InvokeJS`, `EvalJS` and `magelight.send`. What a page changes while hidden,
+  directly or in a `requestAnimationFrame` callback it asked for while hidden,
+  is on screen in the first frame it is shown. A callback that asks for
+  another, or hands its update to a scheduler (React state set outside an
+  event), lands a frame or two later, as in a browser.
+- A hidden page is never painted, so it costs no render time; its timers still
+  cost script time, so pause polling on `visibilitychange`. A hidden view keeps
+  its texture: hibernation (`SetViewHibernate`) is still what frees it, its
+  video memory within about 20 s, whether or not another view is shown.
+- `ShowView` changes `IsViewVisible` at once; the View follows on the render
+  thread at two points in each frame, before the input and again between
+  `Renderer::Update` and the paint. A show from the game thread (a game task,
+  an event or an `EvalJS` callback a `GameThread` mod receives, which is the
+  default) runs between frames and is painted in the next one; a show from
+  another thread, in the first frame whose second point comes after it. A show
+  made on the render thread during a frame is painted in that frame when it
+  comes before the paint:
+  - the input: a page's click, key or focus handler, and the VR keyboard a
+    click or key focuses;
+  - a call the host delivers before `Update`: an `InteropCall` or `InvokeJS`
+    handler, and for a `RenderThread` mod its `EvalJS` callback and the event
+    it gets from them;
+  - `Update`: the view's `onDomReady` callback (and its `ViewDomReady` event
+    for a `RenderThread` mod), timers, `MessageChannel` messages, promise
+    callbacks;
+  - a JS listener the page calls from any of these.
+
+  It is painted a frame later when it comes from page code that runs inside
+  the paint: a `requestAnimationFrame` callback, the window's `resize` and
+  `scroll` events, `matchMedia` `change` events, `ResizeObserver` and
+  `IntersectionObserver` callbacks, `transitionend` and `animationend` (and a
+  JS listener they call, or the VR keyboard a focus made there raises). A hide
+  made during a frame takes effect in it, so two views handed over (hide one,
+  show the other) from one of these paint callbacks, a `transitionend` at the
+  end of a close animation included, leave a frame with neither drawn: hand
+  over from one of the calls in the list above (an input event such as a
+  click or a key, a timer, a message, an `InteropCall`) instead.
+
+```cpp
+if (v4()->QueryCapability("pagevisibility") == 1) {
+    // hidden pages pause: the page can stop its own work on visibilitychange
+}
+```
+
+A shown page animates and repaints at most 60 times a second (the cap of
+Ultralight 2.0's Free edition), whatever the game's frame rate:
+`requestAnimationFrame` callbacks, CSS animations and transitions, smooth
+scrolling and the changes its script makes wait for the next such frame, while
+input, a resize and a show paint at once. Before 1.5.0 they followed the frame
+rate. `Magelight.json` `animationTimerDelay` is ignored.
+
+## Keys and the mouse (1.5.0)
+
+From 1.5.0 (Ultralight 2.0) a page's input matches a browser's more closely
+([SDK.md](SDK.md) lists what a page sees):
+
+- Key events are built from the key's Windows message, so `KeyboardEvent.code`,
+  `location` and a `key` that follows the player's keyboard layout are filled
+  on flat and in VR (VR builds the message from the engine keyboard's
+  scancode). `keyCode` is as before. `Magelight_DeliverVKey` keys get the
+  scancode the key has on the player's layout. `metaKey` is always false.
+  As in a browser, `code` names the key's place on a US keyboard (the key
+  labelled A on a French AZERTY keyboard reads `KeyQ`): a page that hands
+  your plugin a key to poll with `GetAsyncKeyState` must send its `keyCode`,
+  which follows the layout, not a code derived from `code` or `key`.
+- Alt, F10 and Alt+key reach the UI-mode page as system keys; the game still
+  gets them too (Alt+F4 still closes it).
+- Mouse buttons 4 and 5 reach the page as back and forward, with `auxclick`
+  and never `click` or `dblclick`. A middle click no longer starts autoscroll
+  (and two give no `dblclick`).
+- Moves and releases follow the press: while a button is held they go to the
+  view it was pressed on, wherever the pointer is, so a drag released over
+  another view or the game ends there. In VR each hand is its own pointer, with
+  its own press and hover. When the pointer moves to another view
+  with no button held, the view it left gets a move outside itself
+  (`mouseout`, `mouseleave`, `:hover` cleared). The wheel always goes to the
+  view under the pointer and scrolls the element there. Leaving UI mode, or
+  the game losing focus, releases what the page saw go down: each held mouse
+  button and each held modifier key.
+
+```cpp
+if (v4()->QueryCapability("keyboardcode") == 1) {
+    // KeyboardEvent.code / key / location are the platform's
+}
+if (v4()->QueryCapability("auxbuttons") == 1) {
+    // mouse 4/5 arrive as back/forward + auxclick; middle clicks never autoscroll
+}
+```
 
 ## Your own cursor (0.31.0)
 
@@ -525,9 +842,11 @@ if (v4()->hostVersionNumber >= 3101 && v4()->QueryCapability("cursortint") == 1)
 ## Theming the VR keyboard (0.31.9)
 
 On VR, a text field that takes focus in the UI-mode view raises Magelight's
-own keyboard (`views/keyboard`, `vr.keyboard` in `Magelight.json`). It is one
-page shared by every mod, so it shows the theme of the view that holds UI mode
-whenever it is raised, and the host's look for a view that set none:
+own keyboard (`views/keyboard`, `vr.keyboard` in `Magelight.json`), laid out
+for the field's `inputmode` and `enterkeyhint` ([SDK.md](SDK.md), "Text
+fields"). It is one page shared by every mod, so it shows the theme of the view
+that holds UI mode whenever it is raised, and the host's look for a view that
+set none:
 
 ```cpp
 if (v4()->hostVersionNumber >= 3109 && v4()->QueryCapability("keyboardtheme") == 1) {
@@ -548,13 +867,13 @@ if (v4()->hostVersionNumber >= 3109 && v4()->QueryCapability("keyboardtheme") ==
 
 | Token | Where | Required |
 |---|---|---|
-| `panel`, `panelBorder` | the keyboard's background and border (the border colour also draws the drag grip and a hovered key's border) | yes |
-| `key`, `keyBorder`, `keyHover` | a key, its border, a key under the laser | yes |
-| `text`, `muted`, `accent` | key labels; the title bar's hints; the title, Shift and Caps, a pressed key's border | yes |
-| `action` | Bksp, Tab, Enter, Esc and the arrows | no: `accent` if it has 3:1 on `key` and `keyHover`, else `text` |
+| `panel`, `panelBorder` | the keyboard's background and border (the border colour also draws the drag grip and a hovered key's or bar button's border) | yes |
+| `key`, `keyBorder`, `keyHover` | a key or a bar button, its border, one under the laser | yes |
+| `text`, `muted`, `accent` | key labels; the title bar's hints; the title, Shift and Caps, a pressed key's or bar button's border | yes |
+| `action` | Bksp, Tab, Enter, Esc and the arrows, and the bar's Undo, Redo, Select all, Cut, Copy and Paste (1.5.0) | no: `accent` if it has 3:1 on `key` and `keyHover`, else `text` |
 | `danger` | Close | no: `#c0392b` or `#e74c3c`, whichever reads better on both `key` and `keyHover`, if it has 3:1 on both; else `text` |
-| `pressed` | a key held down, Shift or Caps on, the bar while dragged | no: `accent` 20% over `key` |
-| `pressedText` | the label of any key held down, and of Shift or Caps while on | no: `text`, or black or white (the one with more contrast) when `text` has under 4.5:1 on `pressed` |
+| `pressed` | a key or a bar button held down, Shift or Caps on, the bar while dragged | no: `accent` 20% over `key` |
+| `pressedText` | the label of any key or bar button held down, and of Shift or Caps while on | no: `text`, or black or white (the one with more contrast) when `text` has under 4.5:1 on `pressed` |
 | `barHover` | the title bar under the laser | no: `panel` and `key` half and half |
 
 Contrast is WCAG 2's ratio. Labels are held to 3:1 on both `key` and
@@ -577,8 +896,9 @@ Contrast is WCAG 2's ratio. Labels are held to 3:1 on both `key` and
   a held special key, which keeps its own colour there.
 - Per view: kept until you change it or destroy the view; hibernation and
   `RebuildViewAtScale` keep it. It shows only while your view holds UI mode
-  with the keyboard up: when another view takes UI mode (including your own
-  other views) the keyboard switches to that view's theme at once. Any thread.
+  with the keyboard up. From 1.5.0 the keyboard goes down when another view
+  takes UI mode (including your own other views), and shows that view's theme
+  the next time a field there raises it. Any thread.
 - The font is the keyboard's own; there is no font token.
 - Flat has no on-screen keyboard (the player types on a real one): the theme
   is stored there and never shown, so set it unconditionally.

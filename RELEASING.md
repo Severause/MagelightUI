@@ -7,23 +7,24 @@ scripted fails loudly rather than shipping a bad zip.
 
 - **Ultralight licence.** A public release relies on section 2.3 (Limited Commercial
   Distribution) of the Ultralight Free License Agreement; section 2.2 covers academic
-  research only. Section 2.3 is void for a company or incorporated entity with a turnover
-  above US$100,000 in its last fiscal year. The licensee is Magelight's author, an individual
-  under that limit. If that ever changes, stop and talk to Ultralight, Inc. before releasing.
-- **The DLL rename.** The four Ultralight DLLs ship renamed, with the module-name strings
+  research only. Section 2.3 is void for a company or incorporated entity whose gross turnover
+  over the trailing twelve months (its parent companies' and affiliates' included), or whose
+  total investment funding raised, is US$200,000 or more. The licensee is Magelight's author, an
+  individual. If that ever changes, stop and talk to Ultralight, Inc. before releasing.
+- **The DLL rename.** The three Ultralight DLLs ship renamed, with the module-name strings
   inside them rewritten in place, under Ultralight, Inc.'s written permission. Keep that
   permission with the release records, and re-verify the rename (`tools/check_stage.ps1`)
   on every SDK bump.
+- **The page stack.** On every SDK bump, `tools\fiber-gc-test\build.bat` must end `GATE PASS`
+  (the frame model crashes without the page VM's lock and passes with it, CPU and GPU): the
+  WebCore exports the lock and the game-stack zones use are undocumented names (invariant 1).
 
 ## 1. Version and changelog
 
 - Bump `project(... VERSION x.y.z)` in `CMakeLists.txt` — the single source (the DLL
   version resources, `SKSEPlugin_Version`, the zip name and the stage lint all read it).
 - `CHANGELOG.md` gets the entry; the "added in" table is how consumers pick `minHost`.
-- This release's tag is named as the LGPL source for `MagelightGPU.dll` in `NOTICES.txt`
-  section 2, the Licensing section of `README.md`, and the Credits of the
-  Nexus page (kept outside the repository): update the version in all three. The
-  example log line at the top of `docs/TROUBLESHOOTING.md` names it too.
+- The example log line at the top of `docs/TROUBLESHOOTING.md` names the version: update it.
 - The npm packages version with the host (`docs/SDK.md`); publish them per section 6 when
   the page contract changed.
 
@@ -36,31 +37,27 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Clean -Examples
 powershell -ExecutionPolicy Bypass -File tools\package.ps1 -Version X.Y.Z
 ```
 
-- `extern/ultralight/` is not in git. Fetch it per `extern/README.md`, or copy it from the
-  machine that built the last release; `build.ps1` refuses any SDK whose
-  `extern/ultralight/VERSION.txt` is not the pinned build of record (`1.4.0b.081c48b`). The
-  dev CDN tracks master, so once it has moved on, a copy is the only way to get that build.
-- **CI's SDK is the Actions cache entry `ultralight-sdk-1.4.0b.081c48b`**, saved by a passing
-  run on `main` and restored by every branch and pull request. GitHub removes a cache that
-  goes unused for seven days (or when the repository's caches pass their size limit); from
-  then on the fetch step downloads the CDN's latest build and fails with the pin message on
-  every run. To re-seed it:
-  1. Pack a verified copy (its `VERSION.txt` reads `1.4.0b.081c48b`) from the repository
-     root, so `include/` and `VERSION.txt` sit at the archive root:
-     `7z a extern\ultralight-sdk-1.4.0b.081c48b.7z .\extern\ultralight\*`. The archive
-     goes in `extern\` because `.gitignore` covers `extern/*.7z` and no `.7z` at the
-     repository root.
-  2. Put it behind a link the runner can download without credentials. Keep the link private
-     and short-lived: it appears in the run's log, and the SDK is Ultralight's, not a
-     download for us to publish.
-  3. Actions → CI → Run workflow on `main`, with `sdk_url` set to that link. The step
-     checks `VERSION.txt` against the pin (and nothing else, so pack only a copy you trust),
-     and the cache is saved only if the whole job passes. Once it has, take the link down
-     and delete `extern\ultralight-sdk-1.4.0b.081c48b.7z`.
+- `extern/ultralight/` is not in git. Fetch it per `extern/README.md`; `build.ps1` refuses any
+  SDK whose `extern/ultralight/VERSION.txt` is not the pinned build of record (`2.0.0-beta.2`,
+  the Free edition). Ultralight may stop offering a build once newer ones are out, so keep the
+  archive (`ul-sdk-2.0.0-beta.2-win-x64-free.7z`, SHA-256
+  `e17b3ca2f3c2063f1d14971e7ef756f28e71f2d426a91d2e21c5236d2dc67e6d`) with the release records.
+- **CI's SDK is the Actions cache entry `ultralight-sdk-2.0.0-beta.2`**, saved by a passing run
+  on `main` and restored by every branch and pull request. GitHub removes a cache that goes
+  unused for seven days (or when the repository's caches pass their size limit); the fetch step
+  then asks Ultralight's release API for the pinned archive and checks its SHA-256 before
+  caching it. Once Ultralight no longer serves that build, every run fails with the pin message.
+  To re-seed the cache then:
+  1. Put Ultralight's own archive (the SHA-256 above) behind a link the runner can download
+     without credentials. Keep the link private and short-lived: it appears in the run's log,
+     and the SDK is Ultralight's, not a download for us to publish.
+  2. Actions → CI → Run workflow on `main`, with `sdk_url` set to that link. The step checks
+     the archive's SHA-256 and its `VERSION.txt` against the pin, and the cache is saved only if
+     the whole job passes. Once it has, take the link down.
 
-  Moving the pin instead is a deliberate change: `git grep -n 081c48b` lists every place
-  that names it (`build.ps1`, the CI cache key and check, `extern/README.md`), and the new
-  build needs section 0's rename check and the notices re-verified.
+  Moving the pin instead is a deliberate change: `build.ps1` (`$ulBuildOfRecord`), the CI cache
+  key and its fetch step's version and SHA-256, and `extern/README.md` name it. The new build
+  needs section 0's rename check and the notices re-verified.
 - `npm ci && npm run build` at the repo root first: it builds the `packages/` the
   ReactConfig example compiles against. On a fresh clone without it, `build.ps1` only
   warns and stages the example without its page, so check its output for
@@ -83,7 +80,8 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1 -Version X.Y.Z
 Install the runtime zip and then the Examples zip into a **clean MO2 profile** (no earlier
 Magelight, current SKSE):
 
-- The game launches; `Magelight.log` line one names the new version.
+- The game launches; `Magelight.log` line one names the new version, then `pages run on a stack of
+  their own` and, once a page loads, `WebKit's VM is up ...`, with no `does not export` line.
 - F6 shows and hides the `Magelight.Badge` badge, F7 opens its panel.
 - `Magelight.ReactConfig` opens with F8: UI mode takes the cursor, typing lands in the
   page, Escape closes, game controls resume.
@@ -112,9 +110,8 @@ ancestry, so a branch or tag made in a private clone would publish that clone's 
 - No GitHub release: mod authors build the DevTools and examples from the repository. Keep
   the `-pdb.zip` with the release records (never ship it to players).
 - npm, when the packages changed: section 6.
-- Nexus: only after the tag exists (NOTICES names `gpu/` at the tag as the LGPL source for
-  `MagelightGPU.dll`). The runtime zip is the only file. Set the requirements per runtime as
-  the page lists them.
+- Nexus: after the tag. The runtime zip is the only file. Set the requirements per runtime
+  as the page lists them.
 
 ## 6. npm packages
 

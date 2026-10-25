@@ -32,11 +32,12 @@
 <body>
 <div class="panel">
   <h1>Magelight stack test</h1>
-  <p>Each test pushes this page into runaway recursion a different way, in its scripts or in the engine's layout.
-     A pass means the page stopped it cleanly and carried on. If the whole overlay disappears instead, the test hit
-     the failure this build is meant to fix: <code>Magelight.log</code> then has an
-     <code>SEH exception 0xC00000FD ... overlay disabled</code> line. Results also go to <code>Magelight.log</code>
-     as <code>[MgStackTest]</code> lines.</p>
+  <p>Each test pushes this page into runaway recursion a different way, in its scripts or in the engine's layout,
+     or leaves an error uncaught in a timer or a click listener. A pass means the page stopped it cleanly (or its
+     <code>error</code> event reported it) and carried on. If the whole overlay disappears instead, or the game
+     crashes, the test hit the failure this build is meant to fix: <code>Magelight.log</code> then has an
+     <code>SEH exception 0xC00000FD ... overlay disabled</code> line, or the crash log names
+     <code>0xC00000FD</code>. Results also go to <code>Magelight.log</code> as <code>[MgStackTest]</code> lines.</p>
   <div class="bar">
     <button id="once">Run all tests</button>
     <button id="ten">Run all tests 10 times</button>
@@ -107,16 +108,17 @@
       status.textContent = 'Running "' + t.name + '"' + (rounds > 1 ? ' (round ' + (round + 1) + ' of ' + rounds + ')' : '') + '...';
       // The status line paints before the test runs.
       setTimeout(function () {
-        var r = T.runOne(t);
-        done++;
-        if (!T.passed(r)) fails++;
-        show(r, round, rounds);
-        if (round === 0 || !T.passed(r)) {
-          console.warn('[MgStackTest] ' + (T.passed(r) ? 'pass' : 'FAIL') + ' ' + r.id + ': ' + r.outcome +
-                       ', depth ' + r.depth + ', ' + r.ms + ' ms' + (r.extra ? ', ' + r.extra : ''));
-        }
-        i++;
-        setTimeout(next, 30);
+        T.start(t, function (r) {
+          done++;
+          if (!T.passed(r)) fails++;
+          show(r, round, rounds);
+          if (round === 0 || !T.passed(r)) {
+            console.warn('[MgStackTest] ' + (T.passed(r) ? 'pass' : 'FAIL') + ' ' + r.id + ': ' + r.outcome +
+                         ', depth ' + r.depth + ', ' + r.ms + ' ms' + (r.extra ? ', ' + r.extra : ''));
+          }
+          i++;
+          setTimeout(next, 30);
+        });
       }, 30);
     }
     next();

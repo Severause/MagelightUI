@@ -230,13 +230,17 @@ namespace Magelight::VR {
     HeldButtons HeldButtonsPressedSince(std::uint64_t sinceTickMs);
 
     // ── Virtual keyboard (VR-4) ─────────────────────────────────────────────
-    // The page bridge reports text-field focus (the reserved '__textfocus'
-    // channel); on the SteamVR runtime that raises the runtime's own keyboard
-    // over the focused view's overlay and its characters are queued into the
-    // host's ordinary key path. OpenComposite has no keyboard of its own that
-    // we can raise — there the host's own on-panel keyboard (and OCU's
-    // WM_OC_CHAR window message) carry text instead, so this is a no-op there.
-    void NoteTextFocus(ViewId view, bool focused);
+    // The host reports the UI-mode view's text focus (its EditorListener, DrainEditableStates): focused true when a
+    // field there should raise a keyboard, false when it no longer wants one. On the SteamVR runtime (vr.runtimeKeyboard)
+    // that raises the runtime's own keyboard over the view's overlay, in password or multi-line mode as the field
+    // asks, and its text is queued through QueueTypedText. OpenComposite has no keyboard of its own that we can
+    // raise: there the host's own on-panel keyboard (and OCU's WM_OC_CHAR window message) carry text instead, so
+    // this is a no-op there. Render thread.
+    struct TextField {
+        bool password = false;    // a password field
+        bool multiline = false;   // a textarea or an editable region
+    };
+    void NoteTextFocus(ViewId view, bool focused, TextField field = {});
 
     // ── Placement (any thread; applied next frame) ──────────────────────────
     void SetPlacement(ViewId view, const Placement& p);

@@ -246,8 +246,12 @@ namespace MAGELIGHT_API {
         FocusDenied = 6,      // another mod asked for UI mode while you own it; detail = its modId
         DisplayResized = 7,   // x = width, y = height (backbuffer pixels)
         ConsoleMessage = 8,   // detail = every console argument stringified and space-joined (objects as
-                              // JSON); x = level (0 log, 1 warning, 2 error); y = source line. Every message,
-                              // whatever Magelight.log records of it (QueryCapability("consoleLog"), 0.31.0)
+                              // JSON, an Error as its text, the JSON of its own fields when it has any, and its
+                              // stack); x = level (0 log, 1 warning, 2 error);
+                              // y = source line. Every message, whatever Magelight.log records of it
+                              // (QueryCapability("consoleLog"), 0.31.0). Also an exception InvokeJS or an
+                              // InteropCall handler left uncaught: x = 2, detail = its text and stack
+                              // (QueryCapability("scriptErrors"), 1.5.0)
         RenderDead = 9,       // the overlay disabled itself for the session (also sent at RegisterMod if already dead)
         HostShutdown = 10,    // reserved
         UIModeRefused = 11,   // your RequestUIMode lost the race on the game thread; detail = reason
@@ -263,8 +267,9 @@ namespace MAGELIGHT_API {
     using EventFn = void (*)(const EventData* ev, void* user);
     using LogFn = void (*)(int level, const char* message, void* user);   // 0 info, 1 warning, 2 error
     using JsListenerFn4 = void (*)(ViewId view, const char* argument, void* user);
-    // EvalJS completion: result = String(completion value) ("" for undefined);
-    // exception = the thrown value's string, "" when the script succeeded.
+    // EvalJS completion: result = String(completion value) ("undefined" for undefined, "" for a value
+    // with no string form such as a Symbol); exception = the thrown value's string, "" when the script
+    // succeeded (or threw a value with no string form).
     using JsResultFn = void (*)(ViewId view, const char* result, const char* exception, void* user);
     // PostGameTask (0.30.1): runs once, on the game thread, with the user pointer it was posted with.
     using GameTaskFn = void (*)(void* user);
@@ -487,7 +492,10 @@ namespace MAGELIGHT_API {
         Result (*CreateViewEx)(ModId mod, const ViewDesc* desc, ViewId* outView);
         Result (*DestroyView)(ViewId view);                 // async; Busy if it is the UI-mode view
         Result (*ReloadView)(ViewId view);                  // ViewReloaded follows DOM ready
-        Result (*Navigate)(ViewId view, const char* url);   // file:/// (or a path); http = Denied
+        Result (*Navigate)(ViewId view, const char* url);   // file:/// (or a path); http = Denied. The page's
+                                                            // own URL with only its #fragment added or changed
+                                                            // keeps the page: no DOM ready, no ViewReloaded,
+                                                            // calls keep flowing (1.5.0)
         Result (*RegisterJSListenerEx)(ViewId view, const char* name, JsListenerFn4 cb, void* user);
                                                             // "magelight" and names starting "__" belong to
                                                             // the host's page script: InvalidArgument (0.30.0;
@@ -521,7 +529,10 @@ namespace MAGELIGHT_API {
                                                             // (0.31.5) "rebuildScale" (0.31.7)
                                                             // "keyboardTheme" (0.31.9), "prepaint" (0.31.11),
                                                             // "uiModeCancel" "hostThemeReply" (1.1.0),
-                                                            // "tooltips" (1.2.0). The
+                                                            // "tooltips" (1.2.0), "scriptErrors"
+                                                            // "pageVisibility" "keyboardCode"
+                                                            // "auxButtons" "imeCandidates" (1.5.0;
+                                                            // "ime" is 0 in VR from 1.5.0). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -592,22 +603,32 @@ namespace MAGELIGHT_API {
 
         // ── appended in 0.26.9 — gate on hostVersionNumber >= 2609 ──
         // Set the view's Ultralight device scale at runtime (see ViewDesc::uiScale).
-        // The page re-lays out; its devicePixelRatio becomes `scale`. On a page
-        // that has loaded this is a live re-layout inside the frame, which has
-        // crashed the game for a consumer and has not been verified since it
-        // moved to the render thread (0.28.5): use RebuildViewAtScale (0.31.7)
-        // there. Before the first load, and on a hibernated view, it only
+        // The page lays out again at the next frame and keeps its state; its
+        // devicePixelRatio becomes `scale`. Before 0.28.5 the host made the change
+        // on the caller's thread, where it crashed the game for a consumer, and it
+        // has not run in game since: on a page that has loaded, prefer
+        // RebuildViewAtScale (0.31.7) until it has. Offline it draws like a page
+        // loaded at `scale`, except from 1.5.0 (Ultralight 2.0) where the view's
+        // width or height divided by `scale` is not whole: a View resized or
+        // rescaled after it was created (this call, SetViewBounds, a fullscreen
+        // view's new size) then has its CSS size rounded up where a View created
+        // at that size and scale rounds down, so the two lay out a pixel apart
+        // (docs/CPP.md). From 1.5.0 the scale the view already has changes
+        // nothing. Before the first load, and on a hibernated view, it only
         // stores the scale for the next load. Cutout and
         // image rects are in VIEW PIXELS = CSS px * scale. Clamped 1.0..3.0 (0.5..3.0 before
         // 0.30.3; below 1 Ultralight clipped the page): shrink a page with a CSS transform.
         Result (*SetViewScale)(ViewId view, float scale);
         // ── 0.27.0 (no new fields): native IME. Text fields in the UI-mode view take
         //    CJK composition: the window's IME context attaches on field focus (the
-        //    bridge detects it — pages need NO code), the pre-edit is drawn inline as
-        //    the field's selection, the candidate list opens at the caret, and keys the
-        //    IME consumed never reach the page. A page that wants
-        //    an indicator listens for the 'magelight:ime' window event ({state, text}).
-        //    QueryCapability("ime") == 1. Flat only (VR: the runtime keyboard owns text).
+        //    host follows the page's focus — pages need NO code), the pre-edit is drawn
+        //    inline in the field, and keys the IME consumed never reach the page. No OS
+        //    IME window shows (none draws over the game): from 1.5.0 the page core draws
+        //    the candidate list in the page at the composition (opt out with
+        //    data-ml-ime="off" or by cancelling the 'magelight:ime' window event, which
+        //    carries {state, text} and from 1.5.0 the whole state: docs/CPP.md "IME").
+        //    QueryCapability("ime") == 1 and, from 1.5.0, ("imeCandidates") == 1. Flat
+        //    only (VR: the runtime keyboard owns text; both are 0 there from 1.5.0).
         // ── 0.26.11 (no new fields): RequestUIMode on the view that ALREADY holds
         //    UI mode retargets the PAUSE flag (kUIModeFlagPause) IN PLACE — the live
         //    focus menu's kPausesGame and the engine's pause counter are adjusted;
@@ -750,14 +771,18 @@ namespace MAGELIGHT_API {
         // (GetLastErrorMessage says which). Nothing is stored on a failure.
         Result (*SetViewKeyboardTheme)(ViewId view, const KeyboardTheme* theme);
         // ── appended in 0.31.11 — gate on hostVersionNumber >= 3111 and QueryCapability("prepaint") ──
-        // Paint this view once while it is hidden, about 1.5 s after its page
+        // Paint this view while it is hidden, about 1.5 s after its page
         // reaches DOM ready (again after a reload or resize), so its first show
         // composites a finished texture instead of painting the whole page in
-        // that frame. One view per frame, never on a frame already over the
-        // load budget. The texture stays allocated while the view lives (about
-        // 74 MB for a 2560x1440 view with MSAA 4x): opt in for a view the player
+        // that frame. From 1.5.0 it is painted once more when its page settles
+        // (network and layout quiet): Ultralight 2.0 decodes a page's images
+        // only once the page is painted, so the first paint has none. One view
+        // per frame, never on a frame already over the load budget. The
+        // texture stays allocated while the view lives (for a 2560x1440 view
+        // about 74 MB with MSAA 4x before 1.5.0, about 15 MB plus the page's
+        // composited layer tiles from 1.5.0): opt in for a view the player
         // opens often. A page that hides its content while hidden (display:
-        // none) gets nothing from it. The paint is still one long frame,
+        // none) gets nothing from it. Each paint is still one long frame,
         // during play; never in VR (accepted there, does nothing). A page can
         // set the same flag with magelight.send('__prepaint', '1'). Any thread;
         // InvalidView for a view that is gone or an inspector.

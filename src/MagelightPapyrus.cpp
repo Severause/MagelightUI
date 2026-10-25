@@ -15,6 +15,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 
 namespace Magelight::Papyrus {
 
@@ -213,6 +214,7 @@ namespace Magelight::Papyrus {
         RE::BSFixedString GetVersionString(RE::StaticFunctionTag*) { return PLUGIN_VERSION; }
 
         bool IsReady(RE::StaticFunctionTag*) { return !Magelight::IsRenderDead(); }
+        void LogMemoryUsage(RE::StaticFunctionTag*) { Magelight::RequestMemoryReport(); }
 
         bool RegisterMod(RE::StaticFunctionTag*, RE::BSFixedString modId, RE::BSFixedString displayName)
         {
@@ -482,34 +484,40 @@ namespace Magelight::Papyrus {
         bool RegisterFuncs(RE::BSScript::IVirtualMachine* vm)
         {
             if (!vm) return false;
-            vm->RegisterFunction("GetVersion", kScript, GetVersion);
-            vm->RegisterFunction("GetVersionString", kScript, GetVersionString);
-            vm->RegisterFunction("IsReady", kScript, IsReady);
-            vm->RegisterFunction("RegisterMod", kScript, RegisterMod);
-            vm->RegisterFunction("CreateView", kScript, CreateView);
-            vm->RegisterFunction("FindView", kScript, FindView);
-            vm->RegisterFunction("DestroyView", kScript, DestroyView);
-            vm->RegisterFunction("ShowView", kScript, ShowView);
-            vm->RegisterFunction("IsVisible", kScript, IsVisible);
-            vm->RegisterFunction("RequestUIMode", kScript, RequestUIMode);
-            vm->RegisterFunction("ReleaseUIMode", kScript, ReleaseUIMode);
-            vm->RegisterFunction("IsUIModeActive", kScript, IsUIModeActive);
-            vm->RegisterFunction("GetUIModeView", kScript, GetUIModeView);
-            vm->RegisterFunction("ReloadView", kScript, ReloadView);
-            vm->RegisterFunction("Call", kScript, Call);
-            vm->RegisterFunction("Eval", kScript, Eval);
-            vm->RegisterFunction("EvalAsync", kScript, EvalAsync);
-            vm->RegisterFunction("BindHotkey", kScript, BindHotkey);
-            vm->RegisterFunction("SetCutout", kScript, SetCutout);
-            vm->RegisterFunction("SetHibernate", kScript, SetHibernate);
-            vm->RegisterFunction("SetFreezeWorld", kScript, SetFreezeWorld);
-            vm->RegisterFunction("SetCursor", kScript, SetCursor);
-            vm->RegisterFunction("ClearCursor", kScript, ClearCursor);
-            vm->RegisterFunction("RegisterListener", kScript, RegisterListener);
-            vm->RegisterFunction("GetLastError", kScript, GetLastError);
-            vm->RegisterFunction("PlaySound", kScript, PlaySound);
-            vm->RegisterFunction("SetNetworkPolicy", kScript, SetNetworkPolicy);
-            SKSE::log::info("Magelight[papyrus]: 25 natives registered on script '{}'", kScript);
+            int registered = 0;
+            const auto reg = [&](std::string_view name, auto fn) {
+                vm->RegisterFunction(name, kScript, fn);
+                ++registered;
+            };
+            reg("GetVersion", GetVersion);
+            reg("GetVersionString", GetVersionString);
+            reg("IsReady", IsReady);
+            reg("RegisterMod", RegisterMod);
+            reg("CreateView", CreateView);
+            reg("FindView", FindView);
+            reg("DestroyView", DestroyView);
+            reg("ShowView", ShowView);
+            reg("IsVisible", IsVisible);
+            reg("RequestUIMode", RequestUIMode);
+            reg("ReleaseUIMode", ReleaseUIMode);
+            reg("IsUIModeActive", IsUIModeActive);
+            reg("GetUIModeView", GetUIModeView);
+            reg("ReloadView", ReloadView);
+            reg("Call", Call);
+            reg("Eval", Eval);
+            reg("EvalAsync", EvalAsync);
+            reg("BindHotkey", BindHotkey);
+            reg("SetCutout", SetCutout);
+            reg("SetHibernate", SetHibernate);
+            reg("SetFreezeWorld", SetFreezeWorld);
+            reg("SetCursor", SetCursor);
+            reg("ClearCursor", ClearCursor);
+            reg("RegisterListener", RegisterListener);
+            reg("GetLastError", GetLastError);
+            reg("PlaySound", PlaySound);
+            reg("SetNetworkPolicy", SetNetworkPolicy);
+            reg("LogMemoryUsage", LogMemoryUsage);
+            SKSE::log::info("Magelight[papyrus]: {} natives registered on script '{}'", registered, kScript);
             return true;
         }
 

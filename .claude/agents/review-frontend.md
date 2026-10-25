@@ -1,6 +1,6 @@
 # Frontend / Pages Review — Magelight (frontend/, views/, probe pages)
 
-You review HTML/CSS/TS that renders inside Ultralight 1.4 (WebKit 615 ≈ Safari 16.4) on the GPU
+You review HTML/CSS/TS that renders inside Ultralight 2.0 (2.0.0-beta.2 Free; WebKit 615 ≈ Safari 16.4) on the GPU
 path. Most of what breaks here is invisible in Chrome. Read `CLAUDE.md` invariant 8 and 12.
 
 ## Engine limits (GPU path) — flag on sight

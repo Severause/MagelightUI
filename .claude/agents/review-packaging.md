@@ -7,9 +7,11 @@ bumps. Run `tools/check_stage.ps1` when a stage exists and report its output.
 ## Rules
 
 1. **Namespaced runtime.** The stage ships `Magelight1.dll`, `Magelight1Core.dll`,
-   `MgWCore.dll`, `MgACore.dll`, `MagelightGPU.dll`, `Magelight.dll` — never `Ultralight.dll`,
-   `UltralightCore.dll`, `WebCore.dll`, `AppCore.dll`. Every rename pair is the SAME LENGTH
-   (same-length PE byte patch); `build.ps1` reports "patched X (N name refs)" for all six.
+   `MgWCore.dll`, `MagelightGPU.dll`, `Magelight.dll` — never `Ultralight.dll`,
+   `UltralightCore.dll`, `WebCore.dll`, `AppCore.dll`, and never `MgACore.dll` (AppCore is not
+   shipped: the SDK's font loader is compiled into `Magelight.dll`, CLAUDE.md invariant 4). Every
+   rename pair is the SAME LENGTH (same-length PE byte patch); `build.ps1` reports "patched X
+   (N name refs)" for all five.
    A stock name surviving inside any staged DLL breaks coexistence with other Ultralight-based UI mods. An SDK bump must
    re-verify import topology (new third-party DLLs? new module-name strings? UTF-16 names?).
 2. **Stage contents.** `SKSE/Plugins/Magelight.dll`, `SKSE/Plugins/Magelight/` (runtime DLLs,
@@ -23,8 +25,9 @@ bumps. Run `tools/check_stage.ps1` when a stage exists and report its output.
    with a type check, logged in "settings loaded", and defaults to the safe value (the file is
    never shipped — it lives in My Games).
 5. **Licensing artefacts.** Ultralight `NOTICES`/EULA text present in the package once we ship
-   publicly; `gpu/LICENSE` + corresponding-source note; no SDK binaries committed to git
-   (extern/ stays ignored/vendored per `extern/README.md`).
+   publicly; the SDK platform code's zlib text in `THIRD_PARTY_LICENSES.txt` and `gpu/LICENSE`;
+   no SDK binaries or sources committed to git (extern/ stays ignored per `extern/README.md`;
+   `platform/shaders/generated` above all, which is proprietary).
 6. **Frontend bundles.** `views/app/` is committed output of `frontend` (es2022, `base './'`,
    `crossorigin` stripped); a frontend change must rebuild it, and stale hashed bundles are
    pruned.

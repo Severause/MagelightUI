@@ -1,10 +1,10 @@
 #pragma once
 // Magelight UI — public C ABI of the GPU backend DLL (MagelightGPU.dll).
 //
-// This header is part of the HOST project (not LGPL): it only DESCRIBES the
-// boundary. The backend implementation behind it is adapted from Ultralight's
-// AppCore reference driver (LGPL-2.1) and is deliberately isolated in its own
-// dynamically-loaded DLL so the host stays license-clean — see gpu/README.md.
+// This header is part of the HOST project: it only DESCRIBES the boundary. The
+// backend behind it is adapted from the Ultralight SDK's reference D3D11 driver
+// (Zlib) and lives in its own dynamically-loaded DLL, so the host can run without
+// it (CPU surfaces) and the backend can be rebuilt on its own — see gpu/README.md.
 //
 // The host resolves these via GetProcAddress after preloading the (namespaced)
 // Ultralight runtime; MagelightGPU.dll's own imports bind against the modules
@@ -23,9 +23,8 @@ struct ID3D11ShaderResourceView;
 #endif
 
 // The C ABI's revision: bump it whenever an MgGpu_* signature or meaning changes. The host refuses a backend built
-// with another revision. A contract-1 backend exports every function below; the host treats a missing one as a
-// broken build.
-#define MGGPU_CONTRACT 1u
+// with another revision. A backend exports every function below; the host treats a missing one as a broken build.
+#define MGGPU_CONTRACT 2u
 
 extern "C" {
 
@@ -61,9 +60,12 @@ extern "C" {
     MGGPU_API int  MgGpu_HasCommandsPending(void* handle);
     MGGPU_API void MgGpu_DrawCommandList(void* handle);
 
-    // MSAA sample count (1, 2, 4 or 8) for render targets created from now on;
-    // a count the device cannot do steps down. Returns the count in effect,
-    // 0 for a null handle. Render thread, before the first view is best.
+    // MSAA sample count (1, 2, 4 or 8) for antialiased render targets created
+    // from now on; a count the device cannot do steps down. Returns the count in
+    // effect, 0 for a null handle. Render thread. Call it BEFORE handing the
+    // driver to Platform::set_gpu_driver: the engine reads the driver's MSAA
+    // capability once (GetDeviceCaps), so a count raised after that read is
+    // clamped to what the engine was told (1 = MSAA was reported unsupported).
     MGGPU_API int MgGpu_SetSampleCount(void* handle, int samples);
 
     // ID3D11ShaderResourceView* for a driver texture id (a View's
@@ -88,5 +90,26 @@ extern "C" {
     MGGPU_API int MgGpu_SetExternalTextureSRV(void* handle, std::uint32_t texture_id, ID3D11ShaderResourceView* srv);
     // Drop the driver entry. Only safe once no page can still reference the id.
     MGGPU_API void MgGpu_UnregisterExternalTexture(void* handle, std::uint32_t texture_id);
+
+    // ── What the engine asked for (contract 2) ──────────────────────────
+    // Counts kept by the backend. The host's memory line reads renderTargets, msaaSurfaces, msaaBytes and
+    // antialiasedCreated: whether the engine asked for antialiased targets, which Ultralight's memory report does not
+    // say (its render-target bytes include any multisample surface). The other fields serve diagnostics and offline
+    // probes. Bytes are what the backend allocated. Fields may be appended, never reordered: the caller sets `size` to
+    // sizeof(MgGpuStats) of its build, and the backend fills at most that much and sets `size` to what it filled.
+    struct MgGpuStats {
+        std::uint32_t size;
+        std::uint32_t renderTargets;         // render-target textures alive now
+        std::uint32_t antialiasedTargets;    // of those, created with kGPUTextureFlag_Antialiased
+        std::uint32_t msaaSurfaces;          // of those, drawn into a multisample surface (sample count above 1)
+        std::uint64_t targetsCreated;        // render-target textures created since MgGpu_Create
+        std::uint64_t antialiasedCreated;    // of those, created with kGPUTextureFlag_Antialiased
+        std::uint64_t textureBytes;          // live textures that are not render targets (external ones excluded)
+        std::uint64_t targetBytes;           // live render-target textures, single-sample
+        std::uint64_t msaaBytes;             // live multisample surfaces
+        std::uint64_t flushes;               // CommandType::Flush commands executed since MgGpu_Create
+    };
+    // 1 when filled, 0 for a null handle or `out`. Render thread (the counters are the driver's, unlocked).
+    MGGPU_API int MgGpu_GetStats(void* handle, MgGpuStats* out);
 
 }  // extern "C"

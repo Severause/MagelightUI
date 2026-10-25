@@ -12,15 +12,17 @@ with the platform font loader as Magelight 0.31.2 used it and once with `Magelig
 | `nonascii` | the family `PathTest` is DejaVu Sans in a folder named `fönts-テスト` |
 
 Each scenario runs in a child process (killed after 60 s), so a crash is a result rather than the
-end of the run; the child names the faulting module and offset. The page measures five spans (an
+end of the run; the child names the faulting module and offset, and prints Ultralight's fatal and
+error lines (the rest go to `ultralight.log` beside it). The page measures five spans (an
 unknown family, the bundled family's name, `PathTest`, Times New Roman, Arial), and the parent
 checks:
 
 - on a normal system both loaders measure the same text the same, so nothing changes there;
-- `stripped` and `badpath` crash the stock loader with an access violation at `WebCore.dll
-  +0xFB7F77`, the offset of the field log's `MgWCore.dll +0xFB7F77` (MgWCore.dll is the renamed
-  WebCore.dll; the offset belongs to the pinned SDK build), and Magelight's loader draws them in
-  the bundled font;
+- `stripped` and `badpath` crash the stock loader: Ultralight 2.0.0-beta.2 logs `Check Failed ...
+  lastResortFallbackFont failed to create font for fallback family` and stops at a breakpoint
+  (0x80000003) at `WebCore.dll +0x10113F` (MgWCore.dll is the renamed WebCore.dll; the offset
+  belongs to the pinned SDK build; Ultralight 1.4 crashed with an access violation at `+0xFB7F77`,
+  the field log's `MgWCore.dll +0xFB7F77`), and Magelight's loader draws them in the bundled font;
 - `nonascii`: Magelight's loader loads the font. Whether the stock loader can is printed as
   information: it cannot unless the PC's ANSI code page is UTF-8.
 

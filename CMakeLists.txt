@@ -10,7 +10,7 @@ endif()
 
 project(
     Magelight
-    VERSION 1.3.0
+    VERSION 1.5.0
     LANGUAGES CXX
 )
 
@@ -46,7 +46,7 @@ configure_file(
 )
 # The GPU driver carries its own resource (same single version source): the
 # packaging lint checks MagelightGPU.dll's FileVersion against CMake's VERSION.
-set(RC_DESCRIPTION "Magelight UI GPU driver (LGPL-2.1, AppCore-derived)")
+set(RC_DESCRIPTION "Magelight UI GPU driver (Zlib, Ultralight SDK reference driver-derived)")
 set(_host_project_name "${PROJECT_NAME}")
 set(PROJECT_NAME "MagelightGPU")
 configure_file(
@@ -99,6 +99,28 @@ target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${ULTRALIGHT_DIR}/incl
 target_precompile_headers(${PROJECT_NAME} PRIVATE cmake/PCH.h)
 set_source_files_properties(src/MagelightFonts.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
+# The SDK's Windows font loader (Zlib, extern/ultralight/platform/LICENSE), compiled in place and unmodified so that
+# AppCore.dll is not shipped: 2.0's AppCore imports CoreMessaging.dll and the WinRT api-sets, which no other runtime
+# DLL needs. These two files only: Factories.cpp would pull in the platform's file system (BSD), clipboard, logger
+# and GPU contexts. Never copy platform files into this repository (platform/shaders/generated is proprietary).
+set(ULTRALIGHT_PLATFORM_DIR "${ULTRALIGHT_DIR}/platform")
+set(MAGELIGHT_PLATFORM_SOURCES
+    ${ULTRALIGHT_PLATFORM_DIR}/src/fonts/FontLoaderWin.cpp
+    ${ULTRALIGHT_PLATFORM_DIR}/src/fonts/TextAnalysisSource.cpp
+)
+foreach(_f ${MAGELIGHT_PLATFORM_SOURCES})
+    if(NOT EXISTS "${_f}")
+        message(FATAL_ERROR "Ultralight platform source not found: ${_f} (Ultralight 2.0 SDK layout).")
+    endif()
+endforeach()
+target_sources(${PROJECT_NAME} PRIVATE ${MAGELIGHT_PLATFORM_SOURCES})
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${ULTRALIGHT_PLATFORM_DIR}/include)
+# C5043: TextAnalysisSource.cpp's definitions omit the throw() its header declares (the SDK's code, harmless).
+set_source_files_properties(${MAGELIGHT_PLATFORM_SOURCES} PROPERTIES
+    SKIP_PRECOMPILE_HEADERS ON
+    COMPILE_OPTIONS "/wd5043"
+)
+
 target_link_directories(${PROJECT_NAME} PRIVATE ${ULTRALIGHT_DIR}/lib)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -108,7 +130,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Ultralight
     UltralightCore
     WebCore
-    AppCore
+    dwrite          # the platform font loader and MagelightFonts
     d3d11
     d3dcompiler
     windowscodecs   # cursor art (WIC PNG decode)
@@ -119,14 +141,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 # The Ultralight runtime DLLs live in Data/SKSE/Plugins/Magelight/, NOT next to
 # the game exe — the loader would fail our import table at plugin-load time.
-# Delay-load all four; Magelight::PreloadRuntime() LoadLibrary's them from the
+# Delay-load all three; Magelight::PreloadRuntime() LoadLibrary's them from the
 # right directory before any Ultralight symbol is touched, and the delay-load
 # thunks then resolve against the already-loaded modules.
 target_link_options(${PROJECT_NAME} PRIVATE
     "/DELAYLOAD:Ultralight.dll"
     "/DELAYLOAD:UltralightCore.dll"
     "/DELAYLOAD:WebCore.dll"
-    "/DELAYLOAD:AppCore.dll"
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -159,16 +180,23 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
-# ── MagelightGPU.dll — the LGPL-isolated GPU backend (see gpu/README.md) ─────
-# Adapted from AppCore v1.3.0's D3D11 reference GPUDriver. Built as its OWN
-# dynamically-loaded DLL so the LGPL obligations stay contained; the host talks
-# to it only through the C ABI in gpu/MagelightGpuApi.h and falls back to the
-# CPU surface path when it is absent. No CommonLib dependency. No /DELAYLOAD:
-# the host loads it AFTER preloading the (namespaced) runtime, and the stage
-# step patches this DLL's Ultralight import names like every other binary.
+# ── MagelightGPU.dll — the GPU backend (see gpu/README.md) ───────────────────
+# Adapted from the Ultralight 2.0 SDK's reference D3D11 GPUDriver (platform/src,
+# Zlib licence). It stays its OWN dynamically-loaded DLL: the host talks to it
+# only through the C ABI in gpu/MagelightGpuApi.h and falls back to the CPU
+# surface path when it is absent. No CommonLib dependency. No /DELAYLOAD: the
+# host loads it AFTER preloading the (namespaced) runtime, and the stage step
+# patches this DLL's Ultralight import names like every other binary.
+# The compiled shaders come from the SDK's generated d3d11 headers through the
+# include path below; they are proprietary to Ultralight (licensed only for use
+# with Ultralight), so they are never copied into this repository.
+set(ULTRALIGHT_SHADER_HEADERS "${ULTRALIGHT_DIR}/platform/shaders/generated/headers")
+if(NOT EXISTS "${ULTRALIGHT_SHADER_HEADERS}/d3d11/shaders.h")
+    message(FATAL_ERROR "Ultralight D3D11 shader headers not found at ${ULTRALIGHT_SHADER_HEADERS}/d3d11 (Ultralight 2.0 SDK layout).")
+endif()
 add_library(MagelightGPU SHARED gpu/MagelightGpuDriver.cpp ${CMAKE_CURRENT_BINARY_DIR}/version_gpu.rc)
 target_include_directories(MagelightGPU PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
-target_include_directories(MagelightGPU SYSTEM PRIVATE ${ULTRALIGHT_DIR}/include)
+target_include_directories(MagelightGPU SYSTEM PRIVATE ${ULTRALIGHT_DIR}/include ${ULTRALIGHT_SHADER_HEADERS})
 target_link_directories(MagelightGPU PRIVATE ${ULTRALIGHT_DIR}/lib)
 target_link_libraries(MagelightGPU PRIVATE Ultralight UltralightCore d3d11)
 target_compile_definitions(MagelightGPU PRIVATE MGGPU_BUILD NOMINMAX WIN32_LEAN_AND_MEAN)

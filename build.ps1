@@ -14,10 +14,11 @@ $script:BuildStartTime = Get-Date
 Write-Host "=== Magelight UI build ===" -ForegroundColor Cyan
 
 # ── Ultralight SDK build of record ───────────────────────────────────────────
-# The dev CDN's "latest" tracks master, so a fresh fetch can be a newer engine
-# than the one the notices name and the DLL-rename permission covers. Moving
-# to another build means editing this pin on purpose (and re-checking both).
-$ulBuildOfRecord = "1.4.0b.081c48b"
+# Ultralight's download page defaults to its newest build, so a fresh fetch can
+# be a newer engine than the one the notices name and the DLL-rename permission
+# covers. Moving to another build means editing this pin on purpose (and
+# re-checking both); CI pins the same build (.github/workflows/ci.yml).
+$ulBuildOfRecord = "2.0.0-beta.2"
 $ulVersionFile = Join-Path $PSScriptRoot "extern\ultralight\VERSION.txt"
 if (-not (Test-Path $ulVersionFile)) {
     Write-Host "extern\ultralight\VERSION.txt missing - fetch the SDK per extern\README.md" -ForegroundColor Red; exit 1
@@ -163,7 +164,7 @@ if ((Get-Item $dll).LastWriteTime -lt $script:BuildStartTime) {
 # stage\SKSE\Plugins\Magelight\{NAMESPACED Ultralight DLLs, resources\}
 #
 # COEXISTENCE (field-found 2026-08-31): another Ultralight-based UI host ships
-# the same four Ultralight module names, and the Windows loader binds imports
+# the same Ultralight module names, and the Windows loader binds imports
 # by BASE NAME - whichever host loads "Ultralight.dll" first poisons the other
 # with the wrong build (Magelight loaded first alphabetically, and broke it). So our
 # copies are RENAMED and every occurrence of the old names inside each binary -
@@ -171,12 +172,15 @@ if ((Get-Item $dll).LastWriteTime -lt $script:BuildStartTime) {
 # ASCII and UTF-16 - is patched to the new name. All replacements are
 # SAME-LENGTH, so the PE layout is untouched and no code is changed. Longest name first so
 # "UltralightCore.dll" is never half-eaten by the "Ultralight.dll" pass.
-# Renaming Ultralight 1.4.0b's DLLs and rewriting their module-name strings is done
+# Renaming Ultralight's DLLs and rewriting their module-name strings is done
 # with the written permission of Ultralight, Inc. That permission is the author's:
 # other mods bundle Magelight's files as shipped and never rename or patch Ultralight's DLLs.
 $stage = Join-Path $buildDir "stage\SKSE\Plugins"
 $rtDir = Join-Path $stage "Magelight"
 New-Item -ItemType Directory -Path $rtDir -Force | Out-Null
+# AppCore is compiled out (its font loader is built into Magelight.dll): a stage reused from an older build must
+# not ship the old copy, which tools\check_stage.ps1 also refuses.
+Remove-Item (Join-Path $rtDir "MgACore.dll") -Force -ErrorAction SilentlyContinue
 
 Add-Type -TypeDefinition @"
 using System;
@@ -199,7 +203,6 @@ $renames = [ordered]@{
     "UltralightCore.dll" = "Magelight1Core.dll"
     "Ultralight.dll"     = "Magelight1.dll"
     "WebCore.dll"        = "MgWCore.dll"
-    "AppCore.dll"        = "MgACore.dll"
 }
 function Patch-ModuleNames([string]$path) {
     $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -323,13 +326,15 @@ if (Test-Path $pcExe) {
     Write-Warning "Papyrus compiler not found - Magelight.pex NOT staged"
 }
 # License texts -> runtime dir\license (NOTICES.txt names each file; the Ultralight EULA
-# requires its own text to travel with the runtime).
+# requires its own text to travel with the runtime). Recreated each run: a reused stage must
+# not keep a text this build no longer ships. The zlib text of the SDK platform code
+# (MagelightGPU.dll, the font loader) is in THIRD_PARTY_LICENSES.txt.
 $licDst = Join-Path $buildDir "stage\SKSE\Plugins\Magelight\license"
+Remove-Item $licDst -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $licDst -Force | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "LICENSE") -Destination (Join-Path $licDst "LICENSE.txt") -Force
 Copy-Item (Join-Path $PSScriptRoot "NOTICES.txt") -Destination $licDst -Force
 Copy-Item (Join-Path $PSScriptRoot "THIRD_PARTY_LICENSES.txt") -Destination $licDst -Force
-Copy-Item (Join-Path $PSScriptRoot "gpu\LICENSE") -Destination (Join-Path $licDst "LGPL-2.1.txt") -Force
 $ulLic = Join-Path $PSScriptRoot "extern\ultralight\license"
 if (Test-Path $ulLic) {
     Copy-Item (Join-Path $ulLic "EULA.txt") -Destination $licDst -Force

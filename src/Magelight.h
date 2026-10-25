@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -10,7 +11,7 @@
 struct ID3D11ShaderResourceView;
 
 // Magelight UI — the host: Present hook, Ultralight on the game's D3D11
-// device through the LGPL-isolated GPU driver (CPU-surface fallback), view
+// device through the GPU driver DLL (CPU-surface fallback), view
 // registry + compositor, input routing, cursor, texture images, host events.
 //
 // Threading model (the load-bearing decision): ALL Ultralight objects are
@@ -32,11 +33,17 @@ namespace Magelight {
     // VR laser (src/MagelightVR/Laser.cpp, present thread) injects synthetic pointer
     // input through the same thread-safe queue DrainInputQueue drains. Typed
     // with stdint, not the Win32 aliases, because this header is parsed before
-    // <windows.h> in the VR translation units. msg is a WM_* value; w/l are the
-    // WPARAM/LPARAM payload. Mutex-guarded; callable from the present thread.
-    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam);
+    // <windows.h> in the VR translation units. msg is a WM_* pointer message; w/l are
+    // the WPARAM/LPARAM payload; hand (0 left, 1 right) is the pointer source, which
+    // keeps its own press and hover. Mutex-guarded; callable from the present thread.
+    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam, int hand);
 
-    // Load the four Ultralight runtime DLLs from Data/SKSE/Plugins/Magelight/
+    // Text a VR keyboard typed, for the UI-mode page: printable runs as edits (Editor::InsertText, the page's
+    // beforeinput and input events), \b, \t and \r or \n (CR LF as one) as the Backspace, Tab and Enter keys, other
+    // control characters dropped. A surrogate pair must arrive whole. Any thread.
+    void QueueTypedText(const wchar_t* s, std::size_t n);
+
+    // Load the three Ultralight runtime DLLs from Data/SKSE/Plugins/Magelight/
     // (full paths, dependency order). Our imports are /DELAYLOAD'ed, so this
     // must succeed before any Ultralight symbol is touched. False = runtime
     // missing; the plugin stays inert.
@@ -148,7 +155,8 @@ namespace Magelight {
     // destroyed one. IsViewValid is false from the moment a destroy is queued.
     bool DestroyView(ViewId view);
     bool ReloadView(ViewId view);
-    // file:/// URL, a runtime-relative path, or an absolute drive-letter path.
+    // file:/// URL, a runtime-relative path, or an absolute drive-letter path. The page's own URL with only its
+    // fragment added or changed keeps the page (no DOM ready, no ViewReloaded; ApplyPendingLifecycle).
     bool NavigateView(ViewId view, const char* urlOrPath);
     // z-order: (layer, order). RaiseView moves to the top of its layer.
     void SetViewLayer(ViewId view, int layer);
@@ -205,6 +213,8 @@ namespace Magelight {
     // folder; manual reload and the Web Inspector toggle are unbound for now
     // (hosted as a System-layer view on the lower half of the screen).
     bool DevModeEnabled();
+    // Any thread: the next frame logs the memory line and Ultralight's full memory report (at most one every 10 s).
+    void RequestMemoryReport();
     bool InspectorAvailable();             // <runtime>/inspector/Main.html present
     // Version gate: at world-ready, if any mod registered with HostTooOld,
     // show the host's own notice page (views/gate) naming them. Game thread.
@@ -341,7 +351,7 @@ namespace Magelight {
     // is complete (HostTheme::ResolveKeyboard); nullptr clears. False = no such view, or the keyboard's own. Any
     // thread. A page sets the same slot through magelight.hostTheme (the reserved '__hosttheme' channel).
     bool SetViewKeyboardTheme(ViewId view, const HostTheme::KbTheme* theme);
-    bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint once while hidden (false: no such view)
+    bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)
     ViewId GetUIModeView();                // the current/last UI-mode target (0 = none)
     std::uint32_t GetToggleKey();          // the host's own UI-mode toggle scancode (Magelight.json)
     bool IsUIModeActive();

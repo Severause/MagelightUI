@@ -1,14 +1,20 @@
-// Stack stress tests for Magelight's page stack (1.3.0, "ulFiberMB"). Each test drives a page into runaway
-// recursion by a different road, in its scripts or in the engine's layout, and reports what stopped it: a script
-// gets "RangeError: Maximum call stack size exceeded" and the page goes on. A run that ends the overlay instead
-// ("SEH exception 0xC00000FD ... overlay disabled" in Magelight.log) is the failure the page stack prevents.
-// Shared by the in-game page (index.html) and the desktop probes (../../../stack_probe.cpp, fiber_probe.cpp).
+// Stack stress tests for Magelight's page stack ("ulFiberMB"). Each test drives a page into runaway recursion by a
+// different road, in its scripts or in the engine's layout, or leaves an error uncaught, and reports what stopped it:
+// a script gets "RangeError: Maximum call stack size exceeded", an uncaught error reaches the page's 'error' event,
+// and the page goes on. A run that ends the overlay instead ("SEH exception 0xC00000FD ... overlay disabled" in
+// Magelight.log, or a crash) is the failure the page stack prevents. Shared by the in-game page (index.html) and the
+// desktop probes (../../../stack_probe.cpp, ../../../../fiber-gc-test/fibergc.cpp), which call start() and wait for
+// its callback.
 (function () {
   'use strict';
 
   var tests = [];
   // expect: how a test should end ('RangeError' unless it says otherwise; a list = any of them).
   function test(id, name, body, expect) { tests.push({ id: id, name: name, body: body, expect: expect || 'RangeError' }); }
+  // A test that ends later: body(d, done) calls done(outcome) once.
+  function testAsync(id, name, body, expect) {
+    tests.push({ id: id, name: name, body: body, expect: expect || 'reported', async: true });
+  }
 
   test('plain', 'Plain recursion', function (d) {
     function f(n) { d.v = n; return f(n + 1) + 1; }
@@ -109,6 +115,47 @@
     return fns[0](0, fns, d);
   });
 
+  // An error a page leaves uncaught goes to the engine's error report (WebCore's reportException), which commits the
+  // stack down to JavaScriptCore's hard reserve before the page's own 'error' listener runs. On a stack with too
+  // little room below that reserve (a stack guarantee: CrashLogger sets one on the game's main thread) the first such
+  // error ends the overlay, with nothing deep on the stack at all. Passes when the page's 'error' event arrives (its
+  // message is "Script error." where the page's origin hides the details) and the page goes on.
+  function throwUncaught(d, done, arm) {
+    if (typeof window === 'undefined' || typeof document === 'undefined') { d.extra = 'no page here'; done('reported'); return; }
+    var tag = 'MgStackTest: an expected uncaught error (' + d.id + ')';
+    var finished = false, thrown = false, timer = 0;
+    function finish(outcome) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      window.removeEventListener('error', onError);
+      done(outcome);
+    }
+    function onError(e) {
+      if (!thrown) return;
+      d.extra = "the page's error event ran: " + String(e && e.message).slice(0, 80);
+      finish('reported');
+    }
+    window.addEventListener('error', onError);
+    timer = setTimeout(function () { finish('no error event'); }, 3000);
+    arm(function () { d.v = 1; thrown = true; throw new Error(tag); });
+  }
+
+  testAsync('timer', 'An uncaught error in a timer callback', function (d, done) {
+    throwUncaught(d, done, function (fire) { setTimeout(fire, 0); });
+  });
+
+  // HTMLElement.click() dispatches through the DOM as a player's click does: the listener's error is reported, not
+  // thrown back to the caller.
+  testAsync('listener', 'An uncaught error in a click listener', function (d, done) {
+    throwUncaught(d, done, function (fire) {
+      var b = document.createElement('button');
+      b.addEventListener('click', fire);
+      document.body.appendChild(b);
+      try { b.click(); } finally { b.remove(); }
+    });
+  });
+
   // Layout forced from the catch handlers nearest the limit: engine work entered from a script at its deepest, the
   // case WebKit's own reserve was too small for (needs a page; ends normally).
   test('layout', 'Layout forced from the bottom of a recursion', function (d) {
@@ -151,23 +198,46 @@
     }, 'finished');
   });
 
-  // Runs one test; never throws. depth = how deep it got before it was stopped.
+  function result(t, d, t0, outcome, message) {
+    return { id: t.id, name: t.name, outcome: outcome, expect: t.expect, message: message || '', depth: d.v,
+             extra: d.extra, ms: Date.now() - t0 };
+  }
+
+  function caught(e) { return [(e && e.name) || 'error', String((e && e.message) || e).slice(0, 120)]; }
+
+  // Runs one synchronous test; never throws. depth = how deep it got before it was stopped.
   function runOne(t) {
-    var d = { v: 0, extra: '' };
-    var t0 = Date.now(), outcome, message = '';
+    var d = { v: 0, extra: '', id: t.id }, t0 = Date.now();
+    if (t.async) return result(t, d, t0, 'not run', 'an asynchronous test: use start()');
     try {
       t.body(d);
-      outcome = 'finished';
+      return result(t, d, t0, 'finished');
     } catch (e) {
-      outcome = (e && e.name) || 'error';
-      message = String((e && e.message) || e).slice(0, 120);
+      var c = caught(e);
+      return result(t, d, t0, c[0], c[1]);
     }
-    return { id: t.id, name: t.name, outcome: outcome, expect: t.expect, message: message, depth: d.v,
-             extra: d.extra, ms: Date.now() - t0 };
+  }
+
+  // Runs any test and calls cb with its result once (for a synchronous test, before returning).
+  function start(t, cb) {
+    if (!t.async) { cb(runOne(t)); return; }
+    var d = { v: 0, extra: '', id: t.id }, t0 = Date.now(), called = false;
+    function once(r) { if (!called) { called = true; cb(r); } }
+    try {
+      t.body(d, function (outcome) { once(result(t, d, t0, outcome)); });
+    } catch (e) {
+      var c = caught(e);
+      once(result(t, d, t0, c[0], c[1]));
+    }
   }
 
   function passed(r) { return Array.isArray(r.expect) ? r.expect.indexOf(r.outcome) >= 0 : r.outcome === r.expect; }
 
+  // One line of a probe's output.
+  function line(r) {
+    return [passed(r) ? 'ok  ' : 'FAIL', r.id, r.outcome, 'depth ' + r.depth, r.ms + ' ms', r.extra || ''].join('  ');
+  }
+
   var root = typeof window !== 'undefined' ? window : this;
-  root.MgStackTests = { tests: tests, runOne: runOne, passed: passed };
+  root.MgStackTests = { tests: tests, runOne: runOne, start: start, passed: passed, line: line };
 })();

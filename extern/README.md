@@ -2,35 +2,44 @@
 
 ## ultralight/ (not committed)
 
-The Ultralight **1.4** SDK. The release CDN's `latest` alias still serves
-1.3.0 (checked 2026-09-01), so 1.4 comes from the dev channel — the build of
-record is `1.4.0b.081c48b` (see `VERSION.txt` inside the SDK; the dev CDN
-tracks master, so a re-fetch may yield a newer build; `build.ps1` and CI
-refuse any build but the pinned one, so moving to a new build is a deliberate
-edit of that pin). From the repository root:
-
-    curl -L -o extern/ultralight-sdk-dev.7z https://ultralight-sdk-dev.sfo2.cdn.digitaloceanspaces.com/ultralight-sdk-latest-win-x64.7z
-    7z x -oextern/ultralight extern/ultralight-sdk-dev.7z
+The Ultralight SDK, build of record **2.0.0-beta.2 (Free)**: `VERSION.txt` inside the SDK must
+read `2.0.0-beta.2`, and `build.ps1` refuses any other build, so moving to another one is a
+deliberate edit of that pin (see "The Ultralight SDK pin" in [CONTRIBUTING.md](../CONTRIBUTING.md)).
+Extract the Windows x64 Free SDK (`ul-sdk-2.0.0-beta.2-win-x64-free.7z` from https://ultralig.ht/download,
+SHA-256 `e17b3ca2f3c2063f1d14971e7ef756f28e71f2d426a91d2e21c5236d2dc67e6d`) so that
+`extern/ultralight/VERSION.txt` exists, or make `extern/ultralight` a junction to an extracted copy.
+Once Ultralight stops offering this build, the archive kept with the release records
+(RELEASING.md section 2) is the way to it.
 
 (No 7-Zip installed? Windows 11's own bsdtar reads 7z; unlike 7-Zip's `-o`,
 its `-C` needs the folder to exist:
 `mkdir extern\ultralight` then
-`C:\Windows\System32\tar.exe -xf extern\ultralight-sdk-dev.7z -C extern\ultralight`.)
+`C:\Windows\System32\tar.exe -xf <archive>.7z -C extern\ultralight`.)
 
-Keep the archive inside `extern/`: `.gitignore` covers `extern/*.7z`, not a
+Keep an archive inside `extern/`: `.gitignore` covers `extern/*.7z`, not a
 `.7z` at the repository root. Delete it once extracted.
 
-Then check `extern/ultralight/VERSION.txt`. If it is newer than the pin, the dev
-CDN has moved on and no longer serves the build of record: see "The Ultralight
-SDK pin" in [CONTRIBUTING.md](../CONTRIBUTING.md).
+What the build uses:
 
-Layout expected by CMakeLists.txt: `ultralight/include`, `ultralight/lib`,
-`ultralight/bin`, `ultralight/resources`. The 1.4 SDK also ships top-level
-`shaders/` (the fxc-compiled HLSL binaries `gpu/shaders/` mirrors) and
-`samples/`, which the build doesn't consume.
+- `include/`, `lib/`, `bin/`, `resources/`, `license/` and `inspector/`: the runtime, its import
+  libraries, its data, its licence texts and the Web Inspector. `bin/` holds four DLLs; three ship
+  (renamed, see `build.ps1`). `AppCore.dll` does not: 2.0's imports CoreMessaging.dll and the WinRT
+  api-sets, and Magelight needs nothing from it but the font loader.
+- `platform/`: Ultralight's reference platform implementations as source, under the zlib licence
+  (`platform/LICENSE`). Two parts are built, in place and never copied here:
+  `platform/src/fonts/FontLoaderWin.cpp` and `TextAnalysisSource.cpp` are compiled unmodified
+  into `Magelight.dll`, and `gpu/` adapts the Direct3D 11 reference driver (`gpu/README.md`).
+- `platform/shaders/generated/headers/d3d11`: the compiled shaders `MagelightGPU.dll` embeds,
+  read through an include path. They are NOT zlib: proprietary to Ultralight, Inc. and licensed
+  only for use with Ultralight (`platform/shaders/generated/LICENSE`), so they are never copied
+  into this repository.
+
+Nothing else of `platform/` is built: `src/filesystem/FileSystemWin.cpp` is BSD, `src/fonts/FallbackFont.h`
+is Apache-2.0 (Roboto), and `src/Factories.cpp` would pull in the platform's file system, clipboard,
+logger and GPU contexts. `samples/` and `tools/` are not used.
 
 ## appcore-ref/ (committed)
 
-Verbatim upstream AppCore D3D11 driver sources (LGPL-2.1) that
-`gpu/MagelightGpuDriver.cpp` was adapted from — kept as provenance for the
-LGPL corresponding-source obligation. See `gpu/README.md`.
+Verbatim AppCore D3D11 driver sources (LGPL-2.1, its own `LICENSE`) that the Ultralight 1.4
+`gpu/MagelightGpuDriver.cpp` was adapted from. The 2.0 driver is rebased on the SDK's zlib
+reference driver and contains none of it; this folder is history and builds nothing.

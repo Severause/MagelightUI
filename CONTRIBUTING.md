@@ -5,9 +5,8 @@ and check rendering changes in the desktop harness before asking for a game test
 
 ## Building the host
 
-1. Fetch the Ultralight 1.4 SDK into `extern/ultralight/` — exact commands in
-   [extern/README.md](extern/README.md) (it is ~90 MB of third-party binaries, fetched
-   not committed).
+1. Put the Ultralight SDK (the build of record, 2.0.0-beta.2 Free) in `extern/ultralight/` — see
+   [extern/README.md](extern/README.md) (third-party binaries and sources, never committed).
 2. Install standalone vcpkg (`git clone https://github.com/microsoft/vcpkg C:\vcpkg`, then
    `C:\vcpkg\bootstrap-vcpkg.bat`), or set `VCPKG_ROOT` to an existing standalone one;
    `build.ps1` falls back to `C:\vcpkg` and ignores the copy Visual Studio bundles.
@@ -22,17 +21,18 @@ and check rendering changes in the desktop harness before asking for a game test
 
 ### The Ultralight SDK pin
 
-`build.ps1` and CI build only against the SDK build of record, `1.4.0b.081c48b`. The dev
-CDN serves only its latest build, so once it moves on, the pinned build cannot be
-downloaded any more:
+`build.ps1` builds only against the SDK build of record, `2.0.0-beta.2` (`VERSION.txt` in
+the SDK):
 
-- **Locally**, a fresh fetch then gives an SDK `build.ps1` refuses. Copy a verified
-  `extern/ultralight/` from a machine that has one, or open an issue: moving the pin is the
-  maintainer's call, because the renamed runtime and the notices have to be re-verified
-  against the new build (RELEASING.md section 0).
+- **Locally**, any other SDK is refused. Copy a verified `extern/ultralight/` from a machine
+  that has one, or open an issue: moving the pin is the maintainer's call, because the renamed
+  runtime, the compiled-in platform sources and the notices have to be re-verified against the
+  new build (RELEASING.md section 0).
 - **In CI**, pull requests build against the pinned SDK the Actions cache holds from `main`.
-  If that cache has expired, the fetch step fails with the pin message on every run until
-  a maintainer re-seeds it (RELEASING.md section 2); nothing in a pull request can fix it.
+  If that cache has expired, the fetch step downloads the pinned archive from Ultralight and
+  checks its SHA-256. Once Ultralight no longer serves that build, it fails with the pin message
+  on every run until a maintainer re-seeds the cache (RELEASING.md section 2); nothing in a pull
+  request can fix it.
 
 The npm packages need no game: `npm ci && npm run build` at the repo root builds all
 of `packages/` and the React example (run it before `build.ps1 -Examples`, which builds
@@ -59,8 +59,12 @@ the example against them). Scaffold a throwaway mod against your clone with
   one Ultralight thread, the load-listener locking rules, view lifetime in
   `ApplyPendingLifecycle`, POD-only frames inside SEH guards, keyboard containment in UI
   mode. Read them before touching `src/`.
-- **The LGPL seam stays clean.** AppCore-derived code lives in `gpu/` only, reached from
-  the host only through `gpu/MagelightGpuApi.h` (C ABI), modifications marked `// MG:`.
+- **Ultralight's platform code stays in the SDK** (invariant 4). The D3D11 driver adapted
+  from it lives in `gpu/` only, reached from the host only through `gpu/MagelightGpuApi.h`
+  (C ABI), with the zlib notice kept and modifications marked `// MG:`; the font loader is
+  compiled from the SDK folder unmodified. Never copy SDK files into the repository (the
+  compiled shaders are Ultralight's, licensed only for use with Ultralight), and never
+  include `<AppCore/...>` in `src/`: AppCore.dll is not shipped.
 - **Bump the version** (`CMakeLists.txt` `project(... VERSION x.y.z)`) and add a
   CHANGELOG.md entry for every deployable change. The "added in" table is how consumers
   pick their `minHost`. The full release checklist is [RELEASING.md](RELEASING.md).
@@ -77,7 +81,7 @@ reformatting sweeps, no drive-by refactors — a tidy, reviewable diff.
 ## Licensing of contributions
 
 Contributions are accepted under the licence of the folder they land in: MIT for the
-repository, LGPL-2.1 for `gpu/`.
+repository, zlib for `gpu/`.
 
 ## AI-assisted contributions
 

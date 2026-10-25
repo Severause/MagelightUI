@@ -1,14 +1,14 @@
 {
   "modId": "MgStackTest",
   "name": "Magelight Stack Test",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "minHost": "0.31.0",
   "views": {
     "test": {
       "path": "views/test/index.html",
       "layer": "panel",
       "fullscreen": true,
-      "hotkey": "Numpad9",
+      "hotkey": "F7",
       "loadOnShow": true
     }
   }

@@ -169,8 +169,10 @@ used: OpenComposite implements overlays as OpenXR quad layers and does not
 emulate overlay input events **(verify — it is why a design leaning on those
 events ends up OCU-only)**; owning the math removes the question.
 
-**Hand selection:** the hand whose ray last hit any overlay is the active
-hand; the other hand's laser is hidden. Trigger on a non-hitting hand does
+**Hands:** each hand whose ray hits a panel draws its beam and moves,
+presses and scrolls on its own: the host keeps a press and a hover per hand
+(`Input::PointerRoutes`), so one hand never moves the other's held press or
+clears the `:hover` where the other points. Trigger on a non-hitting hand does
 nothing.
 
 **Buttons — from the GAME, not the runtime.** Skyrim VR turns controller
@@ -183,9 +185,9 @@ UI mode is on:
 | Control | Synthesised as | Notes |
 |---|---|---|
 | ray moves over a panel | `WM_MOUSEMOVE` (view pixels) | every frame the hit changes; hover works |
-| trigger down / up | `WM_LBUTTONDOWN` / `WM_LBUTTONUP` | at the current hit; a down with no hit is ignored |
-| stick Y (`thumbstick` events, `kThumbstick` input type) | `WM_MOUSEWHEEL` ±`WHEEL_DELTA` per ~0.35 deflection with repeat | scrolls what is under the ray |
-| B/Y (`kBY`) on the active hand | leaves UI mode | the VR way out; a page that has taken Escape does not stop it; skipped when B/Y is bound for the UI-mode view |
+| trigger down / up | `WM_LBUTTONDOWN` / `WM_LBUTTONUP` | at the current hit; a down with no hit is ignored. While a trigger is held, that hand's moves and release go to the view it was pressed on (1.5.0); the other hand's go where it points. A controller that loses its tracking (no usable pose, a rotation-only fallback included) or disconnects with the trigger held releases at its last hit, so the press never outlives it |
+| stick Y (`thumbstick` events, `kThumbstick` input type) | `WM_MOUSEWHEEL` ±`WHEEL_DELTA` per ~0.35 deflection with repeat | scrolls the element under the ray (1.5.0: the hit pixel is the wheel's position) |
+| B/Y (`kBY`) on either hand | leaves UI mode | the VR way out; a page that has taken Escape does not stop it; skipped when B/Y is bound for the UI-mode view |
 | grip | `RecenterVRView` on the UI-mode view | cheap "bring it to me" |
 
 `hitTest` in `DrainInputQueue` works in swapchain pixels; the VR path
@@ -209,13 +211,20 @@ the game acts on the button that closed the page.
 **Keyboard/text.** UI mode raises the engine text-entry flag; on VR that is
 precisely the signal that pops OCU's auto keyboard and SteamVR's overlay
 keyboard (the SA `VRImmersiveMode.h` comment records users hitting this with
-the prior host). Decision: in VR the flag is raised only while a page text field
-has focus (a page-bridge `__textfocus` signal from the `focusin/focusout`
-handler the host already installs for `window.magelight`), and the host
-calls `ShowKeyboardForOverlay` on SteamVR (chars arrive as
-`VREvent_KeyboardCharInput` → the existing `WM_CHAR` queue path).
-OpenComposite has no keyboard **(verify)**: v1 ships without one there
-(OCU's `WM_OC_CHAR` would be an additional source later).
+the prior host), so a page with nothing to type into enters UI mode with
+`kUIModeFlagNoTextEntry`. Text focus comes from Ultralight 2.0's
+`EditorListener` (since 1.5.0; before, a `focusin`/`focusout` script the
+host injected into every page sent `__textfocus`): the report is recorded and
+`DrainEditableStates` decides once a frame, for the UI-mode view only
+(`src/EditStateCore.h`, CLAUDE.md invariant 25). It raises Magelight's own
+keyboard (`views/keyboard`, laid out for the field's `inputmode`, its Enter
+labelled from `enterkeyhint`) and, with `vr.runtimeKeyboard`, SteamVR's
+(`ShowKeyboardForOverlay`, password or multi-line mode as the field asks;
+characters arrive as `VREvent_KeyboardCharInput`). OpenComposite has no
+keyboard we can raise; OCU types through `WM_OC_CHAR`. Every source ends in
+`QueueTypedText`: printable runs become `Editor::InsertText`, Backspace,
+Enter and Tab stay key events (`QueueVirtualKey`), and the own keyboard's
+edit buttons run `Editor::Execute`.
 
 **Laser visuals.** Two thin quad overlays (one per hand, a 4×64 gradient
 texture, premultiplied) transformed along the ray, shortened to the hit
@@ -389,7 +398,7 @@ reset), the visible beam overlays (session-global handles, static texture,
 released in Shutdown only — strict teardown discipline), and the tip
 transform. Accepted first-cut gaps: injected input drains one frame late
 (~11ms, harmless on static panels); a drag whose release leaves the panel
-routes the up through the UI-mode-view fallback.
+routes the up through the UI-mode-view fallback (since 1.5.0 the up goes to the view the press went to).
 
 **VR-3 visual feedback (0.17.5).** The 0.17.4 plan assumed the page draws
 its own cursor — it does not (the OS draws the pointer on flat; Ultralight

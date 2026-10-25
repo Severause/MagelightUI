@@ -113,6 +113,19 @@ namespace Magelight::VR {
         bool s_gripSeeded[2] = { false, false };         // latch seeded from the live level on UI-mode entry
         int  s_lastPx[2] = { 0, 0 }, s_lastPy[2] = { 0, 0 };   // last hit pixel per hand (the UP lands here)
 
+        // Ends a held trigger: its release at the hand's last hit pixel (a web click needs the press and the release
+        // on the same element; an up at (0,0) re-hit-tests to a corner far outside every control). Every path that
+        // drops a held trigger while UI mode stays on goes through here, the lost controller and the lost pose
+        // included: the host keeps the pressed view for this hand until this release, so without it the hand's later
+        // moves and presses would go to that view.
+        void ReleaseTrigger(int hand)
+        {
+            if (!s_lastTriggerDown[hand]) return;
+            s_lastTriggerDown[hand] = false;
+            const auto upPos = static_cast<std::intptr_t>(MAKELPARAM(static_cast<WORD>(s_lastPx[hand]), static_cast<WORD>(s_lastPy[hand])));
+            Magelight::QueueSyntheticInput(WM_LBUTTONUP, 0, upPos, hand);
+        }
+
         // Grab-and-move state (present thread; the request comes from the page).
         std::atomic<std::uint64_t> s_dragRequest{ 0 };   // view the page asked to drag (0 = none)
         ViewId s_dragView = 0;                           // active drag
@@ -124,7 +137,8 @@ namespace Magelight::VR {
     ViewId s_kbView = 0;          // view whose text field has focus (0 = none)
 
     namespace {
-        bool   s_kbShown = false;     // the runtime's keyboard is up for it
+        ViewId s_kbShownFor = 0;      // the view whose overlay the runtime's keyboard is up over (0 = down)
+        TextField s_kbField;          // that field's kind, for the keyboard's mode when it is raised
         float s_scrollAccum[2] = { 0.0f, 0.0f };         // thumbstick -> wheel notches
         constexpr float kStickDeadzone = 0.30f;
         constexpr float kScrollNotchesPerSec = 6.0f;     // at full deflection
@@ -270,12 +284,18 @@ namespace Magelight::VR {
                                 "(it steals input focus and stalls the game) — type on the keyboard, or on the "
                                 "runtime's own if it synthesises scancodes");
             }
-            if (s_kbShown) { s_overlay->HideKeyboard(); s_kbShown = false; }
+            if (s_kbShownFor) { s_overlay->HideKeyboard(); s_kbShownFor = 0; }
             return;
         }
-        // Raise / drop the runtime keyboard to follow the page's text focus.
+        // Raise / drop the runtime keyboard to follow the page's text focus. The focus can pass from one view's field
+        // to another's between two ticks (NoteTextFocus gets the release and the new claim in one frame), and SteamVR
+        // keeps the keyboard over the overlay it was raised for: it comes down and is raised over the new one.
         const ViewId want = s_kbView;
-        if (want && !s_kbShown) {
+        if (s_kbShownFor && s_kbShownFor != want) {
+            s_overlay->HideKeyboard();
+            s_kbShownFor = 0;
+        }
+        if (want && !s_kbShownFor) {
             auto it = s_overlays.find(want);
             if (it != s_overlays.end() && it->second.handle != vr::k_ulOverlayHandleInvalid) {
                 // MINIMAL MODE (true): the runtime sends one
@@ -285,11 +305,15 @@ namespace Magelight::VR {
                 // want the keystrokes; with minimal mode off, SteamVR's
                 // keyboard opens and produces nothing.
                 const auto err = s_overlay->ShowKeyboardForOverlay(
-                    it->second.handle, vr::k_EGamepadTextInputModeNormal,
-                    vr::k_EGamepadTextInputLineModeSingleLine, "Magelight", 256, "", true, 0);
+                    it->second.handle,
+                    s_kbField.password ? vr::k_EGamepadTextInputModePassword : vr::k_EGamepadTextInputModeNormal,
+                    s_kbField.multiline ? vr::k_EGamepadTextInputLineModeMultipleLines
+                                        : vr::k_EGamepadTextInputLineModeSingleLine,
+                    "Magelight", 256, "", true, 0);
                 if (err == vr::VROverlayError_None) {
-                    s_kbShown = true;
-                    SKSE::log::info("Magelight VR: runtime keyboard shown for view {}", want);
+                    s_kbShownFor = want;
+                    SKSE::log::info("Magelight VR: runtime keyboard shown for view {}{}{}", want,
+                                    s_kbField.password ? " (password)" : "", s_kbField.multiline ? " (multi-line)" : "");
                 } else {
                     // OpenComposite has no overlay keyboard to raise; on that runtime the
                     // host's own on-panel keyboard (and OCU's WM_OC_CHAR window message) carry text.
@@ -302,14 +326,11 @@ namespace Magelight::VR {
                     s_kbView = 0;
                 }
             }
-        } else if (!want && s_kbShown) {
-            s_overlay->HideKeyboard();
-            s_kbShown = false;
         }
-        if (!s_kbShown) return;
-        // Drain keyboard events off the focused view's overlay.
-        auto it = s_overlays.find(s_kbView);
-        if (it == s_overlays.end()) { s_overlay->HideKeyboard(); s_kbShown = false; s_kbView = 0; return; }
+        if (!s_kbShownFor) return;
+        // Drain keyboard events off the overlay it is up over.
+        auto it = s_overlays.find(s_kbShownFor);
+        if (it == s_overlays.end()) { s_overlay->HideKeyboard(); s_kbShownFor = 0; s_kbView = 0; return; }
         // BOUNDED: this runs on the present thread, and raising the
         // keyboard can produce a flood of focus events. An unbounded drain
         // here is a frame stall.
@@ -317,18 +338,14 @@ namespace Magelight::VR {
         int drained = 0;
         while (drained++ < 64 && s_overlay->PollNextOverlayEvent(it->second.handle, &ev, sizeof(ev))) {
             if (ev.eventType == vr::VREvent_KeyboardCharInput) {
+                // Up to 8 bytes of UTF-8: a character, or its backspace (\b), Enter (\n or \r) or Tab.
                 char buf[9]{};
                 std::memcpy(buf, ev.data.keyboard.cNewInput, 8);
                 wchar_t wide[16]{};
                 const int n = MultiByteToWideChar(CP_UTF8, 0, buf, -1, wide, 15);
-                for (int i = 0; i < n && wide[i]; ++i) {
-                    if (wide[i] == L'\b') {   // the runtime keyboard's backspace
-                        Magelight::QueueSyntheticInput(WM_KEYDOWN, VK_BACK, 0);
-                        Magelight::QueueSyntheticInput(WM_KEYUP, VK_BACK, 0);
-                    } else if (wide[i] >= 0x20 || wide[i] == L'\t' || wide[i] == L'\r') {
-                        Magelight::QueueSyntheticInput(WM_CHAR, static_cast<std::uintptr_t>(wide[i]), 0);
-                    }
-                }
+                std::size_t len = 0;
+                while (n > 0 && len < 15 && wide[len]) ++len;
+                Magelight::QueueTypedText(wide, len);
             } else if (ev.eventType == vr::VREvent_KeyboardDone) {
                 // Full-mode fallback: the runtime kept the text itself.
                 char text[256]{};
@@ -336,15 +353,15 @@ namespace Magelight::VR {
                 if (n > 0) {
                     wchar_t wide[256]{};
                     const int wn = MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, 255);
-                    for (int i = 0; i < wn && wide[i]; ++i)
-                        if (wide[i] >= 0x20 || wide[i] == L'\t' || wide[i] == L'\r')
-                            Magelight::QueueSyntheticInput(WM_CHAR, static_cast<std::uintptr_t>(wide[i]), 0);
+                    std::size_t len = 0;
+                    while (wn > 0 && len < 255 && wide[len]) ++len;
+                    Magelight::QueueTypedText(wide, len);
                     SKSE::log::info("Magelight VR: runtime keyboard done — {} byte(s) of text delivered", n);
                 }
-                s_kbShown = false; s_kbView = 0;
+                s_kbShownFor = 0; s_kbView = 0;
                 break;
             } else if (ev.eventType == vr::VREvent_KeyboardClosed) {
-                s_kbShown = false;
+                s_kbShownFor = 0;
                 s_kbView = 0;
                 SKSE::log::info("Magelight VR: runtime keyboard closed");
                 break;
@@ -353,6 +370,8 @@ namespace Magelight::VR {
         }
     }
 
+    // UI mode is off: no release is queued for a held trigger, the host releases every held button itself when UI
+    // mode ends.
     void ClearLaserState()
     {
         for (int h = 0; h < 2; ++h) {
@@ -361,8 +380,8 @@ namespace Magelight::VR {
             s_dragRequest.store(0); s_dragView = 0; s_dragHand = -1;
             s_hands[h].stickY_mil.store(0); s_hands[h].gripEdge.store(false);
         }
-        if (s_kbShown && s_overlay) s_overlay->HideKeyboard();
-        s_kbShown = false; s_kbView = 0;
+        if (s_kbShownFor && s_overlay) s_overlay->HideKeyboard();
+        s_kbShownFor = 0; s_kbView = 0;
     }
 
     // The laser on the panel overlays: hover, click, scroll, the grip
@@ -394,13 +413,14 @@ namespace Magelight::VR {
                                           : vr::TrackedControllerRole_LeftHand;
             const vr::TrackedDeviceIndex_t idx = s_system->GetTrackedDeviceIndexForControllerRole(role);
             if (idx == vr::k_unTrackedDeviceIndexInvalid || idx >= vr::k_unMaxTrackedDeviceCount) {  // B4
-                s_lastTriggerDown[hand] = false;   // controller gone: forget its click state
+                ReleaseTrigger(hand);   // controller gone: a press it held ends here
                 s_hover[hand].hit = false;
                 HideBeam(hand);
                 continue;
             }
             const vr::TrackedDevicePose_t& ctrlPose = render[idx];
-            if (!PoseUsable(ctrlPose)) { s_lastTriggerDown[hand] = false; s_hover[hand].hit = false; HideBeam(hand); continue; }
+            // No usable pose (tracking lost, a rotation-only fallback): nothing to aim, so a held press ends here.
+            if (!PoseUsable(ctrlPose)) { ReleaseTrigger(hand); s_hover[hand].hit = false; HideBeam(hand); continue; }
 
             // Controller state straight from the runtime (the primitive the
             // game's own BSOpenVRControllerDevice polls): legacy mapping
@@ -530,19 +550,12 @@ namespace Magelight::VR {
                 s_lastPx[hand] = px; s_lastPy[hand] = py;
                 const auto pos = static_cast<std::intptr_t>(MAKELPARAM(static_cast<WORD>(px), static_cast<WORD>(py)));
                 if (moved || (nowDown != s_lastTriggerDown[hand]))
-                    Magelight::QueueSyntheticInput(WM_MOUSEMOVE, nowDown ? MK_LBUTTON : 0, pos);
+                    Magelight::QueueSyntheticInput(WM_MOUSEMOVE, nowDown ? MK_LBUTTON : 0, pos, hand);
                 if (nowDown && !s_lastTriggerDown[hand])
-                    Magelight::QueueSyntheticInput(WM_LBUTTONDOWN, MK_LBUTTON, pos);
+                    Magelight::QueueSyntheticInput(WM_LBUTTONDOWN, MK_LBUTTON, pos, hand);
             }
-            // Release at the LAST HIT pixel of this hand (a web click needs
-            // the press and the release on the same element; an up at (0,0)
-            // re-hit-tests to a corner far outside every control). Fires
-            // whether or not the ray still hits, so a drag that left the
-            // panel still releases.
-            if (!nowDown && s_lastTriggerDown[hand]) {
-                const auto upPos = static_cast<std::intptr_t>(MAKELPARAM(static_cast<WORD>(s_lastPx[hand]), static_cast<WORD>(s_lastPy[hand])));
-                Magelight::QueueSyntheticInput(WM_LBUTTONUP, 0, upPos);
-            }
+            // Whether or not the ray still hits, so a drag that left the panel still releases.
+            if (!nowDown) ReleaseTrigger(hand);
             s_lastTriggerDown[hand] = nowDown;
 
             // Thumbstick Y -> wheel notches at the hit pixel (only while
@@ -567,7 +580,7 @@ namespace Magelight::VR {
                     while (std::fabs(s_scrollAccum[hand]) >= 1.0f) {
                         const short delta = static_cast<short>(s_scrollAccum[hand] > 0 ? WHEEL_DELTA : -WHEEL_DELTA);   // stick up = wheel up
                         Magelight::QueueSyntheticInput(WM_MOUSEWHEEL,
-                            static_cast<std::uintptr_t>(MAKEWPARAM(0, static_cast<WORD>(delta))), pos);
+                            static_cast<std::uintptr_t>(MAKEWPARAM(0, static_cast<WORD>(delta))), pos, hand);
                         s_scrollAccum[hand] += (delta > 0) ? -1.0f : 1.0f;
                     }
                 }
@@ -575,11 +588,17 @@ namespace Magelight::VR {
         }
     }
 
-    void NoteTextFocus(ViewId view, bool focused)
+    void NoteTextFocus(ViewId view, bool focused, TextField field)
     {
-        // Render thread (the JS dispatcher). TickKeyboard acts on it next frame.
-        if (focused) s_kbView = view;
-        else if (s_kbView == view) s_kbView = 0;
+        // Render thread (DrainEditableStates), earlier in the frame than TickKeyboard (SubmitFrame), which sees only
+        // the last call: a release followed by a claim for another view reaches it as the claim. A keyboard already up
+        // for the same view keeps the mode it was raised in.
+        if (focused) {
+            s_kbView = view;
+            s_kbField = field;
+        } else if (s_kbView == view) {
+            s_kbView = 0;
+        }
     }
 
     void BeginViewDrag(ViewId view) { s_dragRequest.store(view); }

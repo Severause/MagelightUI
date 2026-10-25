@@ -29,7 +29,8 @@ load `file:///sa/index.html`.
 harness.exe [url] [viewW] [viewH]        default: file:///sa/index.html 2560 1440
 ```
 
-The harness draws with 4x MSAA, the host's default; set `MG_MSAA` (1 off, 2, 4, 8) to compare.
+The harness offers 4x MSAA, the host's default (only a target the engine flags antialiased gets a
+multisample surface); set `MG_MSAA` (1 off, 2, 4, 8) to compare.
 
 `harness.exe` evaluates `inject.js` (next to the exe) into the page ~400 frames in, which is how a
 live CSS bisect works: edit the file, rerun, screenshot. It also carries a scripted walk into

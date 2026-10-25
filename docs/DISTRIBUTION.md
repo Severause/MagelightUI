@@ -72,24 +72,26 @@ License Agreement:
 - **Ship the whole `license\` folder** unchanged. Ultralight's licence
   (`Ultralight-LICENSE.txt` §4.3) permits distribution to end users only under
   its EULA (`EULA.txt`), and §4.4 requires the notices to accompany the
-  binaries. The GPU backend derives from LGPL code, so `LGPL-2.1.txt` must
-  travel with `MagelightGPU.dll`. `NOTICES.txt` lists what's included, and
+  binaries. `NOTICES.txt` lists what's included, and
   `THIRD_PARTY_LICENSES.txt` carries the texts of the libraries compiled into
-  the DLLs.
-- **Ship Magelight's files as they come.** The four Ultralight DLLs are
-  Ultralight 1.4.0b's, renamed, with the module-name strings inside them
+  the DLLs, among them the zlib text of the Ultralight SDK code in
+  `MagelightGPU.dll` and `Magelight.dll`.
+- **Ship Magelight's files as they come.** The three Ultralight DLLs are
+  Ultralight 2.0.0-beta.2's, renamed, with the module-name strings inside them
   rewritten in place so they import each other under the new names, with the
   written permission of Ultralight, Inc. to Magelight's author. That
   permission is the author's, not yours: never rename or patch Ultralight's
   DLLs yourself, and do not strip the notices.
-- **The LGPL source.** `MagelightGPU.dll` is LGPL-2.1; its corresponding source
-  is the `gpu/` folder of the Magelight UI repository at the release's tag,
-  which `NOTICES.txt` names. Bundle a published release so that tag exists, and
-  keep `NOTICES.txt` with the DLL.
+- **No source to publish.** `MagelightGPU.dll` is an altered version of the
+  SDK's zlib-licensed Direct3D 11 reference driver, and the font loader inside
+  `Magelight.dll` is the SDK's zlib source, unmodified; zlib asks for nothing
+  beyond the notices already in `license\`. `MagelightGPU.dll` also embeds
+  Ultralight's compiled shaders, licensed only for use with Ultralight.
 - Bundling makes you a distributor of Ultralight's runtime: read
   `Ultralight-LICENSE.txt` and `EULA.txt` before you do, and credit Ultralight
   on your mod page the way Magelight does (its copyright line and the §4.4
-  legend "Please see the accompanying NOTICES.txt for full text.").
+  legend "Please see the accompanying NOTICES.md for full text.";
+  Ultralight's `NOTICES.md` is `license\Ultralight-NOTICES.md`).
 - If you would rather not take on Ultralight's redistribution terms yourself,
   **Option A (require, do not bundle)** is the conservative choice for a
   third-party author, because requiring a separately-installed Magelight puts

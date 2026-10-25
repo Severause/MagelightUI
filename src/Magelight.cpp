@@ -12,6 +12,9 @@
 #include "MagelightSysInfo.h"
 #include "HotkeyNames.h"
 #include "TooltipCore.h"
+#include "ImeCore.h"
+#include "MemoryReportCore.h"
+#include "PageStackCore.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -34,6 +37,7 @@
 #include <wrl/client.h>
 
 #include <JavaScriptCore/JavaScript.h>
+#include "JsBridgeCore.h"
 
 #include <nlohmann/json.hpp>
 
@@ -58,7 +62,6 @@
 #include <utility>
 #include <vector>
 
-#include <AppCore/Platform.h>
 #include <Ultralight/ConsoleMessage.h>
 #include <Ultralight/ImageSource.h>
 #include <Ultralight/RenderTarget.h>
@@ -68,6 +71,9 @@
 #include <Ultralight/platform/Platform.h>
 #include <Ultralight/platform/Surface.h>
 #include <Ultralight/platform/GPUDriver.h>
+#include <Platform/fonts/FontLoaderWin.h>   // the SDK's Windows font loader, compiled into this DLL (CMakeLists.txt)
+#include "InputCore.h"
+#include "EditStateCore.h"
 
 #include "../gpu/MagelightGpuApi.h"   // the C ABI description only (MgGpuInfo); never driver internals (invariant 4)
 
@@ -83,9 +89,9 @@ namespace Magelight {
     //   "imageProbe": false   // create the ImageSource probe page (views/probe)
     //   "devMode": false      // hot reload every v4 page folder, JS error overlay (reload/inspector keys unbound for now)
     //   "fontHinting": "normal", "fontGamma": 1.8   // text rasterization: smooth|normal|monochrome|none, gamma 1.0-3.0
-    //   "animationTimerDelay": 0.001   // seconds between requestAnimationFrame ticks; below the frame period = once per frame
-    //   "msaa": 4             // GPU path: anti-aliasing samples for page shapes (1 = off, 2, 4, 8)
-    //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (2..64); 0 = the game's own frame stack
+    //   "msaa": 4             // GPU path: MSAA samples for page targets Ultralight antialiases (1 = off, 2, 4, 8)
+    //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
+    //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
     //            "suppressRuntimeLaser": true, "aimUseTip": true, "aimPitchDeg": -35,
@@ -128,26 +134,24 @@ namespace Magelight {
     // hatch when the accelerated path misrenders on some load order.
     static std::atomic<bool> s_forceCpu{ false };
     static bool s_demoViews = false;
-    // Text rasterization (Magelight.json "fontHinting": "smooth" | "normal" |
-    // "monochrome" | "none", "fontGamma": number). Ultralight draws grayscale
-    // anti-aliased text with a 1.8 gamma; Chromium-hosted UIs had
-    // subpixel text, so the same page reads softer here (field 2026-09-05,
-    // flat 1440p). Exposed so the difference can be A/B'd in one session
-    // instead of a rebuild per guess.
+    // Text rasterization (Magelight.json "fontHinting": "smooth" | "normal" | "monochrome" | "none", "fontGamma":
+    // 1.0-3.0), so text can be compared in one session. Ultralight 2.0's font profile supplies both (gamma 2.2 in its
+    // Default profile): "normal" hinting and an unset fontGamma keep the profile's, anything else pins it.
     static std::string s_fontHinting = "normal";
-    static double      s_fontGamma   = 1.8;
-    // Magelight.json "animationTimerDelay" (seconds): Ultralight's requestAnimationFrame timer. Its 1/60 default
-    // aliases against the per-Present pump (16.7 and 33.3 ms callback intervals alternate at 60 Hz: 40 callbacks a
-    // second, 48 at 144 Hz). Below the frame period rAF follows the frame rate; a few frames then run the callback
-    // twice. CSS animations and transitions step every pumped frame whatever this is.
-    static double      s_animTimerDelay = 0.001;
-    // Magelight.json "msaa": the GPU driver's MSAA samples (1 off, 2, 4, 8). Ultralight fills SVG and other
-    // non-rectangular shapes as plain triangles and leaves their edges to MSAA; boxes, rounded corners and text
-    // smooth themselves. Each sample adds a copy of every render target in video memory: a page's own (2560x1440:
-    // ~15 MB a sample, held while the view exists, hidden or not) and each layer Ultralight composites inside it.
+    static double      s_fontGamma   = 1.8;     // read only when s_fontGammaSet
+    static bool        s_fontGammaSet = false;
+    // Magelight.json "msaa": the GPU driver's MSAA samples (1 off, 2, 4, 8) for the render targets Ultralight asks
+    // to antialias (kGPUTextureFlag_Antialiased). Ultralight 2.0 draws paths analytically (Photon) and asked for
+    // none on the pages measured, so the count is an offer; the memory line says whether any target took it. Each
+    // sample of a target that does adds a copy of it in video memory (2560x1440: ~15 MB a sample).
     static int         s_msaa        = 4;
+    static int         s_msaaInEffect = 1;   // what the driver took (CreateUltralight); 1 = off
     // Magelight.json "ulFiberMB" (1.3.0): the stack the frame work runs on (see UlFiberMain). 0 = the game's own.
     static int         s_ulFiberMb   = 8;
+    // The smallest page stack: on one under about 6 MB, JavaScriptCore's script limits (its default
+    // maxPerThreadStackUsage is 5 MB) fall to the fiber's end, so its error path commits into the 64 KB guarantee
+    // UlFiberMain sets and a page's first uncaught error is 0xC00000FD. tools/fiber-gc-test checks 8 MB.
+    static constexpr int kMinFiberMb = 8;
     // Cursor art: the flat cursor is drawn in code (MagelightCursorArt.h) and follows the page's CSS cursor.
     // "cursorFile" (relative to the runtime dir, or absolute; default none) replaces it with a still image,
     // "cursorHeight" is the drawn height in px at 1080p (scaled with resolution) and "cursorHotspotX/Y"
@@ -280,6 +284,8 @@ namespace Magelight {
     // Staggered view loading (0.31.0, MaterializeViews): "loadStagger" and "loadBudgetMs" in Magelight.json.
     static std::atomic<bool>      s_loadStagger{ true };
     static std::atomic<int>       s_loadBudgetMs{ 8 };
+    // Magelight.json "memoryLogMinutes" (1.5.0): minutes between the periodic memory lines (TickMemoryReport).
+    static std::atomic<int>       s_memLogMinutes{ 10 };
     static std::atomic<bool> s_renderDead{ false };  // latched on any init failure
     static PresentFn         s_origPresent = nullptr;
 
@@ -328,6 +334,12 @@ namespace Magelight {
     // grabs the frame (pages flicker). On for composite "engine", and for "auto" while Smooth Motion is loaded.
     static bool              s_engineMode = false;
     static std::atomic<bool> s_engineComposite{ false };   // the end-of-frame hook is installed and drawing
+    // Behind a swapchain wrapper (a d3d11.dll or dxgi.dll proxy such as ENB's or ReShade's) a draw at Present may
+    // never reach the screen, so while the carrier menu is closed (only click-through views up, which never open
+    // it) the end-of-frame hook draws the UI-pass quads instead. Set once, with the UI-pass composite on a
+    // wrapper, never in engine mode.
+    static std::atomic<bool> s_endOfFrameFallback{ false };
+    static std::atomic<bool> s_carrierOpen{ false };   // a MagelightOverlayMenu exists (its ctor / dtor)
 
     // Render-thread-owned (created lazily inside the hook; never touched
     // elsewhere after that).
@@ -365,20 +377,36 @@ namespace Magelight {
     static std::atomic<int> s_backbufferW{ 0 }, s_backbufferH{ 0 };
 
     // ── IME (0.27.0): native composition for CJK input ──────────────────
-    // The window's IME context is ATTACHED only while a text field in the
-    // UI-mode view has focus (the bridge's '__textfocus' signal) and DETACHED
-    // otherwise, so gameplay keys never raise a composition. The pre-edit is
-    // drawn INLINE in the field (it rides as the field's selection, so the
-    // commit — delivered as ordinary characters — replaces it and a cancel
-    // deletes it), the OS candidate list is placed at the caret the page
-    // reports, and keys the IME consumed (VK_PROCESSKEY) never reach the
-    // page. Text-field focus is detected automatically from the page's own
-    // focus events (focusin / focusout on real inputs), so a page needs no
-    // focus signalling of its own. VR is exempt: the OS IME UI is invisible in a headset
-    // and the runtime keyboard owns text there.
-    static constexpr UINT kImeCtlMsg = WM_APP + 0x4F46;   // wparam: 1 attach, 0 detach, 2 reposition candidates
+    // The window's IME context is ATTACHED only while a field in the UI-mode
+    // view takes typed text (the EditorListener's report, decided in
+    // DrainEditableStates; never a password field) and DETACHED otherwise, so
+    // gameplay keys never raise a composition. The pre-edit is drawn inline
+    // in the field through the view's Editor (DrainInputQueue's edit ops), and
+    // keys the IME consumed (VK_PROCESSKEY) never reach the page. No OS IME
+    // window shows (none draws over the game): every change goes to the page
+    // core on '__ime' (ImeCore.h), which draws the candidate list at the
+    // composition unless the page draws its own. A page needs no code for any
+    // of it. VR is exempt: the VR keyboards own text there.
+    // wparam: 1 attach, 0 detach, 2 reposition the candidates, 3 cancel the IME's copy of a composition the page kept.
+    static constexpr UINT kImeCtlMsg = WM_APP + 0x4F46;
     static std::atomic<bool> s_imeAttached{ false };
     static std::atomic<bool> s_imeComposing{ false };
+    // Between IMN_OPENCANDIDATE and IMN_CLOSECANDIDATE (window thread): the list is read only while it is open, and a
+    // detach closes one still open.
+    static std::atomic<bool> s_imeCandidatesOpen{ false };
+    // Window thread: GetMessageTime when the IME last ended a composition or closed its list (0: never), so an Escape
+    // translated into that end is still the IME's (Ime::EscapeGuard); whether the game window has keyboard focus,
+    // since a composition the IME ends while it has none is kept as typed (WM_IME_ENDCOMPOSITION).
+    static LONG s_imeEndMsgTime = 0;
+    static Ime::EndTracker s_imeEnd;   // window thread: whether the IME's last composition ended with a commit
+    static bool s_imeWindowFocused = true;
+    static Ime::EscapeGuard s_imeEscape;
+    // GetTickCount64 of the IME's last message about its composition or list (window thread), and whether the UI-mode
+    // view's Editor holds a composition (render thread, once a frame: NoteEditorComposition): Ime::ComposingForEscape.
+    static std::atomic<std::uint64_t> s_imeLastMs{ 0 };
+    static std::atomic<bool> s_imeEditorComposing{ false };
+    // Escape diagnostics: lines left this UI-mode session (reset on entry), and in all.
+    static std::atomic<int> s_escLogSession{ 0 }, s_escLogTotal{ 0 };
     static std::atomic<int>  s_imeCaretX{ -1 }, s_imeCaretY{ -1 }, s_imeCaretH{ 0 };   // client px; x<0 = unknown
 
     static std::filesystem::path s_runtimeDir;  // Data/SKSE/Plugins/Magelight
@@ -469,10 +497,13 @@ namespace Magelight {
             }
             if (auto it = j.find("fontHinting"); it != j.end() && it->is_string())
                 s_fontHinting = HotkeyNames::Lower(it->get<std::string>());
-            if (auto it = j.find("fontGamma"); it != j.end() && it->is_number())
+            if (auto it = j.find("fontGamma"); it != j.end() && it->is_number()) {
                 s_fontGamma = std::clamp(it->get<double>(), 1.0, 3.0);
-            if (auto it = j.find("animationTimerDelay"); it != j.end() && it->is_number())
-                s_animTimerDelay = std::clamp(it->get<double>(), 0.0, 1.0);
+                s_fontGammaSet = true;
+            }
+            // Ultralight 2.0 has no requestAnimationFrame timer to set (see the frame-rate line CreateUltralight logs).
+            if (j.contains("animationTimerDelay"))
+                SKSE::log::warn("Magelight: animationTimerDelay is ignored: Ultralight 2.0 has no animation timer");
             // Any JSON number: some editors write 8.0 for 8, and a skipped key would silently keep 4x.
             if (auto it = j.find("msaa"); it != j.end() && it->is_number()) {
                 const double asked = it->get<double>();
@@ -481,9 +512,14 @@ namespace Magelight {
             }
             if (auto it = j.find("ulFiberMB"); it != j.end() && it->is_number()) {
                 const double asked = it->get<double>();
-                s_ulFiberMb = asked <= 0.0 ? 0 : static_cast<int>(std::clamp(asked, 2.0, 64.0));
-                if (asked > 0.0 && asked != s_ulFiberMb)
-                    SKSE::log::warn("Magelight: ulFiberMB {} is outside 2..64 - using {}", asked, s_ulFiberMb);
+                s_ulFiberMb = asked <= 0.0
+                    ? 0 : static_cast<int>(std::clamp(asked, static_cast<double>(kMinFiberMb), 64.0));
+                if (asked > 0.0 && asked < kMinFiberMb)
+                    SKSE::log::warn("Magelight: ulFiberMB {} is below {}, the smallest page stack Magelight runs pages "
+                                    "on (below about 6 MB a page's uncaught error can overflow it) - using {}", asked, kMinFiberMb, s_ulFiberMb);
+                else if (asked > 0.0 && asked != s_ulFiberMb)
+                    SKSE::log::warn("Magelight: ulFiberMB {} is outside {}..64 - using {}", asked, kMinFiberMb,
+                                    s_ulFiberMb);
             }
             if (auto it = j.find("logLevel"); it != j.end() && it->is_string()) {
                 const std::string l = HotkeyNames::Lower(it->get<std::string>());
@@ -560,6 +596,8 @@ namespace Magelight {
                 s_loadStagger.store(it->get<bool>());
             if (auto it = j.find("loadBudgetMs"); it != j.end() && it->is_number())
                 s_loadBudgetMs.store(std::clamp(it->get<int>(), 1, 100));
+            if (auto it = j.find("memoryLogMinutes"); it != j.end() && it->is_number())
+                s_memLogMinutes.store(static_cast<int>(std::clamp(it->get<double>(), 0.0, 1440.0)));
             if (auto it = j.find("cursorFile"); it != j.end() && it->is_string())
                 s_cursorFile = it->get<std::string>();
             if (auto it = j.find("cursorHeight"); it != j.end() && it->is_number())
@@ -575,10 +613,10 @@ namespace Magelight {
             static constexpr const char* kConsoleLogNames[] = { "none", "errors", "warnings", "all" };
             SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
                             "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={}, ulFiberMB={}, "
-                            "exceptionTelemetry={})",
+                            "exceptionTelemetry={}, memoryLogMinutes={})",
                 s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
                 s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa,
-                s_ulFiberMb, s_exceptionTelemetry.load());
+                s_ulFiberMb, s_exceptionTelemetry.load(), s_memLogMinutes.load());
         } catch (...) {
             SKSE::log::warn("Magelight: Magelight.json unreadable — defaults in effect");
         }
@@ -599,6 +637,7 @@ namespace Magelight {
     using MgGpuRegExtFn  = std::uint32_t (*)(void*, ID3D11ShaderResourceView*);
     using MgGpuSetExtFn   = int (*)(void*, std::uint32_t, ID3D11ShaderResourceView*);
     using MgGpuUnregExtFn = void (*)(void*, std::uint32_t);
+    using MgGpuStatsFn    = int (*)(void*, MgGpuStats*);
 
     static MgGpuCreateFn  s_gpuCreate = nullptr;
     static MgGpuDestroyFn s_gpuDestroy = nullptr;
@@ -610,6 +649,7 @@ namespace Magelight {
     static MgGpuRegExtFn   s_gpuRegExt = nullptr;
     static MgGpuSetExtFn   s_gpuSetExtSrv = nullptr;
     static MgGpuUnregExtFn s_gpuUnregExt = nullptr;
+    static MgGpuStatsFn    s_gpuStats = nullptr;
     static void*          s_gpu = nullptr;       // backend handle (render thread)
     static bool           s_gpuActive = false;   // accelerated path in use
 
@@ -656,8 +696,14 @@ namespace Magelight {
     // SeverActions' frontend assumes).
     // C++ -> JS: InteropCall queues {fn, arg} on the view; the render thread
     // drains per frame and calls window.fn(arg) through JavaScriptCore with
-    // the payload as a REAL string argument (no JS-source inlining).
-    struct OutboundCall { std::string fn; std::string arg; bool raw; };
+    // the payload as a REAL string argument when the page has such a function.
+    // Otherwise (every reserved host channel: no page may define a '__' name)
+    // it runs window.magelight._dispatch(fn, arg) as the named script
+    // magelight:dispatch, with both JSON-quoted (MlJsonQuote) into its source.
+    // raw: fn is a script, a mod's (InvokeJS, run unnamed) or the devMode banner (quiet: an exception it throws is not
+    // reported, since that report would queue another banner). The host's own pushes go on reserved channels as
+    // InteropCalls, so they take that _dispatch path.
+    struct OutboundCall { std::string fn; std::string arg; bool raw; bool quiet = false; };
     static std::string MlJsonQuote(const std::string& in);
     static std::string PathToFileUrl(const std::filesystem::path& p);
     struct PendingEval { std::string script; JsResultFnInternal fn; void* user; };
@@ -701,7 +747,10 @@ namespace Magelight {
 
     struct MlView {
         ViewId id = 0;
-        std::string htmlPath;   // relative to the runtime dir; "" = inline banner
+        std::string htmlPath;   // the page's file: relative to the runtime dir, or drive-lettered; "" = inline banner
+        // The file:/// URL the last host navigation loaded, its query and fragment included ("" = the page at htmlPath,
+        // which a navigation also follows): what a wake or a rebuild loads again.
+        std::string pageUrl;
         // The page's own folder (its mod folder under Data\Magelight\<Mod>, or
         // the runtime dir for host pages): one of the roots MlFileSystem
         // serves, and the key its network level is published under for the
@@ -719,14 +768,40 @@ namespace Magelight {
         std::uint64_t hiddenSince = 0;  // GetTickCount64 at the last hide (0 = visible / never hidden)
         bool dormant = false;           // hibernated: no View until shown again
         bool domReady = false;          // main frame reached DOM ready since its last load
+        // The document the View shows reached DOM ready. ReloadView and NavigateView clear domReady at once and leave
+        // this, so domReady can be put back when the document stays: by ApplyPendingLifecycle for a navigation that
+        // begins no load (a fragment one), by OnFailLoading for a host load that fails (hostLoad).
+        bool docDomReady = false;
+        // A host Navigate or Reload may replace the page (pending: from the call until it begins no load, or until a
+        // DOM ready, a failure or a new document's window object), and the view as that page left it. A load that
+        // fails keeps its page, so OnFailLoading puts these back, and domReady with them. A request made while one is
+        // pending keeps the first one's record: its call stops the load before it, with no callback.
+        struct HostLoad {
+            bool pending = false;
+            bool docDomReady = false;
+            bool reloadedFlag = false;
+            std::string htmlPath, pageUrl;
+        };
+        HostLoad hostLoad;
         bool loadNow = false;           // shown before its first load: skips the load queue (MaterializeViews)
         bool loadFailed = false;        // main frame failed to load since its last load (the load queue's settle test)
         bool loadOnShow = false;        // 0.31.0 SetViewLoadOnShow: no first load until the view is shown
-        // 0.31.11 SetViewPrepaint: paint the page once while hidden, kPrepaintSettleMs after its DOM ready (or a
-        // resize), so its first show composites a finished texture instead of painting the whole page that frame.
+        // 0.31.11 SetViewPrepaint: paint the page while hidden, kPrepaintSettleMs after paintableAt, and once more
+        // when it settles (settleRepaint), so its first show composites a finished texture instead of painting the
+        // whole page that frame.
         bool prepaint = false;
-        bool prepainted = false;        // painted since its last load or resize (shown, or prepainted)
-        std::uint64_t paintableAt = 0;  // GetTickCount64 of the last DOM ready / resize (0 = not since the last load)
+        bool prepainted = false;        // painted (shown, or prepainted) since paintableAt
+        // GetTickCount64 of the last DOM ready, resize, or host Navigate or Reload that kept its page (one that began no
+        // load, or whose load failed); 0 = none since the last load or host request.
+        std::uint64_t paintableAt = 0;
+        // OnPageSettled on a hidden prepaint view: TakePrepaintView paints it once more. Ultralight 2.0 decodes a
+        // page's images only once it is painted, so the first prepaint has none and this paint is the one with them.
+        bool settleRepaint = false;
+        // That paint was taken: no more until the next DOM ready or host request that kept its page (as paintableAt;
+        // a resize leaves it). A change of the URL's fragment is a new navigation that settles again with no DOM ready,
+        // so a page whose requestAnimationFrame sets location.hash would otherwise settle again after every such
+        // paint, without end.
+        bool settleRepainted = false;
         bool fullscreen = false;    // w/h track the backbuffer (0,0 at CreateView)
         // Ultralight device scale: CSS px -> view px. The page lays out and
         // rasterizes at this scale (real DPI — sharp), instead of a consumer
@@ -736,8 +811,8 @@ namespace Magelight {
         // "this view's pixels change this frame". The VR submitter uses it to
         // skip a copy + compositor upload the runtime does not need.
         bool repaintedThisFrame = true;
-        bool boundsDirty = false;   // render thread applies Resize
-        bool scaleDirty = false;    // render thread applies set_device_scale (0.28.5)
+        bool boundsDirty = false;   // ApplyPendingResizes visits the view (a new size, or a new scale with scaleDirty)
+        bool scaleDirty = false;    // ApplyPendingResizes applies deviceScale; set only with boundsDirty
         bool rebuildPending = false;   // 0.31.7 RebuildViewAtScale: render thread releases the View (ApplyPendingRebuilds)
         bool rebuilt = false;          // released by a rebuild, not by hibernation (LoadViewLocked's log line)
         float liveScale = 0.0f;        // the device scale the current View has (0 = no View); deviceScale is the wanted one
@@ -759,6 +834,12 @@ namespace Magelight {
         CursorSet cursorMod;            // 0.31.0: its mod's manifest default, used while cursorOwn is empty
         CursorTintSet cursorTint;       // 0.31.1: the drawn cursor's colours over this view (SetViewCursorTint)
         std::optional<HostTheme::KbTheme> kbTheme;   // 0.31.9: the VR keyboard's colours while this view holds UI mode
+        // The page's text focus as the EditorListener last reported it, applied by DrainEditableStates (render
+        // thread) and reset with the page (ForgetEditStateLocked), since a replaced page reports nothing.
+        // Brace-initialised: EditableState's default constructor is a runtime import (a UExport struct with member
+        // initialisers), and CreateView builds an MlView on an inert host too (invariant 3).
+        ultralight::EditableState edit{};
+        bool editNumber = false;        // its focused field is an <input type=number> (DrainEditableStates)
         ThemeLogRate themeLog;          // 0.31.9: this page's hostTheme log lines (OnPageHostTheme)
         bool outboundDropLogged = false;   // the outbound cap's one warning for this view (QueueOutboundLocked)
         bool tooltipText = false;       // 1.2.0: the page was last sent a non-empty title (DrainTooltips)
@@ -827,8 +908,42 @@ namespace Magelight {
     static std::mutex s_tooltipMutex;
     static std::vector<std::pair<ultralight::View*, std::string>> s_tooltipChanges;
     static std::atomic<bool> s_tooltipLeaveAll{ false };   // UI mode ended or moved: every page hides its tooltip
-    static constexpr const char* kTooltipDispatch = "window.magelight&&window.magelight._dispatch('__tooltip',";
     static void QueueOutboundLocked(MlView& v, OutboundCall call);
+
+    // Text focus (EditStateCore.h). The EditorListener records each report here from inside whatever Ultralight call
+    // fires it (a click, a key, Focus / Unfocus, a script, Update, Render, LoadViewLocked's LoadURL under
+    // s_viewsMutex), so s_editMutex is a leaf: never take s_viewsMutex while holding it. The frame applies the
+    // reports once, after the input (DrainEditableStates). View pointers are only compared; a released, reloaded or
+    // destroyed View's waiting reports are dropped (ForgetEditStateLocked), so a recycled address cannot inherit them.
+    struct EditChange {
+        ultralight::View* ul;
+        ultralight::EditableState st{};
+        bool hostFocus;   // fired inside the focus marker's View::Focus / Unfocus (DrainInputQueue)
+    };
+    static std::mutex s_editMutex;
+    static std::vector<EditChange> s_editChanges;   // under s_editMutex; the oldest goes past kEditChangeCap
+    static constexpr std::size_t kEditChangeCap = 64;
+    // Under s_editMutex: which main-frame window object is a new document's, where MlLoadListener drops the replaced
+    // page's state (a page navigating on its own, which no host path sees).
+    static EditState::DocLoads s_docLoads;
+    static bool s_hostFocusCall = false;   // render thread: inside the focus marker's Focus / Unfocus
+    static std::vector<ViewId> s_editResets;   // render thread: the views whose state was reset since the last drain
+    static std::vector<EditState::Click> s_uiClicks;   // render thread: this frame's left presses on the UI-mode view
+
+    // s_viewsMutex held, render thread. The view's page is gone or going (a load, reload, navigation, release or
+    // destroy): no report says so, so its waiting reports and its state are dropped here. released: the View itself
+    // goes, so DocLoads forgets it too (a new View can get its address).
+    static void ForgetEditStateLocked(MlView& v, bool released = false)
+    {
+        if (v.ul) {
+            std::lock_guard<std::mutex> lk(s_editMutex);
+            std::erase_if(s_editChanges, [&](const EditChange& c) { return c.ul == v.ul.get(); });
+            if (released) s_docLoads.Released(v.ul.get());
+        }
+        v.edit = {};
+        v.editNumber = false;
+        if (std::find(s_editResets.begin(), s_editResets.end(), v.id) == s_editResets.end()) s_editResets.push_back(v.id);
+    }
 
     // s_viewsMutex must be held. The pointer left the page (another view, a hide, the end of UI mode): WebCore never
     // sees that, so the page is told; it keeps the title and shows it again when the pointer comes back. Sent whether
@@ -836,11 +951,12 @@ namespace Magelight {
     static void QueueTooltipLeaveLocked(MlView& v)
     {
         if (!v.ul || !v.domReady) return;
-        QueueOutboundLocked(v, { std::string(kTooltipDispatch) + "'{\"l\":1}');", {}, true });
+        QueueOutboundLocked(v, { "__tooltip", "{\"l\":1}", false });
     }
 
     // s_viewsMutex must be held. ShowView's body, for a caller that must change visibility in the same critical
-    // section as something else (ShowOwnKeyboard).
+    // section as something else (ShowOwnKeyboard). It changes only the record (any thread); the Ultralight View
+    // follows on the render thread (SyncViewVisibility).
     static void ShowViewLocked(MlView& v, bool show)
     {
         if (v.visible != show) v.hiddenSince = show ? 0 : GetTickCount64();
@@ -924,15 +1040,7 @@ namespace Magelight {
         return false;
     }
 
-    static std::string JSStringToStd(JSStringRef s)
-    {
-        if (!s) return {};
-        const size_t cap = JSStringGetMaximumUTF8CStringSize(s);
-        std::string out(cap, '\0');
-        const size_t n = JSStringGetUTF8CString(s, out.data(), cap);
-        out.resize(n ? n - 1 : 0);
-        return out;
-    }
+    static std::string JSStringToStd(JSStringRef s) { return JsBridge::ToStd(s); }
 
     static std::string JsonEscape(const std::string& s)
     {
@@ -973,7 +1081,10 @@ namespace Magelight {
     // namespace functions declared in Magelight.h — do NOT redeclare them
     // static here, that gives them internal linkage and breaks every other
     // translation unit that calls them. Only the file-local queue needs a fwd.
-    static void QueueInput(UINT msg, WPARAM w, LPARAM l);
+    // keys: the Input::KeyBits a key message is read with; < 0 = capture them now (CaptureKeyBits(false)).
+    // source: the Input::PointerSource a pointer message comes from.
+    static void QueueInput(UINT msg, WPARAM w, LPARAM l, int keys = -1, std::uint8_t source = Input::kPointerMouse);
+    static std::uint16_t CaptureKeyBits(bool windowProc);
 
     static void EnsureKeyboardView()
     {
@@ -1004,13 +1115,14 @@ namespace Magelight {
         SKSE::log::info("Magelight: own keyboard view {} created ({}x{} at {},{})", id, kKbW, kKbH, x, y);
     }
 
-    // Keyboard theme (0.31.9). Every change the keyboard page should know of queues one message holding the whole
-    // state, {"shown":bool,"theme":<the UI-mode view's theme>|null}, built here from the stored numbers (the page
-    // never sees a page's text) on this host-only channel. It replaces any message of the channel still queued, so
-    // the page always ends on the stored state, and it is exempt from the outbound cap, which would drop the newest.
-    // Queued whether or not the keyboard is up, so the hidden page is already current when it is next shown, and
-    // under s_viewsMutex together with each store and visibility change, so an older state cannot overtake a newer.
-    // "shown" false puts the page back in its blank wait: a show stays blank until its own message lands.
+    // Keyboard state (0.31.9). Every change the keyboard page should know of queues one message holding the whole
+    // state, {"shown":bool,"theme":<the UI-mode view's theme>|null,"field":<its focused field>|null}, built here from
+    // the stored numbers and EditState::FieldJson's fixed literals (the page never sees a page's text) on this
+    // host-only channel. It replaces any message of the channel still queued, so the page always ends on the stored
+    // state, and it is exempt from the outbound cap, which would drop the newest. Queued whether or not the keyboard
+    // is up, so the hidden page is already current when it is next shown, and under s_viewsMutex together with each
+    // store and visibility change, so an older state cannot overtake a newer. "shown" false puts the page back in its
+    // blank wait: a show stays blank until its own message lands.
     static constexpr const char* kKbThemeChannel = "__kbtheme";
     static void QueueKeyboardThemeLocked()
     {
@@ -1018,7 +1130,8 @@ namespace Magelight {
         if (!kb || kb->destroyPending) return;
         const MlView* ui = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
         std::string msg = std::string("{\"shown\":") + (kb->visible ? "true" : "false") + ",\"theme\":" +
-                          ((ui && ui->kbTheme) ? HostTheme::KeyboardJson(*ui->kbTheme) : "null") + "}";
+                          ((ui && ui->kbTheme) ? HostTheme::KeyboardJson(*ui->kbTheme) : "null") + ",\"field\":" +
+                          ((ui && ui != kb) ? EditState::FieldJson(ui->edit, ui->editNumber) : std::string("null")) + "}";
         std::erase_if(kb->outbound, [](const OutboundCall& c) { return !c.raw && c.fn == kKbThemeChannel; });
         kb->outbound.push_back({ kKbThemeChannel, std::move(msg), false });
     }
@@ -1033,14 +1146,28 @@ namespace Magelight {
         // The visibility and the message that says so change together (QueueKeyboardThemeLocked).
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         MlView* kb = FindViewLocked(static_cast<ViewId>(s_kbViewId.load()));
-        if (!kb) return;
+        if (!kb || (!on && !kb->visible)) return;   // already down: the page was told then
         ShowViewLocked(*kb, on);
         QueueKeyboardThemeLocked();
     }
 
-    // A key from that page: {"c":"a"} a character, {"vk":8} a virtual key,
-    // {"close":true} dismiss. Queued exactly like a typed key, so it reaches
-    // the focused page through the ordinary path.
+    // A key the host makes up from a bare virtual key (the VR keyboards, Magelight_DeliverVKey): down, the character
+    // Enter and Tab also type (a form's implicit submit and a textarea's newline come from it), up. Any thread.
+    static void QueueVirtualKey(int vk)
+    {
+        if (vk <= 0 || vk > 0xFF) return;
+        const LPARAM down = Input::SyntheticKeyLParam(static_cast<UINT>(vk), false);
+        QueueInput(WM_KEYDOWN, static_cast<WPARAM>(vk), down);
+        if (vk == VK_RETURN || vk == VK_TAB)
+            QueueInput(WM_CHAR, static_cast<WPARAM>(vk == VK_RETURN ? L'\r' : L'\t'), down);
+        QueueInput(WM_KEYUP, static_cast<WPARAM>(vk), Input::SyntheticKeyLParam(static_cast<UINT>(vk), true));
+    }
+    static void QueueEditCommand(ultralight::EditorCommand cmd);   // after the edit-op queue it uses
+
+    // A key from that page: {"c":"a"} text (up to kOwnKeyboardTextMax UTF-16 units; a key such as '.com' is one
+    // edit), {"vk":8} a virtual key, {"cmd":"undo"} an edit button (EditState::CommandByName; any other name does
+    // nothing), {"close":true} dismiss. Text and keys reach the UI-mode page through the ordinary queue.
+    static constexpr int kOwnKeyboardTextMax = 64;
     static void OnOwnKeyboardKey(const std::string& json)
     {
         try {
@@ -1054,40 +1181,37 @@ namespace Magelight {
                 return;
             }
             if (auto it = j.find("vk"); it != j.end() && it->is_number_integer()) {
-                const int vk = it->get<int>();
-                if (vk <= 0 || vk > 0xFF) return;
-                const LPARAM scan = static_cast<LPARAM>(
-                    MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC) & 0xFF) << 16;
-                QueueInput(WM_KEYDOWN, static_cast<WPARAM>(vk), scan);
-                if (vk == VK_RETURN || vk == VK_TAB)   // these also produce text
-                    QueueInput(WM_CHAR, static_cast<WPARAM>(vk == VK_RETURN ? L'\r' : L'\t'), 0);
-                QueueInput(WM_KEYUP, static_cast<WPARAM>(vk), scan | (1 << 30) | (1 << 31));
+                QueueVirtualKey(it->get<int>());
+                return;
+            }
+            if (auto it = j.find("cmd"); it != j.end() && it->is_string()) {
+                ultralight::EditorCommand cmd{};
+                if (EditState::CommandByName(it->get<std::string>(), cmd)) QueueEditCommand(cmd);
                 return;
             }
             if (auto it = j.find("c"); it != j.end() && it->is_string()) {
                 const std::string c = it->get<std::string>();
-                wchar_t wide[8]{};
-                const int n = MultiByteToWideChar(CP_UTF8, 0, c.c_str(), -1, wide, 7);
-                for (int i = 0; i < n && wide[i]; ++i)
-                    QueueInput(WM_CHAR, static_cast<WPARAM>(wide[i]), 0);
+                wchar_t wide[kOwnKeyboardTextMax]{};
+                const int n = c.empty() ? 0 : MultiByteToWideChar(CP_UTF8, 0, c.data(), static_cast<int>(c.size()),
+                                                                 wide, kOwnKeyboardTextMax);
+                if (n > 0) QueueTypedText(wide, static_cast<std::size_t>(n));
             }
         } catch (...) {
             SKSE::log::warn("Magelight: unreadable key payload from the keyboard page");
         }
     }
 
-    // IME (0.27.0) — bodies live after the window statics they touch.
-    static void ImeOnCaret(ViewId id, const std::string& arg);
+    // IME (0.27.0) — the body lives after the window statics it touches.
     static void ImeOnTextFocus(bool focused);
 
     static void PlayPageSound(ViewId id, const std::string& arg);   // fwd (defined after the dispatcher)
     static void OnPageHostTheme(ViewId id, const std::string& arg); // fwd (defined after the dispatcher)
 
-    // `function` is the page's own __mlNative, which carries its view id as
-    // private data (InstallBridgeShims). The id a page passes is only checked
-    // against it: trusting it would let any page fire another view's
-    // listeners, sounds or keys as that view.
-    static JSValueRef MlNativeDispatch(JSContextRef ctx, JSObjectRef function, JSObjectRef,
+    // userData is the view id the page's own __mlNative was made with
+    // (InstallBridgeShims). The id a page passes is only checked against it:
+    // trusting it would let any page fire another view's listeners, sounds or
+    // keys as that view.
+    static JSValueRef MlNativeDispatch(JSContextRef ctx, void* userData, JSObjectRef, JSObjectRef,
         size_t argc, const JSValueRef argv[], JSValueRef*)
     {
         auto argToStr = [&](size_t i) -> std::string {
@@ -1101,7 +1225,7 @@ namespace Magelight {
         const std::string idStr = argToStr(0);
         const std::string name = argToStr(1);
         const std::string arg = argToStr(2);
-        const ViewId id = static_cast<ViewId>(reinterpret_cast<std::uintptr_t>(JSObjectGetPrivate(function)));
+        const ViewId id = static_cast<ViewId>(reinterpret_cast<std::uintptr_t>(userData));
         if (!id || std::strtoull(idStr.c_str(), nullptr, 10) != id) {
             static std::atomic<int> s_forgedLogged{ 0 };
             if (s_forgedLogged.fetch_add(1) < 32) {
@@ -1121,26 +1245,9 @@ namespace Magelight {
             SetViewPrepaint(id, arg == "1");
             return JSValueMakeUndefined(ctx);
         }
-        // The IME, the caret and the host keyboard serve the page the user is
-        // in: a background page's focus change, blur or caret must not
-        // attach, cancel or move them under it, nor hide the keyboard it raised.
-        const bool fromUiView = IsUIModeActive() && id == static_cast<ViewId>(s_uiModeView.load()) &&
-                                id != static_cast<ViewId>(s_kbViewId.load());
-        if (name == "__imecaret") {   // IME (0.27.0): the page's caret -> candidate placement
-            if (fromUiView) ImeOnCaret(id, arg);
-            return JSValueMakeUndefined(ctx);
-        }
-        if (name == "__textfocus") {
-            const bool focused = (arg == "1");
-            // Only the UI-mode view claims the runtime keyboard (typed keys go to it); a
-            // blur from any view clears only that view's own claim.
-            if (!focused || fromUiView) VR::NoteTextFocus(id, focused);
-            if (fromUiView) {
-                ImeOnTextFocus(focused);   // IME (0.27.0)
-                ShowOwnKeyboard(focused);
-            }
-            return JSValueMakeUndefined(ctx);
-        }
+        // Retired: text focus comes from the EditorListener now. Pages may still send them (a mod's editor shim
+        // reports its iframes on '__textfocus'); they are dropped here so no mod listener gets them.
+        if (name == "__textfocus" || name == "__imecaret") return JSValueMakeUndefined(ctx);
         if (name == "__key") {   // the host's own keyboard page only: the keys go to the UI-mode view
             if (id == static_cast<ViewId>(s_kbViewId.load())) OnOwnKeyboardKey(arg);
             return JSValueMakeUndefined(ctx);
@@ -1170,9 +1277,8 @@ namespace Magelight {
 
     // 0.29.0, JS thread: validate here, play on the game thread.
     // Only a VISIBLE view may play — a hidden or hibernated page that fires a
-    // sound on load must not be heard (the hazard the '__textfocus' gate
-    // closed for the keyboard). 'hover:<name>' is throttled to one per ~60 ms
-    // per view so a mouse sweep over a list cannot spam the engine.
+    // sound on load must not be heard. 'hover:<name>' is throttled to one per
+    // ~60 ms per view so a mouse sweep over a list cannot spam the engine.
     static void PlayPageSound(ViewId id, const std::string& arg)
     {
         std::string name = arg;
@@ -1357,35 +1463,17 @@ namespace Magelight {
     {
         if (!v.ul) return;
         auto ctxScope = v.ul->LockJSContext();
+        if (!ctxScope) return;   // documented as possible (a frame that cannot run script); never seen
         JSContextRef ctx = (*ctxScope);
         JSObjectRef global = JSContextGetGlobalObject(ctx);
 
-        // A callable object of a class, not a plain function: only a class
-        // instance can carry private data, and that is how the dispatcher
-        // knows which page called it.
-        static const JSClassRef s_nativeClass = [] {
-            JSClassDefinition def{};   // zeroed, the same as kJSClassDefinitionEmpty
-            def.className = "MagelightNative";
-            def.callAsFunction = &MlNativeDispatch;
-            return JSClassCreate(&def);
-        }();
+        // A real function (Function.prototype: call/apply/bind) that carries the view id as its user data, which
+        // is how the dispatcher knows which page called it. No finalizer: the id owns nothing, and a finalizer
+        // would run at some later collection with the context group's lock held (JSObjectRef.h).
         JSStringRef dispName = JSStringCreateWithUTF8CString("__mlNative");
-        JSObjectRef fnObj = JSObjectMake(ctx, s_nativeClass,
-            reinterpret_cast<void*>(static_cast<std::uintptr_t>(v.id)));
-        // A class instance inherits Object.prototype: without Function.prototype
-        // the SDK's typed-as-a-function __mlNative has no call/apply/bind.
-        {
-            JSStringRef fnName = JSStringCreateWithUTF8CString("Function");
-            JSStringRef protoName = JSStringCreateWithUTF8CString("prototype");
-            const JSValueRef ctor = JSObjectGetProperty(ctx, global, fnName, nullptr);
-            if (ctor && JSValueIsObject(ctx, ctor)) {
-                const JSValueRef proto = JSObjectGetProperty(ctx, JSValueToObject(ctx, ctor, nullptr), protoName, nullptr);
-                if (proto && JSValueIsObject(ctx, proto)) JSObjectSetPrototype(ctx, fnObj, proto);
-            }
-            JSStringRelease(protoName);
-            JSStringRelease(fnName);
-        }
-        JSObjectSetProperty(ctx, global, dispName, fnObj, kJSPropertyAttributeNone, nullptr);
+        const JSObjectRef fnObj = JSObjectMakeFunctionWithData(ctx, dispName, &MlNativeDispatch,
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(v.id)), nullptr);
+        if (fnObj) JSObjectSetProperty(ctx, global, dispName, fnObj, kJSPropertyAttributeNone, nullptr);
         JSStringRelease(dispName);
 
         // Host marker FIRST — pages detect which host they run on at their
@@ -1418,18 +1506,6 @@ namespace Magelight {
             "return function(){window.magelight.off(ch,fn);};},"
             "off:function(ch,fn){var s=subs[ch];if(!s)return;var i=s.indexOf(fn);if(i>=0)s.splice(i,1);},"
             "_dispatch:dispatch,pending:function(ch){return (buf[ch]||[]).length;}};})();"
-            // Text-field focus -> the reserved '__textfocus' channel. The VR
-            // presenter raises the runtime's virtual keyboard on it (there is
-            // no keyboard in a headset), and it costs a flat host nothing.
-            "(function(){function isText(e){if(!e)return false;if(e.isContentEditable)return true;"
-            "var t=(e.tagName||'').toUpperCase();if(t==='TEXTAREA')return true;if(t!=='INPUT')return false;"
-            "var y=(e.type||'text').toLowerCase();"
-            "return ['text','search','url','tel','email','password','number'].indexOf(y)>=0;}"
-            "window.__mlIsText=isText;"   // shared with the IME block below (one predicate)
-            "function send(f){try{__mlNative('" + idStr0 + "','__textfocus',f?'1':'0');}catch(e){}}"
-            "document.addEventListener('focusin',function(ev){if(isText(ev.target))send(true);},true);"
-            "document.addEventListener('focusout',function(){setTimeout(function(){send(isText(document.activeElement));},0);},true);"
-            "if(isText(document.activeElement))send(true);})();"
             // UI sounds (0.29.0): the markup convention. data-ml-sound="click"
             // plays on click (keyboard activation raises click too), data-ml-sound-hover
             // ="focus" on entering the element. Delegated on document so a manifest-only
@@ -1444,39 +1520,151 @@ namespace Magelight {
             "var n=t.getAttribute('data-ml-sound');if(n)try{__mlNative(id,'__sound',n);}catch(e){}},true);"
             "document.addEventListener('mouseover',function(ev){var t=up(ev.target,'data-ml-sound-hover');if(t===last)return;last=t;if(!t)return;"
             "var n=t.getAttribute('data-ml-sound-hover');if(n)try{__mlNative(id,'__sound','hover:'+n);}catch(e){}},true);"
-            "})();"
-            // IME (0.27.0): caret reporting ('__imecaret', CSS px), the inline pre-edit
-            // (the composition rides as the field's SELECTION so the commit — ordinary
-            // characters — replaces it and a cancel deletes it) and a 'magelight:ime'
-            // window event for pages that want an indicator.
-            "(function(){var id='" + idStr0 + "',ime={el:null,base:null,pre:'',start:0,end:0};"
-            "var isText=window.__mlIsText;"
-            "function caret(){var e=document.activeElement;if(!isText(e))return;var r=e.getBoundingClientRect(),x=r.left,y=r.top,h=r.height;"
-            "try{if(e.isContentEditable){var s=window.getSelection();if(s&&s.rangeCount){var rr=s.getRangeAt(0).getBoundingClientRect();"
-            "if(rr.left||rr.top){x=rr.left;y=rr.top;h=rr.height||h;}}}"
-            "else{var cs=getComputedStyle(e),cv=document.createElement('canvas').getContext('2d');cv.font=cs.font;"
-            "var v=e.value||'',p=e.selectionStart||0,line=v.slice(0,p),nl=line.lastIndexOf('\\n');if(nl>=0)line=line.slice(nl+1);"
-            "var lh=parseFloat(cs.lineHeight);if(!(lh>0))lh=(parseFloat(cs.fontSize)||14)*1.3;h=lh;"
-            "x=r.left+(parseFloat(cs.paddingLeft)||0)+(parseFloat(cs.borderLeftWidth)||0)+cv.measureText(line).width-(e.scrollLeft||0);"
-            "if(e.tagName.toUpperCase()==='TEXTAREA'){var ln=v.slice(0,p).split('\\n').length;y=r.top+(parseFloat(cs.paddingTop)||0)+(ln-1)*lh-(e.scrollTop||0);}"
-            "else{y=r.top+(r.height-lh)/2;}}}catch(err){}"
-            "try{__mlNative(id,'__imecaret',Math.round(x)+','+Math.round(y)+','+Math.round(h));}catch(err){}}"
-            "document.addEventListener('focusin',function(ev){if(isText(ev.target))setTimeout(caret,0);},true);"
-            "document.addEventListener('input',function(){caret();},true);"
-            "document.addEventListener('selectionchange',function(){caret();});"
-            "document.addEventListener('click',function(){setTimeout(caret,0);},true);"
-            "function sel(e,a,b){try{e.setSelectionRange(a,b);}catch(x){}}"
-            "function preeditStanding(e){return ime.el===e&&ime.base!=null&&e.value===ime.base.slice(0,ime.start)+ime.pre+ime.base.slice(ime.end)"
-            "&&e.selectionStart===ime.start&&e.selectionEnd===ime.start+ime.pre.length;}"
-            "function clearPreedit(e){if(preeditStanding(e)){e.value=ime.base.slice(0,ime.start)+ime.base.slice(ime.end);sel(e,ime.start,ime.start);}}"
-            "if(window.magelight){window.magelight.on('__ime',function(a){var m;try{m=JSON.parse(a);}catch(e){return;}"
-            "var e=document.activeElement,t=(e&&e.tagName||'').toUpperCase(),plain=!!e&&(t==='INPUT'||t==='TEXTAREA')&&!e.isContentEditable;"
-            "if(m.state==='start'){ime.pre='';if(plain){ime.el=e;ime.base=e.value;ime.start=e.selectionStart||0;ime.end=e.selectionEnd||ime.start;}else{ime.el=null;ime.base=null;}}"
-            "else if(m.state==='compose'){if(plain&&ime.el===e&&ime.base!=null){ime.pre=m.text||'';e.value=ime.base.slice(0,ime.start)+ime.pre+ime.base.slice(ime.end);sel(e,ime.start,ime.start+ime.pre.length);}caret();}"
-            "else if(m.state==='commit'){if(plain)clearPreedit(e);ime.base=null;ime.pre='';}"
-            "else if(m.state==='end'){if(plain)clearPreedit(e);ime.el=null;ime.base=null;ime.pre='';}"
-            "try{window.dispatchEvent(new CustomEvent('magelight:ime',{detail:m}));}catch(x){}});}"
-            "})();"
+            "})();" +
+            // Middle, back and forward buttons: no autoscroll, auxclick instead of click (InputCore.h).
+            std::string(Input::kPointerGuardScript) +
+            // IME: the page core draws the IME's candidate list the host hands it on '__ime' (ImeCore.h), in a box at
+            // the anchor, the composition character the IME's window would open at, in viewport CSS px (the
+            // composition itself is the field's own: Editor::SetComposition). Every message is first a cancelable
+            // 'magelight:ime' window event carrying it whole; a page that draws its own list cancels it, or sets
+            // data-ml-ime=off on the field, an ancestor, or an iframe on the way to it (<html>: the whole page). The
+            // --ml-ime-bg/-fg/-border/-font/-selected-bg/-selected-fg/-max-width properties style the box; without
+            // --ml-ime-font it takes the focused field's font family and rendered size, and without a colour of its own
+            // the page's --ml-tooltip-* one, else one read from the field (colors).
+            "(function(){if(!window.magelight)return;var box=null,edge=null,selBg='#5c5c60',selFg='#ffffff';"
+            "function off(e){while(e&&e.getAttribute){if(e.getAttribute('data-ml-ime')==='off')return true;e=e.parentNode;}return false;}"
+            // The focused element through same-origin iframes (an editor written into about:blank), and the frames on
+            // the way.
+            "function deep(){var e=document.activeElement||document.documentElement,fr=[];"
+            "for(var i=0;e&&i<16&&(e.tagName||'').toUpperCase()==='IFRAME';i++){var d=null;try{d=e.contentDocument;}catch(x){}"
+            "if(!d||!d.activeElement)break;fr.push(e);e=d.activeElement;}return{e:e,frames:fr};}"
+            "function offFocus(){var f=deep();if(off(f.e))return true;for(var i=0;i<f.frames.length;i++)if(off(f.frames[i]))return true;return false;}"
+            // The CSS zoom an element is drawn at within its document (an iframe's content is drawn 1:1 whatever zoom
+            // its frame is under).
+            "function zoomOf(e){var z=1;for(;e&&e.nodeType===1;e=e.parentNode){var v=parseFloat(e.ownerDocument.defaultView.getComputedStyle(e).zoom);if(v>0)z*=v;}return z;}"
+            // The box's font: --ml-ime-font when the page sets it, else the focused field's family at the size it is
+            // drawn at, carried into the box's own px (its zoom over the box's), line-height 1.4; 14px sans-serif with
+            // no field. Padding and the default max-width are in em, so they follow it.
+            // A custom property the page sets, as seen from the box ('' when unset).
+            "function cv(e,n){var r='';try{r=getComputedStyle(e).getPropertyValue(n);}catch(x){}return r&&r.trim()?r.trim():'';}"
+            // The focused field (through same-origin iframes), or null when focus is on no element of its own.
+            "function field(){var f=deep().e;return f&&f.nodeType===1&&f!==f.ownerDocument.documentElement&&"
+            "(f!==f.ownerDocument.body||f.isContentEditable)?f:null;}"
+            "function font(b){var s=b.style;if(cv(b,'--ml-ime-font')){s.font='var(--ml-ime-font)';return;}"
+            "var f=null,px=14,fam='sans-serif';"
+            "try{f=field();if(f){var cs=f.ownerDocument.defaultView.getComputedStyle(f),p=parseFloat(cs.fontSize);"
+            "if(p>0){px=p*zoomOf(f)/zoomOf(b);if(cs.fontFamily)fam=cs.fontFamily;}}}catch(x){}"
+            "s.font=(Math.round(px*100)/100)+'px/1.4 '+fam;}"
+            // Colours, read once per change: rgba() of a computed colour, the WCAG contrast of two.
+            "function rgba(s){var m=String(s||'').match(/-?[\\d.]+/g);if(!m||m.length<3)return null;return[+m[0],+m[1],+m[2],m.length>3?+m[3]:1];}"
+            "function css(c){return 'rgb('+Math.round(c[0])+','+Math.round(c[1])+','+Math.round(c[2])+')';}"
+            "function mix(a,b,t){return[a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t,1];}"
+            "function lum(c){function f(x){x/=255;return x<=0.03928?x/12.92:Math.pow((x+0.055)/1.055,2.4);}"
+            "return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]);}"
+            "function ratio(a,b){var x=lum(a),y=lum(b);return(Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);}"
+            // The gradients of a computed background-image, top layer first ({k: linear|radial|conic, a: its arguments});
+            // url() images are not colours and are left out.
+            "function grads(s){var out=[],re=/(?:repeating-)?(linear|radial|conic)-gradient\\(/g,m;"
+            "while((m=re.exec(s))){var j=re.lastIndex,d=1;for(;j<s.length&&d>0;j++){if(s[j]==='(')d++;else if(s[j]===')')d--;}"
+            "out.push({k:m[1],a:s.slice(re.lastIndex,j-1)});re.lastIndex=j;}return out;}"
+            // A gradient's colour at the point: along a linear one, the colour at the point's place on its line (t, 0..1
+            // from its start); a radial or conic one, its stops averaged by their alpha.
+            "function gcol(g,er,pr){var st=[],re=/rgba?\\([^)]*\\)([^,]*)/g,m;while((m=re.exec(g.a))){var c=rgba(m[0]),q=/(-?[\\d.]+)%/.exec(m[1]);"
+            "if(c)st.push({c:c,p:q?(+q[1])/100:null});}if(!st.length)return null;"
+            "if(g.k!=='linear'){var w=0,r=[0,0,0,0];for(var i=0;i<st.length;i++){var s=st[i].c;w+=s[3];r[0]+=s[0]*s[3];r[1]+=s[1]*s[3];r[2]+=s[2]*s[3];}"
+            "return w>0?[r[0]/w,r[1]/w,r[2]/w,w/st.length]:null;}"
+            "for(var i=0;i<st.length;i++)if(st[i].p==null)st[i].p=st.length>1?i/(st.length-1):0;"
+            "var head=g.a.slice(0,g.a.indexOf('rgb')),deg=180,tm=/to\\s+(top|bottom|left|right)(?:\\s+(top|bottom|left|right))?/.exec(head);"
+            "if(tm){var A={top:0,right:90,bottom:180,left:270},x=A[tm[1]];if(tm[2]){var y=A[tm[2]];x=(x===0&&y===270)||(x===270&&y===0)?315:(x+y)/2;}deg=x;}"
+            "else{var dm=/(-?[\\d.]+)(deg|turn|rad|grad)/.exec(head);if(dm){var n=+dm[1];deg=dm[2]==='turn'?n*360:dm[2]==='rad'?n*180/Math.PI:dm[2]==='grad'?n*0.9:n;}}"
+            "var th=deg*Math.PI/180,dx=Math.sin(th),dy=-Math.cos(th),L=Math.abs(er.width*dx)+Math.abs(er.height*dy),t=0.5;"
+            "if(L>0)t=0.5+(((pr.left+pr.right)/2-(er.left+er.width/2))*dx+((pr.top+pr.bottom)/2-(er.top+er.height/2))*dy)/L;"
+            "t=Math.max(0,Math.min(1,t));if(t<=st[0].p)return st[0].c;"
+            "for(var i=1;i<st.length;i++){if(t<=st[i].p){var u=(t-st[i-1].p)/Math.max(1e-6,st[i].p-st[i-1].p),A0=st[i-1].c,B0=st[i].c;"
+            "return[A0[0]+(B0[0]-A0[0])*u,A0[1]+(B0[1]-A0[1])*u,A0[2]+(B0[2]-A0[2])*u,A0[3]+(B0[3]-A0[3])*u];}}return st[st.length-1].c;}"
+            // What shows behind the field: the backgrounds painted under its centre (an element's gradient layers, then
+            // its colour), composited front to back until opaque, out of an iframe into its frame's page. A ground still
+            // see-through at the top shows the game behind the overlay, which black stands in for; one with no colour at
+            // all is null. The layers come from elementsFromPoint, which leaves out pointer-events:none elements (a
+            // backdrop layer behind the field, a vignette in front of it), so it runs under a constructed sheet that
+            // makes every element hit-testable, adopted for the call and taken off again (no DOM change for the page to
+            // observe); the box and its edge marker are skipped. Its point is in viewport px, a rect's in its own
+            // zoom's units (zoomOf). Without elementsFromPoint, the field and its ancestors.
+            "function behind(f){var a=[0,0,0,0];"
+            "function over(c){if(!c||!(c[3]>0)||a[3]>=0.995)return;var k=(1-a[3])*Math.min(1,c[3]);a=[a[0]+k*c[0],a[1]+k*c[1],a[2]+k*c[2],a[3]+k];}"
+            "function paint(e,pr){var cs=e.ownerDocument.defaultView.getComputedStyle(e),gs=grads(cs.backgroundImage||'');"
+            "if(gs.length){var er=e.getBoundingClientRect();for(var j=0;j<gs.length;j++)over(gcol(gs[j],er,pr));}over(rgba(cs.backgroundColor));}"
+            "function stack(d,x,y){var w=d.defaultView,old=d.adoptedStyleSheets,s=null;"
+            "try{s=new w.CSSStyleSheet();s.replaceSync('*,*::before,*::after{pointer-events:auto!important}');d.adoptedStyleSheets=old.concat([s]);}catch(x2){s=null;}"
+            "try{return d.elementsFromPoint(x,y);}finally{if(s)d.adoptedStyleSheets=old;}}"
+            "try{if(!f.ownerDocument.elementsFromPoint)throw 0;var d=f.ownerDocument,fz=zoomOf(f),q=f.getBoundingClientRect(),"
+            "x=(q.left+q.right)/2*fz,y=(q.top+q.bottom)/2*fz;"
+            "for(var n=0;d&&n<8&&a[3]<0.995;n++){var els=stack(d,x,y);"
+            "for(var i=0;i<els.length&&a[3]<0.995;i++){var e=els[i];if(e===box||e===edge)continue;var z=zoomOf(e);"
+            "paint(e,{left:x/z,right:x/z,top:y/z,bottom:y/z});}"
+            "var fe=d.defaultView.frameElement;if(!fe)break;var r=fe.getBoundingClientRect(),zz=zoomOf(fe);"
+            "x=(r.left+fe.clientLeft)*zz+x;y=(r.top+fe.clientTop)*zz+y;d=fe.ownerDocument;}}"
+            "catch(x3){a=[0,0,0,0];for(var e=f,pt=f,i=0;e&&i<64&&a[3]<0.995;i++){if(e.nodeType===1)paint(e,pt.getBoundingClientRect());"
+            "var p=e.parentNode;if(p&&p.nodeType===1)e=p;else{var w2=e.ownerDocument.defaultView;e=w2&&w2.frameElement;pt=e;}}}"
+            "return a[3]>0.01?[a[0],a[1],a[2],1]:null;}"
+            // Each colour: the page's --ml-ime-* one, else its --ml-tooltip-* one (bg, fg, border), else the field's
+            // (its text colour, what shows behind it, its border or a mix of the two), else the defaults. Unless the
+            // page set --ml-ime-bg or -fg, text and ground under 3:1 apart fall back to the defaults. The selected row:
+            // --ml-ime-selected-*, else the defaults over the default colours, else the ground mixed toward the text
+            // with the text on it, or the two swapped when that is under 3:1.
+            "function colors(b){var s=b.style,fg=null,bg=null,bd=null;"
+            "try{var f=field();if(f){var cs=f.ownerDocument.defaultView.getComputedStyle(f);fg=rgba(cs.color);bg=behind(f);"
+            "var bw=parseFloat(cs.borderTopWidth),bst=cs.borderTopStyle,bc=rgba(cs.borderTopColor);"
+            "if(bw>0&&bst!=='none'&&bst!=='hidden'&&bc&&bc[3]>0.1)bd=bc;}}catch(x){fg=bg=bd=null;}"
+            "if(!fg||fg[3]<0.5||!bg)fg=bg=bd=null;"
+            "function pick(n,d){if(cv(b,'--ml-ime-'+n))return 'var(--ml-ime-'+n+')';"
+            "if(cv(b,'--ml-tooltip-'+n))return 'var(--ml-tooltip-'+n+')';return d;}"
+            "var own=cv(b,'--ml-ime-bg')||cv(b,'--ml-ime-fg');"
+            "s.background=pick('bg',bg?css(bg):'#1e1e20');s.color=pick('fg',fg?css(fg):'#f0f0f0');"
+            "s.border='1px solid '+pick('border',bd?css(bd):bg?css(mix(bg,fg,0.35)):'#5c5c60');"
+            "var g=getComputedStyle(b),cb=rgba(g.backgroundColor),cf=rgba(g.color),dflt=false;"
+            "if(!own&&(!cb||!cf||ratio(cf,cb)<3)){s.background='#1e1e20';s.color='#f0f0f0';"
+            "if(!cv(b,'--ml-ime-border'))s.border='1px solid #5c5c60';cb=[30,30,32,1];cf=[240,240,240,1];}"
+            "dflt=cb&&cf&&cb[0]===30&&cb[1]===30&&cb[2]===32&&cf[0]===240&&cf[1]===240&&cf[2]===240;"
+            "var sb='#5c5c60',sf='#ffffff';"
+            "if(!dflt&&cb&&cf){var m=mix(cb,cf,0.3);if(ratio(cf,m)>=3){sb=css(m);sf=css(cf);}else{sb=css(cf);sf=css(cb);}}"
+            "selBg=cv(b,'--ml-ime-selected-bg')?'var(--ml-ime-selected-bg)':sb;"
+            "selFg=cv(b,'--ml-ime-selected-fg')?'var(--ml-ime-selected-fg)':sf;}"
+            // The box sits just below the tooltip (2147483646) and the devMode error banner (2147483647). It lives in
+            // <body>, so a page's UI-scale zoom on <body> scales it like the page; page CSS stays out of it and its rows
+            // (all:initial). `edge`, a zero-size marker at the window's bottom-right, measures the window in the units
+            // getBoundingClientRect reports there, whatever zoom applies.
+            "function el(){if(box&&box.parentNode)return box;box=document.createElement('div');box.id='__ml_ime';box.setAttribute('aria-hidden','true');"
+            "edge=document.createElement('div');var es=edge.style;es.all='initial';es.position='fixed';es.right='0';es.bottom='0';"
+            "es.width='0';es.height='0';es.visibility='hidden';es.pointerEvents='none';"
+            "var s=box.style;s.all='initial';s.position='fixed';s.left='0';s.top='0';s.zIndex='2147483645';s.pointerEvents='none';s.display='none';"
+            "s.boxSizing='border-box';s.padding='0.2143em 0';s.borderRadius='0.2143em';s.overflow='hidden';"
+            "s.maxWidth='min(var(--ml-ime-max-width,34em),90vw)';"
+            "s.boxShadow='0 2px 8px rgba(0,0,0,0.45)';var host=document.body||document.documentElement;host.appendChild(box);host.appendChild(edge);return box;}"
+            "function hide(){if(box)box.style.display='none';}"
+            "function row(t,on){var d=document.createElement('div'),s=d.style;s.all='initial';s.display='block';s.font='inherit';s.color='inherit';"
+            "s.padding='0.0714em 0.714em';s.whiteSpace='nowrap';s.overflow='hidden';s.textOverflow='ellipsis';d.textContent=t;"
+            "if(on){s.background=selBg;s.color=selFg;}return d;}"
+            // Below the anchor, else above it, kept in the window. Placement works in getBoundingClientRect's units: `k`
+            // is those units per CSS px of the box's own left/top (measured), the window's size in them is the edge
+            // marker's position, and the anchor's viewport px scale into them by that size over innerWidth/innerHeight.
+            "function draw(m){var c=m.candidates||[],a=m.anchor;if(!c.length||!a){hide();return;}"
+            "var b=el();font(b);colors(b);b.textContent='';for(var i=0;i<c.length;i++)b.appendChild(row((i+1)+'. '+c[i],i===m.selectedIndex));"
+            "b.style.display='block';b.style.left='0';b.style.top='0';var b0=b.getBoundingClientRect();b.style.left='100px';"
+            "var k=(b.getBoundingClientRect().left-b0.left)/100;if(!(k>0))k=1;b.style.left='0';"
+            "var er=edge.getBoundingClientRect(),w=er.left,h=er.top,u=innerWidth>0&&w>0?w/innerWidth:1,v=innerHeight>0&&h>0?h/innerHeight:1;"
+            "var br=b.getBoundingClientRect(),g=4*k,l=a.x*u,y=a.y*v,ah=a.h*v,fe=document.activeElement;"
+            // A single-line field of this page: the field's own top and bottom, so the box keeps clear of its border
+            // (its rect is in units of its own zoom: carried into the box's).
+            "if(fe&&(fe.tagName||'').toUpperCase()==='INPUT'){var fq=fe.getBoundingClientRect(),fz=zoomOf(fe)/zoomOf(b),"
+            "fr={left:fq.left*fz,right:fq.right*fz,top:fq.top*fz,bottom:fq.bottom*fz},cy=y+ah/2;"
+            "if(l>=fr.left-1&&l<=fr.right+1&&cy>=fr.top&&cy<=fr.bottom){y=fr.top;ah=fr.bottom-fr.top;}}"
+            "var t=y+ah+2*k;"
+            "if(l+br.width>w-g)l=w-g-br.width;if(l<g)l=g;if(t+br.height>h-g)t=Math.max(g,y-2*k-br.height);"
+            "b.style.left=Math.round((l-b0.left)/k)+'px';b.style.top=Math.round((t-b0.top)/k)+'px';}"
+            "window.magelight.on('__ime',function(a){var m;try{m=JSON.parse(a);}catch(e){return;}"
+            "var go=true;try{go=window.dispatchEvent(new CustomEvent('magelight:ime',{cancelable:true,detail:m}));}catch(x){}"
+            "if(go&&m.state!=='end'&&!offFocus())draw(m);else hide();});})();"
             // Tooltips (1.2.0): the page draws the title the host hands it on '__tooltip' ({t, c}: the text, the
             // cursor's height in CSS px; {l:1} = the pointer left the page, so nothing shows until it moves here
             // again). 400 ms on a title, below the cursor, kept on screen; a click, a key or the wheel hides it and the
@@ -1525,7 +1713,14 @@ namespace Magelight {
             count = v.listeners.size();
             v.shimsDirty = false;  // this install covers everything registered so far
         }
-        v.ul->EvaluateScript(shims.c_str());
+        // Named, so an error thrown later inside a core function points at magelight:bridge in its stack.
+        std::string ignored;
+        JsBridge::ErrorInfo err;
+        if (!JsBridge::Evaluate(ctx, shims, "magelight:bridge", ignored, err)) {
+            // The page is left without window.magelight or some listener shims: name it rather than let it go blank.
+            SKSE::log::error("Magelight: the bridge script ({}) failed on view {}: {}",
+                full ? "page core" : "listener shims", v.id, JsBridge::LogText(err));
+        }
         if (full) SKSE::log::info("Magelight: bridge installed on view {} ({} JS listeners)", v.id, count);
         else SKSE::log::info("Magelight: {} JS listener shim(s) refreshed on view {}", count, v.id);
     }
@@ -1544,44 +1739,93 @@ namespace Magelight {
         return path.ends_with(".html") || path.ends_with(".htm");
     }
 
+    // A static that is never destroyed. The platform bridges and listeners derive from SDK classes whose destructors
+    // are delay-loaded runtime imports: as plain statics those would run from DLL_PROCESS_DETACH even when
+    // PreloadRuntime never loaded the runtime, and raise 0xC06D007E at process exit (invariant 3). The classes held
+    // here keep no state, so skipping their destructors loses nothing. Declare each one constinit: a dynamically
+    // initialized static would call its SDK base's imported constructor (every SDK base here exports one) from
+    // DllMain and fail the plugin's load. constinit rules out any dynamic initializer, so a class that cannot be
+    // constant-initialized (one with a non-constexpr constructor of its own, as FontLoaderWin has) fails to compile
+    // instead.
+    template <class T>
+    union NeverDestroyed {
+        T value;
+        constexpr NeverDestroyed() : value() {}
+        ~NeverDestroyed() {}
+    };
+
+    // Main-frame loads OnBeginLoading let through (Ultralight thread only). It fires inside the LoadURL or Reload that
+    // starts a load, so ApplyPendingLifecycle reads this around its call: no change = the document stayed (only its
+    // fragment added or changed, or a navigation stopped below), and no DOM ready follows.
+    static std::uint64_t s_mainLoadsBegun = 0;
+
     class MlLoadListener final : public ultralight::LoadListener {
     public:
         // Ultralight fires OnBeginLoading SYNCHRONOUSLY inside LoadURL, which
         // LoadViewLocked calls while holding s_viewsMutex — taking the lock
         // here is a self-deadlock that the SEH guard turned into a dead
-        // overlay (0.16.0 field log). So this takes no lock: it only stops a
-        // main-frame navigation off the page's own schemes. A top-level
+        // overlay (0.16.0 field log). So this takes no lock but the leaf
+        // s_editMutex: it notes the load for the text-focus reset
+        // (OnWindowObjectReady), and stops a main-frame navigation off the
+        // page's own schemes. A top-level
         // navigation is outside the page's CSP, and a remote document would
         // get the bridge and the mod's network reach; Stop() here keeps the
         // request from being sent (a later LoadURL back leaked the requests
         // of the page already loading). The domReady flag is cleared where
-        // loads are REQUESTED (MaterializeViews, ReloadView, NavigateView).
+        // loads are REQUESTED (MaterializeViews, ReloadView, NavigateView), and
+        // put back when a host request kept its page: by ApplyPendingLifecycle
+        // for one that began no load, by OnFailLoading for one whose load failed.
         void OnBeginLoading(ultralight::View* caller, uint64_t, bool is_main_frame,
             const ultralight::String& url) override
         {
             if (!is_main_frame) return;
             const std::string u = url.utf8().data();
-            if (IsLocalPageUrl(u)) return;
+            if (IsLocalPageUrl(u)) {
+                ++s_mainLoadsBegun;
+                std::lock_guard<std::mutex> lk(s_editMutex);
+                s_docLoads.Begun(caller);
+                return;
+            }
             caller->Stop();
             static std::atomic<int> s_logged{ 0 };
             if (s_logged.fetch_add(1) < 32)
                 SKSE::log::warn("Magelight: stopped a page navigating to {} - a view shows its own HTML files only", u);
         }
+        // A main-frame window object. In a View that has had one before, one that comes after a load began is the new
+        // document's, made as it begins and before its scripts and its reports (EditState::DocLoads), and drops the
+        // old page's text focus: a page that replaces its own document (a link, location, reload, a form's submit)
+        // reports no loss of it. A View's first one can come after its page reported (a deferred or end-of-body
+        // script) and drops nothing.
         void OnWindowObjectReady(ultralight::View* caller, uint64_t, bool is_main_frame,
             const ultralight::String& url) override
         {
-            if (!is_main_frame || !IsLocalPageUrl(url.utf8().data())) return;
+            if (!is_main_frame) return;
+            bool newDoc = false;
+            {
+                std::lock_guard<std::mutex> lk(s_editMutex);
+                newDoc = s_docLoads.WindowReady(caller);
+            }
+            const bool local = IsLocalPageUrl(url.utf8().data());
+            if (!newDoc && !local) return;
             MlView* v = nullptr;
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
                 v = FindViewByUlLocked(caller);
+                if (v && newDoc) {
+                    ForgetEditStateLocked(*v);
+                    v->hostLoad.pending = false;   // the page is gone: a failure now is the new document's
+                }
             }
-            if (v) InstallBridgeShims(*v, true);
+            if (v && local) InstallBridgeShims(*v, true);
         }
         void OnDOMReady(ultralight::View* caller, uint64_t, bool is_main_frame,
             const ultralight::String&) override
         {
             if (!is_main_frame) return;
+            {
+                std::lock_guard<std::mutex> lk(s_editMutex);
+                s_docLoads.Ended(caller);
+            }
             ViewId id = 0;
             DomReadyFn cb = nullptr;
             {
@@ -1590,8 +1834,12 @@ namespace Magelight {
                     id = v->id;
                     cb = v->onDomReady;
                     v->domReady = true;   // outbound calls held during the load flow now
+                    v->docDomReady = true;
+                    v->hostLoad.pending = false;
                     v->prepainted = false;
                     v->paintableAt = GetTickCount64();
+                    v->settleRepaint = false;
+                    v->settleRepainted = false;
                 }
             }
             SKSE::log::info("Magelight: DOM ready (view {})", id);
@@ -1609,24 +1857,95 @@ namespace Magelight {
             const ultralight::String& error_domain, int error_code) override
         {
             if (!is_main_frame) return;
+            {
+                std::lock_guard<std::mutex> lk(s_editMutex);
+                s_docLoads.Ended(caller);   // the page that started the load stays
+            }
             ViewId id = 0;
+            bool kept = false, flowing = false;
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
-                if (MlView* v = FindViewByUlLocked(caller)) { id = v->id; v->loadFailed = true; }
+                if (MlView* v = FindViewByUlLocked(caller)) {
+                    id = v->id;
+                    v->loadFailed = true;
+                    // A host load that failed: the page it would have replaced stays and takes calls again. Its text
+                    // focus stays too, unless the View had no window object (ApplyPendingLifecycle).
+                    if (v->hostLoad.pending) {
+                        kept = true;
+                        v->hostLoad.pending = false;
+                        v->docDomReady = v->hostLoad.docDomReady;
+                        v->reloadedFlag = v->hostLoad.reloadedFlag;
+                        v->htmlPath = std::move(v->hostLoad.htmlPath);   // what a wake or a rebuild loads
+                        v->pageUrl = std::move(v->hostLoad.pageUrl);
+                        // A request made since cleared the rest for its own load.
+                        if (v->docDomReady && v->navigateUrl.empty() && !v->reloadPending) {
+                            flowing = true;
+                            v->domReady = true;
+                            v->prepainted = false;   // the request cleared its timing: prepainted again
+                            v->paintableAt = GetTickCount64();
+                            v->settleRepaint = false;
+                            v->settleRepainted = false;
+                        }
+                    }
+                }
             }
             const std::string detail = std::string(url.utf8().data()) + ": " + description.utf8().data() +
                 " (" + error_domain.utf8().data() + ":" + std::to_string(error_code) + ")";
-            SKSE::log::error("Magelight: view {} FAILED to load - {}", id, detail);
+            SKSE::log::error("Magelight: view {} FAILED to load - {}{}", id, detail,
+                !kept ? "" : flowing ? " - it keeps its page, which takes calls again" : " - it keeps its page");
             Emit(HostEvent::ViewLoadFailed, id, error_code, 0, detail.c_str());
         }
+        // Network and layout have gone quiet after a navigation. On 2.0 it fires only once the page has been painted
+        // since that navigation (a view loaded hidden settles after its prepaint, or its first show), and once per
+        // navigation, a change of the URL's fragment included (one made after the last paint waits for the next);
+        // a resize does not reset it (tools/visibility-test section H). The repaint it asks for is latched until the
+        // next DOM ready or kept host request (settleRepainted), and never asked in VR, where TakePrepaintView paints
+        // nothing. It fires inside Renderer::Update, outside s_viewsMutex, but the header promises no call it runs
+        // in, so try_lock (as OnChangeCursor). A settle that finds the lock held (an API call on another thread)
+        // loses its repaint for the load, as the page settles once per navigation, and says so in the log (no view
+        // id: the registry cannot be read without the lock).
+        void OnPageSettled(ultralight::View* caller, const ultralight::String&) override
+        {
+            // Two budgets: the busy line is the only trace of a lost repaint, so the settle lines must not use it up.
+            static std::atomic<int> s_logged{ 0 };
+            static std::atomic<int> s_busyLogged{ 0 };
+            ViewId id = 0;
+            bool repaint = false;
+            const bool vr = VR::IsLive();
+            {
+                std::unique_lock<std::mutex> lk(s_viewsMutex, std::try_to_lock);
+                if (!lk) {
+                    if (s_busyLogged.fetch_add(1) < 64)
+                        SKSE::log::info("Magelight: a page settled while the view registry was busy - no settle "
+                                        "repaint for it this load");
+                    return;
+                }
+                if (MlView* v = FindViewByUlLocked(caller)) {
+                    id = v->id;
+                    repaint = !vr && v->prepaint && v->prepainted && !v->visible && !v->settleRepainted;
+                    v->settleRepaint = repaint;
+                }
+            }
+            if (id && s_logged.fetch_add(1) < 64)
+                SKSE::log::info("Magelight: view {} page settled{}", id,
+                                repaint ? " - its prepaint is painted once more while hidden" : "");
+        }
     };
-    static MlLoadListener s_loadListener;
+    static constinit NeverDestroyed<MlLoadListener> s_loadListener;
 
-    // Render thread, once per frame: deliver queued C++ -> JS calls per view.
+    static std::string CapLogText(const std::string& in, std::size_t maxBytes);   // fwd
+    static void ReportScriptError(ViewId id, const std::string& what, const JsBridge::ErrorInfo& e, bool uncaught);   // fwd
+
+    // Render thread, once per frame: deliver queued C++ -> JS calls per view. Each call holds the page's JS context
+    // lock for itself only, and the EvalJS callback and the error report (an event, which a render-thread mod gets
+    // inline) run after it is released: a mod's callback runs under that lock only when the call's page code reaches
+    // it (a JS listener it calls, or the ConsoleMessage event of a console message it writes, which the console
+    // listener emits inside the call and a render-thread mod gets inline).
     static void DrainBridgeQueues()
     {
-        // Snapshot (view, calls) pairs under the lock; deliver outside it.
-        std::vector<std::pair<ultralight::RefPtr<ultralight::View>, std::vector<OutboundCall>>> work;
+        // Snapshot the calls under the lock; deliver outside it.
+        struct OutWork { ultralight::RefPtr<ultralight::View> ul; ViewId id; std::vector<OutboundCall> calls; };
+        std::vector<OutWork> work;
         struct EvalWork { ultralight::RefPtr<ultralight::View> ul; ViewId id; std::vector<PendingEval> evals; };
         std::vector<EvalWork> evalWork;
         {
@@ -1634,7 +1953,7 @@ namespace Magelight {
             for (auto& v : s_views) {
                 if (!v->ul || !v->domReady) continue;   // held until the page can take them
                 if (!v->outbound.empty()) {
-                    work.emplace_back(v->ul, std::move(v->outbound));
+                    work.push_back(OutWork{ v->ul, v->id, std::move(v->outbound) });
                     v->outbound.clear();
                 }
                 if (!v->evals.empty()) {
@@ -1645,38 +1964,61 @@ namespace Magelight {
         }
         for (auto& ew : evalWork) {
             for (const auto& e : ew.evals) {
-                ultralight::String exc;
-                const ultralight::String result = ew.ul->EvaluateScript(e.script.c_str(), &exc);
-                if (e.fn) e.fn(ew.id, result.utf8().data(), exc.utf8().data(), e.user);
+                std::string result;
+                JsBridge::ErrorInfo err;
+                bool ok = true;
+                {
+                    auto ctxScope = ew.ul->LockJSContext();
+                    if (ctxScope) {
+                        JSContextRef ctx = (*ctxScope);
+                        // A mod's script runs unnamed (see JsBridge::Evaluate): its relative import() resolves.
+                        ok = JsBridge::Evaluate(ctx, e.script, nullptr, result, err);
+                    }
+                }
+                // View::EvaluateScript's strings: result "" and exception "" when the frame cannot run script.
+                if (e.fn) e.fn(ew.id, result.c_str(), ok ? "" : err.text.c_str(), e.user);
+                if (!ok) ReportScriptError(ew.id, "EvalJS", err, false);
             }
         }
-        for (auto& [ul, calls] : work) {
-            auto ctxScope = ul->LockJSContext();
-            JSContextRef ctx = (*ctxScope);
-            JSObjectRef global = JSContextGetGlobalObject(ctx);
-            for (const auto& c : calls) {
-                if (c.raw) {
-                    ul->EvaluateScript(c.fn.c_str());  // fn carries the script
-                    continue;
+        for (auto& w : work) {
+            for (const auto& c : w.calls) {
+                JsBridge::ErrorInfo err;
+                std::string threw;   // what to name in the report; empty = nothing to report
+                {
+                    auto ctxScope = w.ul->LockJSContext();
+                    if (!ctxScope) continue;
+                    JSContextRef ctx = (*ctxScope);
+                    std::string ignored;
+                    if (c.raw) {   // fn is the script: a mod's runs unnamed, as EvalJS's (OutboundCall)
+                        if (!JsBridge::Evaluate(ctx, c.fn, nullptr, ignored, err) && !c.quiet)
+                            threw = "InvokeJS";
+                    } else {
+                        JSObjectRef global = JSContextGetGlobalObject(ctx);
+                        JSStringRef fnName = JSStringCreateWithUTF8CString(c.fn.c_str());
+                        JSValueRef fnVal = JSObjectGetProperty(ctx, global, fnName, nullptr);
+                        JSStringRelease(fnName);
+                        JSObjectRef fnObj = (fnVal && JSValueIsObject(ctx, fnVal))
+                            ? JSValueToObject(ctx, fnVal, nullptr) : nullptr;
+                        if (!fnObj || !JSObjectIsFunction(ctx, fnObj)) {
+                            // No window shim for this channel: hand it to the page core, which buffers until someone
+                            // subscribes (and reports a subscriber that throws to the console itself).
+                            if (!JsBridge::Evaluate(ctx, "window.magelight&&window.magelight._dispatch(" +
+                                    MlJsonQuote(c.fn) + "," + MlJsonQuote(c.arg) + ");", "magelight:dispatch", ignored, err))
+                                threw = "InteropCall('" + CapLogText(c.fn, 128) + "')";
+                        } else {
+                            JSStringRef argStr = JSStringCreateWithUTF8CString(c.arg.c_str());
+                            JSValueRef argVal = JSValueMakeString(ctx, argStr);
+                            JSStringRelease(argStr);
+                            JSValueRef exc = nullptr;
+                            JSObjectCallAsFunction(ctx, fnObj, nullptr, 1, &argVal, &exc);
+                            if (exc) {
+                                err = JsBridge::Describe(ctx, exc);
+                                threw = "InteropCall('" + CapLogText(c.fn, 128) + "')";
+                            }
+                        }
+                    }
                 }
-                JSStringRef fnName = JSStringCreateWithUTF8CString(c.fn.c_str());
-                JSValueRef fnVal = JSObjectGetProperty(ctx, global, fnName, nullptr);
-                JSStringRelease(fnName);
-                JSObjectRef fnObj = (fnVal && JSValueIsObject(ctx, fnVal))
-                    ? JSValueToObject(ctx, fnVal, nullptr) : nullptr;
-                if (!fnObj || !JSObjectIsFunction(ctx, fnObj)) {
-                    // No window shim for this channel: hand it to the page
-                    // core, which buffers until someone subscribes.
-                    ul->EvaluateScript(("window.magelight&&window.magelight._dispatch(" + MlJsonQuote(c.fn) + "," +
-                                        MlJsonQuote(c.arg) + ");").c_str());
-                    continue;
-                }
-                JSStringRef argStr = JSStringCreateWithUTF8CString(c.arg.c_str());
-                JSValueRef argVal = JSValueMakeString(ctx, argStr);
-                JSStringRelease(argStr);
-                JSValueRef exc = nullptr;
-                JSObjectCallAsFunction(ctx, fnObj, nullptr, 1, &argVal, &exc);
-                if (exc) SKSE::log::warn("Magelight: InteropCall('{}') threw in JS", c.fn);
+                if (!threw.empty()) ReportScriptError(w.id, threw, err, true);
             }
         }
     }
@@ -1745,6 +2087,8 @@ namespace Magelight {
         UINT msg;       // WM_*; 0 = control marker (wparam 1 = focus, 0 = unfocus)
         WPARAM wparam;
         LPARAM lparam;
+        std::uint16_t keys = 0;   // a key message's Input::KeyBits, captured when it was queued (Input::MakeKeyEvent)
+        std::uint8_t source = Input::kPointerMouse;   // a pointer message's Input::PointerSource
     };
     static HWND                  s_hwnd = nullptr;
     static WNDPROC               s_origWndProc = nullptr;
@@ -1752,6 +2096,26 @@ namespace Magelight {
     static std::atomic<bool>     s_focused{ false };
     static std::mutex            s_inputMutex;
     static std::vector<InputMsg> s_inputQueue;
+    // Edits that are not keys, queued in order with the keys and run by DrainInputQueue on the UI-mode view's
+    // Editor: the IME's composition (the window thread turns each IME message into an op), text the VR keyboards
+    // typed (QueueTypedText) and the keyboard page's edit buttons. An InputMsg of kEditOpMsg carries its index here.
+    static constexpr UINT kEditOpMsg = WM_APP + 0x4F47;
+    // The window lost OS focus: the keys and buttons the pages saw go down will send no release (DrainInputQueue).
+    static constexpr UINT kKeyReleaseMsg = WM_APP + 0x4F48;
+    struct EditOp {
+        // Compose / Commit / End: the IME. Insert: Editor::InsertText(text). Command: Editor::Execute(cmd).
+        // Notify: no edit, only the page's '__ime' message (a candidate list that opened, changed or closed).
+        enum Kind : std::uint8_t { Compose, Commit, End, Insert, Command, Notify } kind = End;
+        std::wstring text;
+        std::vector<ultralight::CompositionSegment> segs;   // one per clause; the clause being converted is thick
+        std::uint32_t cursor = 0;                           // the caret within `text`, UTF-16 units
+        ultralight::EditorCommand cmd{};
+        bool keep = false;   // End: keep the composition as typed (FinishComposition) instead of cancelling it
+        // An IME op's '__ime' state ("" = none): sent once the op has run, with `ime` and the anchor read then.
+        const char* imeState = "";
+        Ime::Snapshot ime;
+    };
+    static std::vector<EditOp> s_editOps;   // under s_inputMutex
     // The SA-port close hook (Magelight.h): fired on the game thread on
     // every UI-mode exit — the host's own menu-close notification.
     // MULTICAST (0.9.1): every embedding plugin registers its own hook and
@@ -1840,8 +2204,10 @@ namespace Magelight {
                         // physical Escape reaches the engine's MenuControls as
                         // Cancel and closed the UI under a modal that had
                         // asked for the key (review 2026-09-09).
-                        if (!EscapeCapturedByUiView())
+                        if (!EscapeCapturedByUiView()) {
+                            SKSE::log::info("Magelight: Cancel through the focus menu - leaving UI mode");
                             GameTask::Post([]() { SetUIMode(false); });
+                        }
                         return RE::UI_MESSAGE_RESULTS::kHandled;
                     }
                     // Every other menu-mode user event (Backspace, Enter,
@@ -1921,7 +2287,7 @@ namespace Magelight {
     static float                   s_uiPassBackW = 0, s_uiPassBackH = 0;   // the back buffer they were laid out for
     static std::chrono::steady_clock::time_point s_uiPassPublished{};   // a set older than 250 ms is not drawn
     static std::atomic<std::uint64_t> s_compositeFrames{ 0 };          // FrameWork composites, deferred or not
-    static std::atomic<std::uint64_t> s_lastUiPassFrame{ 0 };          // s_compositeFrames at the last PostDisplay
+    static std::atomic<std::uint64_t> s_lastUiPassFrame{ 0 };          // s_compositeFrames at the last UI-pass draw (PostDisplay or the end-of-frame fallback)
     static std::atomic<bool>          s_uiPassSeen{ false };
     static bool                       s_overlayMenuRegistered = false;
 
@@ -1931,21 +2297,22 @@ namespace Magelight {
         qs.clear();
     }
 
-    // Present defers to the UI pass only while the carrier menu is actually drawing: its PostDisplay ran within
-    // the last two composites. Menus hidden (the console's tm, a photo mode, loading screens) fall back to
-    // Present at once, so the views never vanish with them.
+    // Present defers to the UI pass only while the carrier menu is actually drawing: its PostDisplay (or, behind
+    // a wrapper, the end-of-frame fallback) ran within the last two composites. Menus hidden (the console's tm, a
+    // photo mode, loading screens) fall back to Present at once, so the views never vanish with them.
     static bool UiPassActive()
     {
         if (!s_uiPassSeen.load() || s_uiPassBroken.load()) return false;
         return s_compositeFrames.load() - s_lastUiPassFrame.load() <= 2;
     }
 
-    static void UiPassComposite();   // fwd (frame section)
+    static void UiPassComposite(bool endOfFrameFallback = false);   // fwd (frame section)
 
     // The carrier: an invisible menu that exists for its PostDisplay, open only while an interactive view is
     // visible. In the menu stack it reads to the engine as an open menu, so Escape no longer opens the Journal
-    // while it is up: it must never stay open over plain gameplay, and a click-through HUD view draws at
-    // Present instead. It takes no input; user events pass on.
+    // while it is up: it must never stay open over plain gameplay, and a click-through HUD view draws from the
+    // end-of-frame hook instead behind a wrapper (s_endOfFrameFallback), else at Present. It takes no input; user
+    // events pass on.
     class MagelightOverlayMenu final : public RE::IMenu
     {
     public:
@@ -1955,7 +2322,10 @@ namespace Magelight {
         {
             using F = RE::UI_MENU_FLAGS;
             depthPriority = 9;  // over the game's menus (3) and HUD, under the focus menu (10), which stays topmost
-            menuFlags.set(F::kAllowSaving);
+            // kAssignCursorToRenderer, as the HUD has: when a menu closes, the engine keeps or hides the cursor by the
+            // topmost menu without it, and this menu (no kUsesCursor) would hide the cursor of the Journal or the
+            // Inventory under it.
+            menuFlags.set(F::kAllowSaving, F::kAssignCursorToRenderer);
             // Out of the capture the world freeze shows as its background, or a translucent page would show
             // its own stale copy under itself. Only while the freeze is enabled: "freezeWorld": false gives
             // back 0.30.6's carrier flags.
@@ -1964,7 +2334,10 @@ namespace Magelight {
             if (auto* sm = RE::BSScaleformManager::GetSingleton()) {
                 sm->LoadMovie(this, uiMovie, "magelightfocus");
             }
+            s_carrierOpen.store(true);
         }
+
+        ~MagelightOverlayMenu() override { s_carrierOpen.store(false); }
 
         static RE::IMenu* Create() { return new MagelightOverlayMenu(); }
 
@@ -2001,22 +2374,30 @@ namespace Magelight {
     static void EngineEndThunk(std::uint32_t a)
     {
         s_engineEndNext(a);
-        if (s_engineComposite.load()) UiPassComposite();
+        if (s_engineComposite.load()) {
+            UiPassComposite();
+        } else if (s_endOfFrameFallback.load() && !s_carrierOpen.load() && GetCurrentThreadId() == s_ulThreadId &&
+                   s_lastUiPassFrame.load() != s_compositeFrames.load()) {
+            // Only the thread FrameWork composites on (loading screens and the main menu present from another),
+            // and only once a frame: Present bumps s_compositeFrames after this call.
+            UiPassComposite(true);
+        }
     }
 
-    // Flat only. Refused unless the bytes at the site are a call, so a game version that moved it keeps the other paths.
+    // Flat only. Refused unless the bytes at the site are a call, so a game version that moved it keeps the other
+    // paths. Installed at most once; the caller sets which composite it serves.
     static bool InstallEngineEndHook()
     {
         if (REL::Module::IsVR()) return false;
+        if (s_engineEndNext) return true;
         const std::uintptr_t site = REL::RelocationID(75461, 77246).address() + 0x9;
         if (*reinterpret_cast<const std::uint8_t*>(site) != 0xE8) {
-            SKSE::log::warn("Magelight: the engine's end-of-frame call was not found - engine mode is off");
+            SKSE::log::warn("Magelight: the engine's end-of-frame call was not found");
             return false;
         }
         SKSE::AllocTrampoline(32);
         s_engineEndNext = reinterpret_cast<EngineEndFn>(
             SKSE::GetTrampoline().write_call<5>(site, reinterpret_cast<std::uintptr_t>(&EngineEndThunk)));
-        s_engineComposite.store(true);
         return true;
     }
 
@@ -2038,32 +2419,46 @@ namespace Magelight {
                 MagelightOverlayMenu::MENU_NAME,
                 s_compositeMode == "auto" && chain == SwapChainKind::kWrapper && !s_engineMode
                     ? " - the game swapchain is a wrapper, not dxgi's own" : "");
+            if (chain == SwapChainKind::kWrapper && !s_engineMode && InstallEngineEndHook()) {
+                s_endOfFrameFallback.store(true);
+                SKSE::log::info("Magelight: while the carrier menu is closed (only click-through views up), the views "
+                                "draw from the engine's end-of-frame call, not at Present");
+            }
         }
     }
 
-    // Opens the carrier while a view is visible and closes it a second after the last one hides. Called from
-    // FrameWork on the main thread. A show the engine drops (a load closes every menu) is re-queued after two
-    // seconds; a hide waits so a view flickering between pages does not open and close the menu every frame.
+    // Opens the carrier while a view is visible and closes it a second after the last one hides. Main thread only
+    // (the statics are not atomic): FrameWork, and the UI-mode entry task, which runs there on flat; the overlay is
+    // never registered on VR, where SKSE drains tasks on job threads. A show the engine drops (a load closes every
+    // menu) is re-queued after two seconds; a hide waits so a view flickering between pages does not open and close
+    // the menu every frame. A hide still in the queue counts as closed, so an entry right after it shows the menu
+    // again before the focus menu opens; a hide that never lands is retried after two seconds.
     static void SyncOverlayMenu(bool wanted)
     {
         if (!s_overlayMenuRegistered) return;
+        if (wanted && s_renderDead.load()) return;   // FrameWork stops at render death: nothing would close it again
         auto* ui = RE::UI::GetSingleton();
         auto* q = RE::UIMessageQueue::GetSingleton();
         if (!ui || !q) return;
         using Clock = std::chrono::steady_clock;
         static Clock::time_point s_nextShow{}, s_nextHide{}, s_lastWanted{};
+        static bool s_hideQueued = false;
         const auto now = Clock::now();
-        const bool open = ui->IsMenuOpen(MagelightOverlayMenu::MENU_NAME);
+        const bool openNow = ui->IsMenuOpen(MagelightOverlayMenu::MENU_NAME);
+        if (!openNow || (s_hideQueued && now >= s_nextHide)) s_hideQueued = false;
+        const bool open = openNow && !s_hideQueued;
         if (wanted) {
             s_lastWanted = now;
             s_nextHide = Clock::time_point{};
             if (!open && now >= s_nextShow) {
                 s_nextShow = now + std::chrono::seconds(2);
+                s_hideQueued = false;
                 q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kShow, nullptr);
             }
         } else if (open && now - s_lastWanted >= std::chrono::seconds(1) && now >= s_nextHide) {
             s_nextHide = now + std::chrono::seconds(2);
             s_nextShow = Clock::time_point{};
+            s_hideQueued = true;
             q->AddMessage(MagelightOverlayMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
         }
     }
@@ -2101,10 +2496,49 @@ namespace Magelight {
         }
     }
 
-    static void QueueInput(UINT msg, WPARAM w, LPARAM l)
+    static void QueueInput(UINT msg, WPARAM w, LPARAM l, int keys, std::uint8_t source)
+    {
+        const bool keyMsg = msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP ||
+                            msg == WM_CHAR;
+        const std::uint16_t bits = !keyMsg ? 0 : keys >= 0 ? static_cast<std::uint16_t>(keys) : CaptureKeyBits(false);
+        std::lock_guard<std::mutex> lk(s_inputMutex);
+        if (s_inputQueue.size() < 512) s_inputQueue.push_back({ msg, w, l, bits, source });
+    }
+
+    // Any thread. Shares the queue's 512 messages a frame; at most 64 ops a frame, the rest are dropped.
+    static void QueueEditOp(EditOp op)
     {
         std::lock_guard<std::mutex> lk(s_inputMutex);
-        if (s_inputQueue.size() < 512) s_inputQueue.push_back({ msg, w, l });
+        if (s_inputQueue.size() >= 512 || s_editOps.size() >= 64) return;
+        s_inputQueue.push_back({ kEditOpMsg, static_cast<WPARAM>(s_editOps.size()), 0 });
+        s_editOps.push_back(std::move(op));
+    }
+
+    static void QueueEditCommand(ultralight::EditorCommand cmd)
+    {
+        EditOp op;
+        op.kind = EditOp::Command;
+        op.cmd = cmd;
+        QueueEditOp(std::move(op));
+    }
+
+    // Public bridge (Magelight.h): text from a VR keyboard, for the UI-mode page. Each run of printable characters
+    // is one Editor::InsertText (an edit as typing makes it: beforeinput and input, one undo step with the typing
+    // around it); Backspace, Enter and Tab are key events (QueueVirtualKey), because pages act on their keydown
+    // (EditState::SplitTyped). Any thread.
+    void QueueTypedText(const wchar_t* s, std::size_t n)
+    {
+        if (!s || !n) return;
+        for (auto& piece : EditState::SplitTyped(s, n)) {
+            if (piece.vk) {
+                QueueVirtualKey(static_cast<int>(piece.vk));
+                continue;
+            }
+            EditOp op;
+            op.kind = EditOp::Insert;
+            op.text = std::move(piece.text);
+            QueueEditOp(std::move(op));
+        }
     }
 
     // ── Polled keys (0.31.10) ───────────────────────────────────────────
@@ -2137,10 +2571,7 @@ namespace Magelight {
         std::wstring path(buf, n);
         std::wstring lower(path);
         std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
-        // By folder name, not s_runtimeDir: under MO2 a module's file name is its real path in the mod's folder,
-        // while s_runtimeDir is the virtual Data path.
-        const bool ours = lower.find(L"\\skse\\plugins\\magelight\\") != std::wstring::npos;
-        const bool foreign = n > 0 && !ours && lower.find(L"\\skse\\plugins\\") != std::wstring::npos;
+        const bool foreign = n > 0 && Input::IsForeignPluginPath(lower);
         bool first = false;
         {
             std::lock_guard<std::mutex> lk(s_mutex);
@@ -2177,6 +2608,21 @@ namespace Magelight {
     static SHORT MlGetKeyState(int vk)
     {
         return s_getKeyStateNext ? s_getKeyStateNext(vk) : GetKeyState(vk);
+    }
+
+    // The modifiers and locks a key message is read with (Input::KeyBits). windowProc: the message the window proc
+    // is handling, whose state the thread's GetKeyState holds; otherwise the keyboard's live state (the VR sink,
+    // a key the host makes up). The lock toggles come from GetKeyState either way, as QueueScancodeAsText's text does.
+    static std::uint16_t CaptureKeyBits(bool windowProc)
+    {
+        std::uint16_t bits = 0;
+        for (int i = 0; i < 8; ++i) {
+            const int vk = Input::kModifierVk[i];
+            if ((windowProc ? MlGetKeyState(vk) : MlGetAsyncKeyState(vk)) & 0x8000) bits |= static_cast<std::uint16_t>(1u << i);
+        }
+        if (MlGetKeyState(VK_CAPITAL) & 1) bits |= Input::kKbCaps;
+        if (MlGetKeyState(VK_NUMLOCK) & 1) bits |= Input::kKbNumLock;
+        return bits;
     }
 
     static SHORT WINAPI HookGetAsyncKeyState(int vk)
@@ -2236,59 +2682,27 @@ namespace Magelight {
     }
 
     // ── Typing on VR: the engine's keyboard device, not the window ──────
-    // In a headset the game window almost never holds OS focus, so it receives
-    // NO keyboard messages at all — field-verified 2026-09-03: with a page
-    // focused and both a physical keyboard and the runtime's virtual keyboard
-    // in use, not one WM_CHAR, WM_KEYDOWN or private message arrived. The flat
-    // host types through the window proc; on VR that path is simply dead.
-    //
-    // The SKSE input sink DOES see the engine's keyboard device (that is how
-    // Escape and the hotkeys work in VR), so translate its DirectInput
-    // scancode into exactly the WM_* the window would have produced and queue
-    // it. DrainInputQueue is unchanged. This also picks up any keyboard the
-    // RUNTIME synthesises at the driver level (OpenComposite's virtual
-    // keyboard sends scancodes alongside its own delivery paths).
-    //
-    // Modifier state comes from GetAsyncKeyState, which is global and does not
-    // need window focus. Called from the input sink (game thread).
-    //
-    // DirectInput puts an E0-prefixed key at its make code + 0x80 (DIK_UP 0xC8
-    // is E0 48), which MapVirtualKeyW does not know: it gets the E0 form and the
-    // message gets lParam bit 24, as the window's would. Pause (DIK 0xC5) is
-    // E1 1D 45, not E0 45 (NumLock or nothing to MapVirtualKeyW), so it is
-    // mapped by hand. The window delivers the side-neutral VK_SHIFT, VK_CONTROL
-    // and VK_MENU, and VK_NUMPAD0-9 / VK_DECIMAL for the keypad with NumLock on;
-    // MapVirtualKeyW gives the side-specific codes and the navigation keys, so
-    // both are folded here.
+    // In a headset the game window almost never holds OS focus, so it receives no keyboard messages at all (not one
+    // WM_CHAR, WM_KEYDOWN or private message with a physical keyboard and the runtime's virtual keyboard both in use).
+    // The SKSE input sink does see the engine's keyboard device (that is how Escape and the hotkeys work in VR), so
+    // its DirectInput scancode is queued as the messages the window would have had (Input::FromScancode), with the
+    // modifier state from GetAsyncKeyState, which needs no window focus. This also picks up a keyboard the runtime
+    // synthesises at the driver level (OpenComposite's virtual keyboard sends scancodes beside its own paths).
+    // Game thread (the input sink).
     enum class KeyPhase { Down, Repeat, Up };
     static void QueueScancodeAsText(std::uint32_t scan, KeyPhase phase)
     {
-        if (scan == 0 || scan > 0xFF) return;
-        constexpr std::uint32_t kDikPause = 0xC5;
-        const bool extended = scan >= 0x80 && scan != kDikPause;
-        const std::uint32_t make = scan & 0x7F;
-        UINT vk = scan == kDikPause ? VK_PAUSE
-                : MapVirtualKeyW(extended ? (0xE000u | make) : scan, MAPVK_VSC_TO_VK_EX);
-        if (!vk) return;
-        switch (vk) {
-        case VK_LSHIFT:   case VK_RSHIFT:   vk = VK_SHIFT;   break;
-        case VK_LCONTROL: case VK_RCONTROL: vk = VK_CONTROL; break;
-        case VK_LMENU:    case VK_RMENU:    vk = VK_MENU;    break;
-        default: break;
-        }
-        if (!extended && make >= 0x47 && make <= 0x53 && (MlGetKeyState(VK_NUMLOCK) & 1)) {
-            // Keypad 7 8 9 - 4 5 6 + 1 2 3 0 . ; minus and plus keep their own codes.
-            static constexpr UINT kPad[13] = { VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, 0, VK_NUMPAD4, VK_NUMPAD5,
-                VK_NUMPAD6, 0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD0, VK_DECIMAL };
-            if (const UINT pad = kPad[make - 0x47]) vk = pad;
-        }
-        const LPARAM base = (static_cast<LPARAM>(make) << 16) | (extended ? (static_cast<LPARAM>(1) << 24) : 0);
+        const Input::ScancodeKey key = Input::FromScancode(scan, (MlGetKeyState(VK_NUMLOCK) & 1) != 0);
+        if (!key.vk) return;
+        const UINT vk = key.vk;
         if (phase == KeyPhase::Up) {
-            QueueInput(WM_KEYUP, vk, base | (1 << 30) | (1 << 31));
+            QueueInput(WM_KEYUP, vk, key.lparam | 1 | (1 << 30) | (1 << 31));
             return;
         }
-        // Repeat count 1 in both; a repeat sets bit 30 (the key was already down).
-        QueueInput(WM_KEYDOWN, vk, base | 1 | (phase == KeyPhase::Repeat ? (1 << 30) : 0));
+        // Repeat count 1 in both; a repeat sets bit 30 (the key was already down). The text keeps the key's lParam,
+        // as the window's WM_CHAR does, so its keypress carries the key's code.
+        const LPARAM down = key.lparam | 1 | (phase == KeyPhase::Repeat ? (1 << 30) : 0);
+        QueueInput(WM_KEYDOWN, vk, down);
         // Printable? Ask the active layout, with the live modifier state.
         BYTE ks[256]{};
         if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
@@ -2296,11 +2710,11 @@ namespace Magelight {
         if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
         if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
         wchar_t buf[8]{};
-        const int n = ToUnicode(vk, make, ks, buf, 7, 0);
+        const int n = ToUnicode(vk, key.make, ks, buf, 7, 0);
         for (int i = 0; i < n && i < 7; ++i) {
             const wchar_t ch = buf[i];
             if (ch >= 0x20 || ch == L'\t' || ch == L'\r')
-                QueueInput(WM_CHAR, static_cast<WPARAM>(ch), 0);
+                QueueInput(WM_CHAR, static_cast<WPARAM>(ch), down);
         }
         static std::atomic<int> s_typeLog{ 0 };
         if (phase == KeyPhase::Down && s_typeLog.fetch_add(1) < 12)
@@ -2335,11 +2749,12 @@ namespace Magelight {
         return true;
     }
 
-    // Public bridge (declared in Magelight.h with stdint types): the VR laser
-    // injects WM_MOUSEMOVE / WM_LBUTTON* through the same queue.
-    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam)
+    // Public bridge (declared in Magelight.h with stdint types): the VR laser's pointer messages, each tagged with
+    // its hand (DrainInputQueue routes every hand on its own). Keys and text go through QueueTypedText.
+    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam, int hand)
     {
-        QueueInput(static_cast<UINT>(msg), static_cast<WPARAM>(wparam), static_cast<LPARAM>(lparam));
+        const std::uint8_t source = hand == 1 ? Input::kPointerHand1 : Input::kPointerHand0;
+        QueueInput(static_cast<UINT>(msg), static_cast<WPARAM>(wparam), static_cast<LPARAM>(lparam), -1, source);
     }
 
     // Game thread only (a posted task). Idempotent. Step-logged (0.3.2 diagnostics:
@@ -2351,6 +2766,9 @@ namespace Magelight {
     // The cursor movie HideVanillaCursor last hid while UI mode is on, compared, never read: the watchdog warns when
     // that same movie draws again, while a rebuilt Cursor Menu (a new movie, shown) is only hidden again.
     static std::atomic<const void*> s_hiddenCursorMovie{ nullptr };
+    // When UI mode last ended (GetTickCount64): MenuSink logs the Cursor Menu, the focus menu and the overlay for
+    // three seconds after.
+    static std::atomic<std::uint64_t> s_uiModeExitedMs{ 0 };
     // Frames left in which FrameWork hides the cursor sprite again after the Cursor Menu reopened (MenuSink).
     static std::atomic<int> s_cursorRehideFrames{ 0 };
 
@@ -2428,7 +2846,7 @@ namespace Magelight {
             { F::kUsesCursor, "usesCursor" },      { F::kModal, "modal" },
             { F::kTopmostRenderedMenu, "topmostRendered" }, { F::kCustomRendering, "customRendering" },
             { F::kRendersOffscreenTargets, "offscreenTargets" }, { F::kApplicationMenu, "application" },
-            { F::kDontHideCursorWhenTopmost, "keepsCursor" },
+            { F::kDontHideCursorWhenTopmost, "keepsCursor" }, { F::kAssignCursorToRenderer, "cursorToRenderer" },
             { F::kSkipRenderDuringFreezeFrameScreenshot, "skipsFreezeCapture" },
         };
         std::string names;
@@ -2541,7 +2959,9 @@ namespace Magelight {
         if (s_engineComposite.load()) {
             line = "Magelight: the views draw after every menu (engine composite)";
         } else if (!UiPassActive() || !past) {
-            line = "Magelight: the views draw after every menu (at Present, not in the UI pass)";
+            line = s_endOfFrameFallback.load() && UiPassActive()
+                       ? "Magelight: the views draw after every menu (the engine's end of frame, not in the UI pass)"
+                       : "Magelight: the views draw after every menu (at Present, not in the UI pass)";
         } else {
             line = "Magelight: menus drawn over the pages: " + (over.empty() ? std::string("none") : over);
         }
@@ -2655,17 +3075,25 @@ namespace Magelight {
     }
 
     // The control set UI mode suspends (true) or gives back (false). storeState=false: a transient toggle
-    // that can never bake into a save; Console stays reachable as an escape hatch.
+    // that can never bake into a save; Console stays reachable as an escape hatch. Fighting is suspended only
+    // without the focus menu: the engine sheathes drawn weapons and puts readied spells away the moment
+    // fighting goes off, and the focus menu's menu context already keeps attack and block from the game. The
+    // give-back restores exactly the set the suspend took (s_suspendedControls).
+    static std::atomic<std::underlying_type_t<RE::ControlMap::UEFlag>> s_suspendedControls{ 0 };
     static void SetGameControlsSuspended(RE::ControlMap* cm, bool suspend)
     {
         using UEFlag = RE::ControlMap::UEFlag;
         // Scoped enum without a free operator| — combine the bits directly.
-        const auto flags = static_cast<UEFlag>(
-            std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
-            std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
-            std::to_underlying(UEFlag::kFighting) | std::to_underlying(UEFlag::kPOVSwitch) |
-            std::to_underlying(UEFlag::kWheelZoom));
-        cm->ToggleControls(flags, !suspend, false);
+        auto bits = std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
+                    std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
+                    std::to_underlying(UEFlag::kPOVSwitch) | std::to_underlying(UEFlag::kWheelZoom);
+        if (suspend) {
+            if (!s_focusMenuRegistered) bits |= std::to_underlying(UEFlag::kFighting);
+            s_suspendedControls.store(bits);
+        } else if (const auto taken = s_suspendedControls.exchange(0)) {
+            bits = taken;
+        }
+        cm->ToggleControls(static_cast<UEFlag>(bits), !suspend, false);
     }
 
     // VR: UI mode closes on a controller button's PRESS (a chord, the B/Y Cancel), and the game acts on that
@@ -2732,6 +3160,7 @@ namespace Magelight {
         SKSE::log::info("Magelight: SetUIMode({}{}) begin - {}", on, (on && pauseGame) ? ", paused" : "",
                         s_uiModeLabel);
         s_focused.store(on);
+        if (on) s_escLogSession.store(20);
         s_focusMenuHideSeen.store(false);   // a hide from an earlier session is no news about this one
         if (on) s_uiModeEnteredMs.store(GetTickCount64());
         if (!on && s_hwnd) { s_imeCaretX.store(-1); PostMessageW(s_hwnd, kImeCtlMsg, 0, 0); }   // IME follows UI mode off
@@ -2758,8 +3187,12 @@ namespace Magelight {
         const bool holdCancelled = on && s_heldGen.exchange(0) != 0;
 
         if (auto* queue = RE::UIMessageQueue::GetSingleton()) {
-            queue->AddMessage(RE::CursorMenu::MENU_NAME,
-                on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
+            // The focus menu is kUsesCursor, so the engine opens and closes the Cursor Menu with it. A show or hide of
+            // our own beside it makes the engine rebuild the menu within a millisecond, which cursor mods that keep
+            // state on it can crash on. Without the focus menu (its movie missing) nothing else opens the cursor.
+            if (!s_focusMenuRegistered)
+                queue->AddMessage(RE::CursorMenu::MENU_NAME,
+                    on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
             // Our engine menu rides the same queue; pause is decided per open
             // (the flag is read by the menu's constructor on show).
             if (s_focusMenuRegistered) {
@@ -2769,6 +3202,9 @@ namespace Magelight {
                 } else {
                     ApplyFreezeWorld("UI mode exit");   // s_focused is already off: drops the flag before the hide
                 }
+                // The overlay opens first: a menu without kUsesCursor that opens while the Cursor Menu is up or about
+                // to open makes the engine hide it, and its close then opens a new one for the focus menu.
+                if (on) SyncOverlayMenu(true);
                 // A held menu closes first, so the show builds a new one with this entry's pause flag.
                 if (holdCancelled)
                     queue->AddMessage(MagelightFocusMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
@@ -2777,8 +3213,9 @@ namespace Magelight {
                         on ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
             }
         }
-        SKSE::log::info("Magelight: cursor-menu {} queued{}", on ? "show" : "hide",
-            s_focusMenuRegistered ? " (+ engine menu)" : "");
+        SKSE::log::info("Magelight: {} {} queued", s_focusMenuRegistered ? "focus menu" : "cursor-menu",
+                        on ? "show" : "hide");
+        if (!on) s_uiModeExitedMs.store(GetTickCount64());
         // We draw our own cursor topmost; the show message above processes async, so FrameWork re-asserts this.
         HideVanillaCursor(on);
         if (!on) s_mouseDown.store(false);
@@ -2842,8 +3279,7 @@ namespace Magelight {
         }
         if (!on) s_tooltipLeaveAll.store(true);   // the pointer goes with UI mode
         Emit(on ? HostEvent::UIModeEntered : HostEvent::UIModeExited, uiView);
-        InvokeJS(uiView, on ? "window.magelight&&window.magelight._dispatch('__uimode','1');"
-                            : "window.magelight&&window.magelight._dispatch('__uimode','0');");
+        InteropCall(uiView, "__uimode", on ? "1" : "0");
     }
 
     // SEH wrapper — no locals with destructors allowed in here.
@@ -2903,24 +3339,107 @@ namespace Magelight {
         return out;
     }
 
-    static std::wstring ImeGetString(HIMC hImc, DWORD what)
+    // The window's input context for one scope (ImmGetContext / ImmReleaseContext); h is null when it has none.
+    // Window thread; never inside an SEH wrapper (it has a destructor).
+    struct ImcScope {
+        HIMC h = s_hwnd ? ImmGetContext(s_hwnd) : nullptr;
+        ImcScope() = default;
+        ImcScope(const ImcScope&) = delete;
+        ImcScope& operator=(const ImcScope&) = delete;
+        ~ImcScope() { if (h) ImmReleaseContext(s_hwnd, h); }
+    };
+
+    // One composition property (GCS_*), sized then filled: the bytes the IME holds now. Window thread.
+    static std::vector<unsigned char> ImeGetBytes(HIMC hImc, DWORD what)
     {
-        const LONG bytes = ImmGetCompositionStringW(hImc, what, nullptr, 0);
-        if (bytes <= 0) return {};
-        std::wstring out(static_cast<std::size_t>(bytes) / sizeof(wchar_t), L'\0');
-        ImmGetCompositionStringW(hImc, what, out.data(), static_cast<DWORD>(bytes));
+        const LONG n = ImmGetCompositionStringW(hImc, what, nullptr, 0);
+        if (n <= 0) return {};
+        std::vector<unsigned char> out(static_cast<std::size_t>(n));
+        const LONG got = ImmGetCompositionStringW(hImc, what, out.data(), static_cast<DWORD>(n));
+        out.resize(got > 0 ? std::min<std::size_t>(static_cast<std::size_t>(got), out.size()) : 0);
         return out;
     }
 
-    // -> the UI-mode page's reserved '__ime' channel ({state, text}); the
-    // bridge script draws the pre-edit and re-emits it as 'magelight:ime'.
-    static void ImeNotifyPage(const char* state, const std::wstring& text)
+    static std::wstring ImeGetString(HIMC hImc, DWORD what)
     {
-        const std::string json = std::string("{\"state\":\"") + state + "\",\"text\":" + MlJsonQuote(WideToUtf8(text)) + "}";
-        InteropCall(static_cast<ViewId>(s_uiModeView.load()), "__ime", json);
+        const std::vector<unsigned char> b = ImeGetBytes(hImc, what);
+        std::wstring out(b.size() / sizeof(wchar_t), L'\0');
+        if (!out.empty()) std::memcpy(out.data(), b.data(), out.size() * sizeof(wchar_t));
+        return out;
     }
 
-    static void ImeRepositionCandidates()   // window thread
+    // The IME's state now, into an IME op (window thread): the composition with its caret and clause segments
+    // for the editor, and for the page the same as UTF-8 with the target clause and, while the IME has a list
+    // open, the candidate page it shows.
+    static void ImeReadState(HIMC hImc, EditOp& op)
+    {
+        op.text = ImeGetString(hImc, GCS_COMPSTR);
+        const std::size_t len = op.text.size();
+        const LONG cur = ImmGetCompositionStringW(hImc, GCS_CURSORPOS, nullptr, 0);
+        op.cursor = static_cast<std::uint32_t>(cur >= 0 ? std::min<std::size_t>(static_cast<std::size_t>(cur), len) : len);
+        const std::vector<unsigned char> attrs = ImeGetBytes(hImc, GCS_COMPATTR);
+        const std::vector<unsigned char> clauseBytes = ImeGetBytes(hImc, GCS_COMPCLAUSE);
+        // Segments as the IME reports them, clamped to the text; no clause data: the editor underlines all of it.
+        const std::size_t nClauses = clauseBytes.size() / sizeof(DWORD);
+        for (std::size_t i = 0; nClauses >= 2 && i + 1 < nClauses; ++i) {
+            const std::uint32_t a = static_cast<std::uint32_t>(std::min<std::size_t>(Ime::ReadU32(clauseBytes.data() + i * 4), len));
+            const std::uint32_t b = static_cast<std::uint32_t>(std::min<std::size_t>(Ime::ReadU32(clauseBytes.data() + (i + 1) * 4), len));
+            if (b <= a) continue;
+            ultralight::CompositionSegment seg;
+            seg.range = { a, b };
+            for (std::uint32_t k = a; k < b && k < attrs.size(); ++k)
+                if (attrs[k] == ATTR_TARGET_CONVERTED || attrs[k] == ATTR_TARGET_NOTCONVERTED) { seg.thick = true; break; }
+            op.segs.push_back(seg);
+        }
+        Ime::Snapshot& snap = op.ime;
+        snap.composition = WideToUtf8(op.text);
+        snap.caret = static_cast<int>(op.cursor);
+        snap.clauses = Ime::ReadClauses(clauseBytes.data(), clauseBytes.size(), len);
+        snap.target = Ime::TargetClause(snap.clauses, attrs);
+        if (!s_imeCandidatesOpen.load()) return;
+        // The size is the IME's word: past 64 KB (an IME page is about nine short strings) the list is not read.
+        const DWORD bytes = ImmGetCandidateListW(hImc, 0, nullptr, 0);
+        if (bytes == 0 || bytes > 64 * 1024) return;
+        std::vector<unsigned char> list(bytes);
+        const DWORD got = ImmGetCandidateListW(hImc, 0, reinterpret_cast<LPCANDIDATELIST>(list.data()), bytes);
+        const Ime::CandidatePage page = Ime::ReadCandidatePage(list.data(), std::min<std::size_t>(got, list.size()));
+        for (const auto& c : page.items) snap.candidates.push_back(WideToUtf8(c));
+        const auto lang = static_cast<std::uint16_t>(PRIMARYLANGID(LOWORD(reinterpret_cast<std::uintptr_t>(GetKeyboardLayout(0)))));
+        snap.selectedIndex = Ime::SelectedRow(page, Ime::Converted(attrs), lang);
+    }
+
+    // Queues an IME op that also tells the page (`state`), with the IME's state read from `hImc` (none: an empty
+    // state, as an 'end' carries). Window thread. Never throws: the window proc's SEH guard reads an escaping C++
+    // exception as a fault and turns the overlay off for the session; a failure here only loses that op.
+    static void ImeQueue(EditOp::Kind kind, const char* state, HIMC hImc)
+    {
+        try {
+            EditOp op;
+            op.kind = kind;
+            op.imeState = state;
+            if (hImc) ImeReadState(hImc, op);
+            QueueEditOp(std::move(op));
+        } catch (const std::exception& e) {
+            SKSE::log::error("Magelight: IME '{}' dropped: {}", state, e.what());
+        }
+    }
+
+    // Ends what the IME has open, the context still attached: the candidate list first (a cancel alone can leave it
+    // open), then the composition (`always`: whether or not one is known to be open). The page's list is closed here
+    // too, as the cancel need not end the composition by message (nor reach HandleFocusedMsg once UI mode is off).
+    // Window thread.
+    static void ImeCancelOpen(HIMC hImc, bool always)
+    {
+        if (hImc) {
+            if (s_imeCandidatesOpen.load()) ImmNotifyIME(hImc, NI_CLOSECANDIDATE, 0, 0);
+            if (always || s_imeComposing.load()) ImmNotifyIME(hImc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+        }
+        const bool wasComposing = s_imeComposing.exchange(false);
+        if (s_imeCandidatesOpen.exchange(false) || wasComposing) ImeQueue(EditOp::Notify, "end", nullptr);
+    }
+
+    // The OS windows' place, for an IME that draws them although WM_IME_SETCONTEXT asked for none. Window thread.
+    static void ImeRepositionCandidates()
     {
         const int x = s_imeCaretX.load(), y = s_imeCaretY.load(), h = s_imeCaretH.load();
         if (x < 0 || !s_hwnd) return;
@@ -2961,45 +3480,44 @@ namespace Magelight {
                 SKSE::log::warn("Magelight: IME attach ok={} but the window has NO context — IME disabled on this thread?", ok != FALSE);
             }
         } else {
-            if (HIMC hImc = ImmGetContext(s_hwnd)) {
-                if (s_imeComposing.load()) ImmNotifyIME(hImc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
-                ImmReleaseContext(s_hwnd, hImc);
+            {
+                // The page's 'end' is a message only: the field's composition is the drain's to end (it finishes
+                // one in a view before that view loses View focus, ImeFinishComposition).
+                ImcScope c;
+                ImeCancelOpen(c.h, false);
             }
             ImmAssociateContext(s_hwnd, nullptr);
-            s_imeComposing.store(false);
         }
         s_imeAttached.store(on);
         SKSE::log::info("Magelight: IME context {}", on ? "attached (text field focused)" : "detached");
     }
 
-    // The page's caret, "x,y,h" in its CSS px -> client px of the game window,
-    // so the OS candidate list opens at the caret rather than the corner.
-    static void ImeOnCaret(ViewId id, const std::string& arg)
-    {
-        float cx = 0.f, cy = 0.f, ch = 0.f;
-        if (sscanf_s(arg.c_str(), "%f,%f,%f", &cx, &cy, &ch) == 3) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
-            if (MlView* v = FindViewLocked(id)) {
-                float ex = 0.f, ey = 0.f;
-                EffectivePos(*v, static_cast<float>(s_backbufferW.load()), static_cast<float>(s_backbufferH.load()), ex, ey);
-                const float ds = v->deviceScale > 0.f ? v->deviceScale : 1.f;
-                s_imeCaretX.store(static_cast<int>(ex + cx * ds));
-                s_imeCaretY.store(static_cast<int>(ey + cy * ds));
-                s_imeCaretH.store(static_cast<int>(ch * ds));
-            }
-        }
-        if (s_imeComposing.load() && s_hwnd) PostMessageW(s_hwnd, kImeCtlMsg, 2, 0);
-    }
-
-    // The window's IME context follows text-field focus in the UI-mode view
-    // (the caller filters other views); on VR the runtime keyboard owns text
-    // and the OS IME UI is invisible.
+    // The window's IME context follows text focus in the UI-mode view (DrainEditableStates decides); on VR the VR
+    // keyboards own text and the OS IME UI is invisible. Attach and detach are idempotent on the window thread.
     static void ImeOnTextFocus(bool focused)
     {
         if (VR::IsLive() || !s_hwnd) return;
         if (!focused) s_imeCaretX.store(-1);
         PostMessageW(s_hwnd, kImeCtlMsg, focused ? 1 : 0, 0);
     }
+
+    // Ultralight 2.0 reports each View's focused field itself (iframes and contenteditable included). The report
+    // runs inside whatever Ultralight call caused it, on the render thread, LoadViewLocked's LoadURL under
+    // s_viewsMutex among them, so it only records, under the leaf s_editMutex; DrainEditableStates acts on it.
+    class MlEditorListener final : public ultralight::EditorListener {
+    public:
+        void OnChangeEditableState(ultralight::View* caller, const ultralight::EditableState& st) override
+        {
+            std::lock_guard<std::mutex> lk(s_editMutex);
+            if (s_editChanges.size() >= kEditChangeCap) s_editChanges.erase(s_editChanges.begin());
+            s_editChanges.push_back({ caller, st, s_hostFocusCall });
+        }
+        void OnDiscardComposition(ultralight::View*) override
+        {
+            if (s_hwnd) PostMessageW(s_hwnd, kImeCtlMsg, 3, 0);
+        }
+    };
+    static constinit NeverDestroyed<MlEditorListener> s_editorListener;
 
     // 0.28.0: does the UI-mode page own Escape right now? (SetEscapeCapture /
     // the '__escapecapture' channel — a modal or an editing control closes
@@ -3011,6 +3529,43 @@ namespace Magelight {
         return v && v->escapeCapture;
     }
 
+    // Milliseconds since the IME's last message about its composition or list, -1 for never. Window thread.
+    static long long MsSinceIme()
+    {
+        const std::uint64_t last = s_imeLastMs.load();
+        return last ? static_cast<long long>(GetTickCount64() - last) : -1LL;
+    }
+
+    // Ime::ComposingForEscape over the host's state. Window thread.
+    static bool ImeComposingForEscape()
+    {
+        return Ime::ComposingForEscape(s_imeComposing.load(), s_imeCandidatesOpen.load(), s_imeEditorComposing.load(),
+                                       MsSinceIme(), s_imeEnd.EndedWithCommit());
+    }
+
+    // The IME's composition ended by committing it and nothing of it is open: an Escape now was passed on by the IME.
+    static bool ImeCommittedForEscape()
+    {
+        return s_imeEnd.EndedWithCommit() && !s_imeComposing.load() && !s_imeCandidatesOpen.load();
+    }
+
+    // One line per Escape message while UI mode is on (20 a UI-mode session, 200 in all): what it was, the state the
+    // decision read (composing: Ime::ComposingForEscape; endedOnThisKey; held: the press before it was the IME's, as
+    // the guard held it when the message came) and the decision. Window thread.
+    static void LogEscape(UINT msg, LPARAM lparam, bool composing, bool endedOnThisKey, bool held, const char* decision)
+    {
+        if (s_escLogSession.fetch_sub(1) <= 0 || s_escLogTotal.fetch_add(1) >= 200) return;
+        const bool processKey = std::strstr(decision, "VK_PROCESSKEY") != nullptr;
+        const char* what = msg == WM_KEYDOWN ? (processKey ? "WM_KEYDOWN VK_PROCESSKEY" : "WM_KEYDOWN VK_ESCAPE")
+                         : msg == WM_KEYUP   ? (processKey ? "WM_KEYUP VK_PROCESSKEY" : "WM_KEYUP VK_ESCAPE")
+                                             : "WM_CHAR 0x1B";
+        SKSE::log::info("Magelight: Escape {} scan=0x{:02X}{} - IME composing={} list={} editor composition={} "
+                        "last IME message {} ms ago; composing for Escape={} ended on this key={} IME's press held={} -> {}",
+                        what, (lparam >> 16) & 0xFF, (msg == WM_KEYDOWN && (lparam & (1 << 30))) ? " repeat" : "",
+                        s_imeComposing.load(), s_imeCandidatesOpen.load(), s_imeEditorComposing.load(), MsSinceIme(),
+                        composing, endedOnThisKey, held, decision);
+    }
+
     static bool HandleFocusedMsg(UINT msg, WPARAM wparam, LPARAM lparam)
     {
         switch (msg) {
@@ -3018,7 +3573,8 @@ namespace Magelight {
         case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
         case WM_RBUTTONDOWN: case WM_RBUTTONUP:
         case WM_MBUTTONDOWN: case WM_MBUTTONUP:
-        case WM_MOUSEWHEEL:
+        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+        case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
             // Swallow but do NOT queue: mouse rides the SKSE sink + MenuCursor
             // (0.3.5) — Skyrim's DirectInput never delivers WM mouse messages
             // here anyway (zero arrived across every field run), and queueing
@@ -3026,8 +3582,36 @@ namespace Magelight {
             return true;
         case WM_KEYDOWN: case WM_KEYUP:
         case WM_CHAR:
-            if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wparam == VK_PROCESSKEY) return true;   // the IME owns this key
-            QueueInput(msg, wparam, lparam);
+            if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wparam == VK_PROCESSKEY) {   // the IME owns this key
+                if (((lparam >> 16) & 0xFF) == 0x01) {
+                    // An Escape the IME consumed: its plain key-up (and any character) is the IME's too.
+                    const bool held = s_imeEscape.Held();
+                    if (msg == WM_KEYDOWN) s_imeEscape.ImeTook();
+                    else s_imeEscape.Swallow(Ime::EscapeGuard::Key::Up, false, false);
+                    LogEscape(msg, lparam, ImeComposingForEscape(), false, held, "to the IME (VK_PROCESSKEY)");
+                }
+                return true;
+            }
+            if (msg == WM_CHAR ? wparam == 0x1B : wparam == VK_ESCAPE) {
+                const auto k = msg == WM_KEYDOWN ? Ime::EscapeGuard::Key::Down
+                             : msg == WM_CHAR    ? Ime::EscapeGuard::Key::Char : Ime::EscapeGuard::Key::Up;
+                const bool committed = ImeCommittedForEscape();
+                const bool endedOnThisKey = !committed && s_imeEndMsgTime != 0 && GetMessageTime() == s_imeEndMsgTime;
+                const bool composing = ImeComposingForEscape();
+                const bool held = s_imeEscape.Held();
+                const bool repeat = msg == WM_KEYDOWN && (lparam & (1 << 30)) != 0;
+                if (s_imeEscape.Swallow(k, composing, endedOnThisKey, repeat)) {
+                    LogEscape(msg, lparam, composing, endedOnThisKey, held, "to the IME");
+                    return true;
+                }
+                const bool captured = msg == WM_KEYDOWN && EscapeCapturedByUiView();
+                LogEscape(msg, lparam, composing, endedOnThisKey, held,
+                          msg != WM_KEYDOWN ? (committed ? "IME committed on this key -> to the page" : "to the page")
+                          : committed ? (captured ? "IME committed on this key -> to the page (it captured Escape)"
+                                                  : "IME committed on this key -> to the page, and UI mode closes")
+                          : captured ? "to the page (it captured Escape)" : "to the page, and UI mode closes");
+            }
+            QueueInput(msg, wparam, lparam, CaptureKeyBits(true));
             // Editing-key trace (Backspace/Delete): a field report of
             // "Backspace does nothing in text fields" needs to know whether
             // the key reaches the window at all (rate-limited).
@@ -3047,16 +3631,12 @@ namespace Magelight {
             return true;
         case kOcCharMsg: {
             const wchar_t wch = static_cast<wchar_t>(wparam);
-            if (lparam == 1) {   // control key delivered as a virtual key
-                const LPARAM scan = static_cast<LPARAM>(
-                    MapVirtualKeyW(static_cast<UINT>(wch), MAPVK_VK_TO_VSC) & 0xFF) << 16;
-                QueueInput(WM_KEYDOWN, static_cast<WPARAM>(wch), scan);
-                QueueInput(WM_KEYUP, static_cast<WPARAM>(wch), scan | (1 << 30) | (1 << 31));
-            } else if (wch >= 0x20 || wch == L'\t' || wch == L'\r') {
-                QueueInput(WM_CHAR, static_cast<WPARAM>(wch), 0);
-            } else if (wch == L'\b') {
-                QueueInput(WM_KEYDOWN, VK_BACK, 0);
-                QueueInput(WM_KEYUP, VK_BACK, 0);
+            if (lparam == 1) {   // a virtual key (Backspace, Enter, Tab, Escape)
+                QueueVirtualKey(static_cast<int>(wch));
+            } else {   // text, one UTF-16 unit a message: a surrogate pair arrives in two
+                static wchar_t s_ocHigh = 0;   // window thread
+                wchar_t units[2]{};
+                if (const std::size_t n = EditState::PairUnit(s_ocHigh, wch, units)) QueueTypedText(units, n);
             }
             static std::atomic<int> s_ocLog{ 0 };
             if (s_ocLog.fetch_add(1) < 6)
@@ -3066,39 +3646,95 @@ namespace Magelight {
             return true;   // ours now: don't let Scaleform also eat it
         }
         case WM_SYSKEYDOWN: case WM_SYSKEYUP:
-            // Let the system combo (Alt+F4 etc.) proceed; nothing to the view —
-            // but F10 and Alt+key arrive HERE, so bound hotkeys are still peeked.
+            // Alt, F10 and Alt+key: the page gets the key (a system key; WM_SYSCHAR is not passed on, so Alt+x types
+            // nothing) and the system combo (Alt+F4 etc.) still proceeds. Bound hotkeys are peeked here too.
+            QueueInput(msg, wparam, lparam, CaptureKeyBits(true));
             if (msg == WM_SYSKEYDOWN) PeekHotkey(lparam);
             return false;
+        case WM_KILLFOCUS:
+            // Alt+Tab and the like: no release comes for what is held now.
+            QueueInput(kKeyReleaseMsg, 0, 0);
+            return false;
         // ── IME (0.27.0) ──
-        case WM_IME_STARTCOMPOSITION:
+        case WM_IME_STARTCOMPOSITION: {
             s_imeComposing.store(true);
-            SKSE::log::info("Magelight: IME composition started");
-            ImeNotifyPage("start", L"");
-            ImeRepositionCandidates();
-            return true;   // no DefWindowProc: it would open the OS composition window; the pre-edit lives in the page
-        case WM_IME_COMPOSITION: {
-            if (HIMC hImc = ImmGetContext(s_hwnd)) {
-                if (lparam & GCS_RESULTSTR) {
-                    const std::wstring r = ImeGetString(hImc, GCS_RESULTSTR);
-                    ImeNotifyPage("commit", r);
-                    for (wchar_t ch : r) QueueInput(WM_CHAR, static_cast<WPARAM>(ch), 0);   // pairs re-join in the drain
-                    static std::atomic<int> s_n{ 0 };
-                    if (s_n.fetch_add(1) < 6) SKSE::log::info("Magelight: IME commit ({} UTF-16 unit(s))", r.size());
-                }
-                if (lparam & GCS_COMPSTR) ImeNotifyPage("compose", ImeGetString(hImc, GCS_COMPSTR));
-                ImmReleaseContext(s_hwnd, hImc);
+            s_imeEnd.Started();
+            s_imeLastMs.store(GetTickCount64());
+            static std::atomic<int> s_n{ 0 };   // one per typed word: the first few say the IME composes at all
+            if (s_n.fetch_add(1) < 6) SKSE::log::info("Magelight: IME composition started");
+            {
+                ImcScope c;
+                ImeQueue(EditOp::Notify, "start", c.h);
             }
             ImeRepositionCandidates();
+            return true;   // no DefWindowProc: it would open the OS composition window; the pre-edit lives in the page
+        }
+        case WM_IME_COMPOSITION: {
+            s_imeLastMs.store(GetTickCount64());
+            if (lparam) s_imeEnd.Composition((lparam & GCS_RESULTSTR) != 0);
+            ImcScope c;
+            if (!c.h) return true;
+            if (lparam & GCS_RESULTSTR) {
+                try {   // never out of here: see ImeQueue
+                    EditOp op;
+                    op.kind = EditOp::Commit;
+                    op.imeState = "commit";
+                    EditOp now;   // what the IME holds after the commit (a partial commit keeps composing)
+                    ImeReadState(c.h, now);
+                    op.ime = std::move(now.ime);
+                    op.text = ImeGetString(c.h, GCS_RESULTSTR);
+                    static std::atomic<int> s_n{ 0 };
+                    if (s_n.fetch_add(1) < 6) SKSE::log::info("Magelight: IME commit ({} UTF-16 unit(s))", op.text.size());
+                    QueueEditOp(std::move(op));
+                } catch (const std::exception& e) {
+                    SKSE::log::error("Magelight: IME commit dropped: {}", e.what());
+                }
+            }
+            // Also when only the caret, the clauses or the target clause moved (the arrows, Shift+arrows).
+            if ((lparam & GCS_COMPSTR) ||
+                (!(lparam & GCS_RESULTSTR) && (lparam & (GCS_CURSORPOS | GCS_COMPATTR | GCS_COMPCLAUSE))))
+                ImeQueue(EditOp::Compose, "compose", c.h);
             return true;   // never DefWindowProc: it would re-deliver the result as WM_CHARs (double insert)
         }
-        case WM_IME_ENDCOMPOSITION:
+        case WM_IME_ENDCOMPOSITION: {
             s_imeComposing.store(false);
-            ImeNotifyPage("end", L"");
+            s_imeCandidatesOpen.store(false);
+            s_imeEndMsgTime = GetMessageTime();
+            s_imeLastMs.store(GetTickCount64());
+            s_imeEnd.Ended();
+            // End: cancels a composition the IME closed without a result (Escape, the reading deleted). One it closes
+            // while the game window has no keyboard focus (Alt+Tab, another window) is kept as typed instead, as a
+            // blur keeps it: the player did not ask for it to go.
+            EditOp op;
+            op.kind = EditOp::End;
+            op.imeState = "end";
+            op.keep = !s_imeWindowFocused;
+            QueueEditOp(std::move(op));
             return true;
+        }
         case WM_IME_SETCONTEXT:
-            // Keep the OS candidate list; drop the OS composition window (the pre-edit is inline).
-            DefWindowProcW(s_hwnd, msg, wparam, lparam & ~static_cast<LPARAM>(ISC_SHOWUICOMPOSITIONWINDOW));
+            // No OS IME window at all (lParam 0): none draws over the game. The IME reports its candidate list through
+            // WM_IME_NOTIFY instead, and the page core draws it. Restoring an ISC_SHOW* bit brings back an OS window
+            // the player cannot see, under the page's.
+            DefWindowProcW(s_hwnd, msg, wparam, 0);
+            return true;
+        case WM_IME_NOTIFY:
+            // The candidate list goes to the page, never to the OS window; every other notification goes on to the
+            // game's proc.
+            switch (wparam) {
+            case IMN_OPENCANDIDATE:
+            case IMN_CHANGECANDIDATE: s_imeCandidatesOpen.store(true); break;
+            case IMN_CLOSECANDIDATE:
+                s_imeCandidatesOpen.store(false);
+                s_imeEndMsgTime = GetMessageTime();
+                break;
+            default: return false;
+            }
+            s_imeLastMs.store(GetTickCount64());
+            {
+                ImcScope c;
+                ImeQueue(EditOp::Notify, "candidates", c.h);
+            }
             return true;
         default:
             return false;
@@ -3119,8 +3755,13 @@ namespace Magelight {
     static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     {
         GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
+        if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) s_imeWindowFocused = msg == WM_SETFOCUS;
         if (msg == kImeCtlMsg) {   // IME control, marshalled to the window's thread
             if (wparam == 2) ImeRepositionCandidates();
+            else if (wparam == 3) {   // the page kept the composition as final text: cancel the IME's copy of it
+                ImcScope c;
+                if (c.h) ImeCancelOpen(c.h, true);
+            }
             else ImeAttach(wparam != 0);
             return 0;
         }
@@ -3517,6 +4158,10 @@ namespace Magelight {
         using namespace std::chrono;
         long long lastReportMs = 0;
         int       reports      = 0;
+        bool      away         = false;   // the last check found the game in the background
+        long long awayStartMs  = 0;       // when the current stretch in the background began
+        long long bgLastMs     = 0;       // the last check that found the game in the background
+        long long bgPresentMs  = 0;       // the last present seen at that check
         for (;;) {
             if (s_faultEvent) WaitForSingleObject(s_faultEvent, 250);
             else std::this_thread::sleep_for(milliseconds(250));
@@ -3525,7 +4170,35 @@ namespace Magelight {
             const long long lastMs = s_lastPresentMs.load();
             if (!lastMs || !s_worldReady.load()) continue;   // nothing to watch yet
             const long long now = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-            const long long gap = now - lastMs;
+            // A game in the background (alt-tab) stops presenting by design, so a frame gap counts only from its return
+            // to the foreground. A window of the game's own process (a plugin's dialog) counts as the foreground, and so
+            // does a hung game window (IsHungAppWindow: no messages pumped for 5 s, and a hung window never gets the
+            // foreground back), so a hang is still sampled. Not on VR, where the desktop window is seldom the
+            // foreground one while the headset plays.
+            const bool hung = s_hwnd && IsHungAppWindow(s_hwnd);
+            bool inBackground = false;
+            if (!REL::Module::IsVR() && s_hwnd && !hung) {
+                DWORD fgPid = 0;
+                if (HWND fg = GetForegroundWindow()) GetWindowThreadProcessId(fg, &fgPid);
+                inBackground = fgPid != GetCurrentProcessId();
+            }
+            if (inBackground) {
+                if (!away) {
+                    away = true;
+                    awayStartMs = now;
+                }
+                bgLastMs = now;
+                bgPresentMs = lastMs;
+                continue;
+            }
+            if (away) {
+                away = false;
+                if (bgLastMs - bgPresentMs >= s_stallThresholdMs.load()) {
+                    SKSE::log::info("Magelight stall: none sampled - the game presented no frame for {} ms while its window "
+                                    "was in the background ({} ms away)", bgLastMs - bgPresentMs, bgLastMs - awayStartMs);
+                }
+            }
+            const long long gap = now - (hung ? lastMs : std::max(lastMs, bgLastMs));
             if (gap < s_stallThresholdMs.load()) continue;
             if (now - lastReportMs < 5000) continue;
             lastReportMs = now;
@@ -3571,8 +4244,7 @@ namespace Magelight {
         // PE edit — see build.ps1), so both Ultralight runtimes coexist under
         // different module names.
         // Dependency order matters: core first, WebCore before Ultralight.
-        const wchar_t* dlls[] = { L"Magelight1Core.dll", L"MgWCore.dll",
-                                  L"Magelight1.dll", L"MgACore.dll" };
+        const wchar_t* dlls[] = { L"Magelight1Core.dll", L"MgWCore.dll", L"Magelight1.dll" };
         for (const auto* name : dlls) {
             const auto full = s_runtimeDir / name;
             if (!LoadLibraryW(full.c_str())) {
@@ -3623,9 +4295,10 @@ namespace Magelight {
             s_gpuRegExt    = reinterpret_cast<MgGpuRegExtFn>(GetProcAddress(gpu, "MgGpu_RegisterExternalTexture"));
             s_gpuSetExtSrv = reinterpret_cast<MgGpuSetExtFn>(GetProcAddress(gpu, "MgGpu_SetExternalTextureSRV"));
             s_gpuUnregExt  = reinterpret_cast<MgGpuUnregExtFn>(GetProcAddress(gpu, "MgGpu_UnregisterExternalTexture"));
-            // Every contract-1 backend exports all of them; one that does not is a broken build.
+            s_gpuStats     = reinterpret_cast<MgGpuStatsFn>(GetProcAddress(gpu, "MgGpu_GetStats"));
+            // A backend of this contract exports all of them; one that does not is a broken build.
             if (s_gpuCreate && s_gpuDestroy && s_gpuGetDriver && s_gpuHas && s_gpuDraw && s_gpuSrv && s_gpuSamples
-                && s_gpuRegExt && s_gpuSetExtSrv && s_gpuUnregExt) {
+                && s_gpuRegExt && s_gpuSetExtSrv && s_gpuUnregExt && s_gpuStats) {
                 SKSE::log::info("Magelight: GPU backend loaded (MagelightGPU.dll, contract {}, Ultralight {})",
                                 MGGPU_CONTRACT, ULTRALIGHT_VERSION);
             } else {
@@ -3643,12 +4316,18 @@ namespace Magelight {
 
     class SpdLogger final : public ultralight::Logger {
     public:
-        void LogMessage(ultralight::LogLevel, const ultralight::String& message) override
+        void LogMessage(ultralight::LogLevel level, const ultralight::String& message) override
         {
-            SKSE::log::info("[UL] {}", SysInfo::RedactProfile(message.utf8().data()));
+            const auto text = SysInfo::RedactProfile(message.utf8().data());
+            if (level == ultralight::LogLevel::Fatal || level == ultralight::LogLevel::Error)
+                SKSE::log::error("[UL] {}", text);
+            else if (level == ultralight::LogLevel::Warning)
+                SKSE::log::warn("[UL] {}", text);
+            else
+                SKSE::log::info("[UL] {}", text);
         }
     };
-    static SpdLogger s_ulLogger;
+    static constinit NeverDestroyed<SpdLogger> s_ulLogger;
 
     // Our own FileSystem instead of AppCore's. The stock Windows one has no
     // entry for .mjs, resolves nothing behind a query string and serves any
@@ -3669,7 +4348,16 @@ namespace Magelight {
             EmptyClipboard();
             CloseClipboard();
         }
-        ultralight::String ReadPlainText() override
+        ultralight::RefPtr<ultralight::ClipboardData> Read() override
+        {
+            return ultralight::ClipboardData::Create(ReadPlainText());
+        }
+        void Write(ultralight::RefPtr<ultralight::ClipboardData> data) override
+        {
+            if (data) WritePlainText(data->AsText());
+        }
+    private:
+        ultralight::String ReadPlainText()
         {
             ultralight::String out;
             if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(s_hwnd)) return out;
@@ -3684,7 +4372,7 @@ namespace Magelight {
             CloseClipboard();
             return out;
         }
-        void WritePlainText(const ultralight::String& text) override
+        void WritePlainText(const ultralight::String& text)
         {
             const ultralight::String16 s16 = text.utf16();
             const std::size_t len = s16.length();
@@ -3703,7 +4391,7 @@ namespace Magelight {
             CloseClipboard();
         }
     };
-    static MlClipboard s_clipboard;
+    static constinit NeverDestroyed<MlClipboard> s_clipboard;
 
     // Network sandbox: a page's reach is its view's NetLevel, the owning mod's
     // NetworkPolicy (File unless the mod opted in). Tightening a default later
@@ -3761,7 +4449,7 @@ namespace Magelight {
             return false;
         }
     };
-    static MlNetworkListener s_networkListener;
+    static constinit NeverDestroyed<MlNetworkListener> s_networkListener;
 
     // Page roots outside Data\Magelight (an absolute page registers its own
     // directory — PageRootFor). Append-only and never pruned: a root is a
@@ -3904,20 +4592,23 @@ namespace Magelight {
             return out;
         }
 
-        // file:///-URL → filesystem path. Beyond the demo's needs, the SA
-        // port adds three shapes: QUERY STRINGS (?v=N cache-busters on
-        // images the native side rewrites in place — stat/open must ignore
-        // them), percent-encoding, and ABSOLUTE paths (SA's HTML ships in
-        // SA's own mod folder; a drive-letter path resolves as-is instead
-        // of against our runtime dir).
-        std::filesystem::path Resolve(const ultralight::String& file_path)
+        // The file a file:/// URL names, as a page path (MlView::htmlPath): no query string (?v=N cache-busters on
+        // images the native side rewrites in place) or fragment, percent-decoded, no leading slash. A drive-letter
+        // path is absolute (SA's HTML ships in SA's own mod folder); anything else is relative to the runtime dir.
+        static std::string PathOfUrl(std::string p)
         {
-            std::string p = file_path.utf8().data();
             if (const auto q = p.find('?'); q != std::string::npos) p.resize(q);
             if (const auto h = p.find('#'); h != std::string::npos) p.resize(h);
             if (p.rfind("file:///", 0) == 0) p = p.substr(8);
             p = UrlDecode(p);
             while (!p.empty() && (p.front() == '/' || p.front() == '\\')) p.erase(p.begin());
+            return p;
+        }
+
+        // file:///-URL → filesystem path (PathOfUrl), refused outside the page roots.
+        std::filesystem::path Resolve(const ultralight::String& file_path)
+        {
+            const std::string p = PathOfUrl(file_path.utf8().data());
             std::filesystem::path out = (p.size() > 1 && p[1] == ':')
                 ? std::filesystem::path(p).make_preferred()
                 : (s_runtimeDir / std::filesystem::path(p).make_preferred());
@@ -3996,7 +4687,7 @@ namespace Magelight {
             return ultralight::Buffer::CreateFromCopy(data.data(), data.size());
         }
     };
-    static MlFileSystem s_fileSystem;
+    static constinit NeverDestroyed<MlFileSystem> s_fileSystem;
 
     // Case-insensitive prefix test on normalised native paths (Windows). Pure
     // string work — safe on WebKit's thread, no filesystem calls.
@@ -4057,19 +4748,58 @@ namespace Magelight {
     // devMode: a JS error paints a banner on the page itself, so a broken
     // handler is seen where it happened instead of only in the log. Fixed,
     // click-through, self-removing; the page's own DOM is untouched.
-    static void ShowDevErrorOverlay(ViewId view, const std::string& text, const std::string& source, std::uint32_t line)
+    // Any thread but one holding s_viewsMutex. unnamed: a line with no source is one of the unnamed code that made the
+    // error (JsBridge::ScriptLine). A console message's is not: it has no stack to tell a mod's script from a JSC
+    // built-in that called the console method (a page file's forEach(console.error) reads line 1, no source).
+    static void ShowDevErrorOverlay(ViewId view, const std::string& text, const std::string& source, std::uint32_t line,
+                                    bool unnamed)
     {
+        // The file name alone; the whole source when it ends in a separator (a directory URL), which names no file.
         std::string where = source;
-        if (auto slash = where.find_last_of("/\\"); slash != std::string::npos) where = where.substr(slash + 1);
-        const std::string msg = text + "\n" + where + ":" + std::to_string(line);
-        InvokeJS(view,
+        if (auto slash = where.find_last_of("/\\"); slash != std::string::npos && slash + 1 < where.size())
+            where = where.substr(slash + 1);
+        const std::string msg = !source.empty() ? text + "\n" + where + ":" + std::to_string(line)
+                              : unnamed && line ? text + "\nline " + std::to_string(line) + " of an unnamed script" : text;
+        std::string script =
             "(function(){var t=" + MlJsonQuote(msg) + ";var d=document.getElementById('__ml_err');"
             "if(!d){d=document.createElement('div');d.id='__ml_err';d.style.cssText='position:fixed;left:0;right:0;top:0;"
             "z-index:2147483647;background:#5a1414;color:#ffd9d9;font:12px/1.4 monospace;padding:6px 10px;"
             "border-bottom:2px solid #ff5c5c;white-space:pre-wrap;max-height:40%;overflow:auto;pointer-events:none';"
             "(document.body||document.documentElement).appendChild(d);}"
             "d.textContent='[Magelight devMode] JS error\\n'+t;clearTimeout(d.__t);"
-            "d.__t=setTimeout(function(){d.remove();},12000);})();");
+            "d.__t=setTimeout(function(){d.remove();},12000);})();";
+        // quiet: a banner that throws (a document with no root yet) must not report itself, and so queue another
+        // banner, every frame.
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        if (MlView* v = FindViewLocked(view)) QueueOutboundLocked(*v, { std::move(script), {}, true, true });
+    }
+
+    // Render thread, outside s_viewsMutex and outside the page's JS context lock. A script the host ran for a mod
+    // threw. uncaught (InvokeJS, an InteropCall handler, the page core's dispatch): what an uncaught page error gets
+    // (invariant 9), a log line when consoleLog records errors and the view's console budget allows, a level-2
+    // ConsoleMessage event with the text and stack, and the devMode banner. !uncaught (EvalJS, which handed the
+    // exception to the mod): the same log line, in devMode only.
+    static void ReportScriptError(ViewId id, const std::string& what, const JsBridge::ErrorInfo& e, bool uncaught)
+    {
+        const bool dev = s_devMode.load();
+        if (!uncaught && !dev) return;
+        bool logIt = false;
+        std::uint32_t dropped = 0;
+        if (ConsoleLogLevel() != kConsoleLogNone) {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            if (MlView* v = FindViewLocked(id)) logIt = v->consoleRate.Admit(GetTickCount64(), dropped);
+        }
+        if (dropped)
+            SKSE::log::info("Magelight: [view {} console] {} lines not logged (over {} a second)",
+                id, dropped, kConsoleLinesPerSec);
+        if (logIt)
+            SKSE::log::info("Magelight: [view {} {}/{}] {}", id, what, uncaught ? "ERROR" : "caught",
+                CapLogText(JsBridge::LogText(e), kConsoleLineMaxBytes));
+        if (!uncaught) return;
+        const std::string full = JsBridge::FullText(e);
+        const unsigned line = JsBridge::ScriptLine(e);
+        Emit(HostEvent::ConsoleMessage, id, 2, static_cast<int>(line), full.c_str());
+        if (dev) ShowDevErrorOverlay(id, full, e.url, line, true);
     }
 
     class MlViewListener final : public ultralight::ViewListener {
@@ -4140,18 +4870,14 @@ namespace Magelight {
                     logIt = (v ? v->consoleRate : s_unownedRate).Admit(GetTickCount64(), dropped);
                 }
             }
-            // Every console argument, not just the first: console.log('x', obj)
-            // used to reach the log as "x". Objects come out as JSON.
+            // Every console argument, space-joined, each as JsBridge::ConsoleArgText
+            // formats it. Outside s_viewsMutex: a toString, a getter, a toJSON or an
+            // instanceof can run page script, which can call __mlNative.
             std::string text;
             if (JSContextRef ctx = msg.num_arguments() ? msg.argument_context() : nullptr) {
                 for (std::uint32_t i = 0; i < msg.num_arguments(); ++i) {
-                    JSValueRef v = msg.argument_at(i);
-                    JSStringRef js = nullptr;
-                    if (v && JSValueIsObject(ctx, v)) js = JSValueCreateJSONString(ctx, v, 0, nullptr);
-                    if (!js && v) js = JSValueToStringCopy(ctx, v, nullptr);
                     if (i) text += ' ';
-                    text += js ? JSStringToStd(js) : "undefined";
-                    if (js) JSStringRelease(js);
+                    text += JsBridge::ConsoleArgText(ctx, msg.argument_at(i));
                 }
             } else {
                 text = msg.message().utf8().data();
@@ -4165,15 +4891,16 @@ namespace Magelight {
                     : level == ultralight::kMessageLevel_Warning ? "warn"
                     : level == ultralight::kMessageLevel_Info ? "info"
                     : level == ultralight::kMessageLevel_Debug ? "debug" : "log";
-                SKSE::log::info("Magelight: [view {} console/{}] {} ({}:{})", id, lvl,
-                    CapLogText(text, kConsoleLineMaxBytes), CapLogText(source, 512), msg.line_number());
+                SKSE::log::info("Magelight: [view {} console/{}] {} ({}:{}:{})", id, lvl,
+                    CapLogText(text, kConsoleLineMaxBytes), CapLogText(source, 512), msg.line_number(),
+                    msg.column_number());
             }
             // The owning mod's event and the devMode banner get the whole message, whatever consoleLog says.
             Emit(HostEvent::ConsoleMessage, id, lvlNum, static_cast<int>(msg.line_number()), text.c_str());
-            if (lvlNum == 2 && s_devMode.load() && id) ShowDevErrorOverlay(id, text, source, msg.line_number());
+            if (lvlNum == 2 && s_devMode.load() && id) ShowDevErrorOverlay(id, text, source, msg.line_number(), false);
         }
     };
-    static MlViewListener s_viewListener;
+    static constinit NeverDestroyed<MlViewListener> s_viewListener;
 
     // ── D3D helpers ─────────────────────────────────────────────────────────
 
@@ -4638,10 +5365,10 @@ float4 ps_straight(VSOut i) : SV_Target {
     };
 
     // The page at (x, y): the topmost visible interactive view there, else the UI-mode view (DrainInputQueue's hit
-    // order, so it is the page the mouse events go to). Hiding needs the pointer INSIDE that page: outside every
-    // view the host cursor always draws, so a stale "none" never leaves the player without a pointer. Precedence:
-    // cursorForce > the view's own set > its mod's default > the host cursor; modCursors false drops the images and
-    // the tint.
+    // order, so it is the page the mouse events go to while no button is held). Hiding needs the pointer INSIDE that
+    // page: outside every view the host cursor always draws, so a stale "none" never leaves the player without a
+    // pointer. Precedence: cursorForce > the view's own set > its mod's default > the host cursor; modCursors false
+    // drops the images and the tint.
     static CursorPick PickCursorAt(int x, int y, float bw, float bh)
     {
         CursorPick pick;
@@ -5000,6 +5727,55 @@ float4 ps_straight(VSOut i) : SV_Target {
         else SKSE::log::info("Magelight: {}", message);
     }
 
+    // ViewConfig::enable_compositor for every View: on, the 2.0 default (1.4's was off). With it off, 2.0 paints a
+    // device scale below 1 only in the page's top-left scale-squared part, and needs_paint() stays true on an idle
+    // page, so PresentedView::repainted would make the VR presenter upload every frame. On costs the tiles of the
+    // layers a page composites (the memory line's "page tiles").
+    static constexpr bool kEnableCompositor = true;
+
+    // ── What keeps a page error from ending the overlay (PageStackCore.h, invariant 1) ──
+    // On the page fiber, the page VM's lock whenever the thread is off it (UlFiberMain); on the game's stack,
+    // JavaScriptCore's stack zones sized past the thread's stack guarantee (ApplyGameStackReserve). Main thread only.
+    static PageStack::Exports s_pageStackExports;
+    static bool               s_pageStackResolved = false;
+    static bool               s_pagesOnFiber = false;           // decided by EnsureUlFiber before the renderer exists
+    static std::size_t        s_reserveGuarantee = SIZE_MAX;    // the guarantee the zones were sized for; SIZE_MAX = none
+
+    static const PageStack::Exports& PageStackExports()
+    {
+        if (!s_pageStackResolved) {
+            s_pageStackResolved = true;
+            s_pageStackExports = PageStack::Resolve(GetModuleHandleW(L"MgWCore.dll"));
+        }
+        return s_pageStackExports;
+    }
+
+    // Before Renderer::Create: the VM reads the zones when WebKit makes it.
+    static void ApplyGameStackReserve()
+    {
+        ULONG held = 0;   // 0 reads the thread's guarantee without changing it
+        const bool known = SetThreadStackGuarantee(&held) != 0;
+        // Unknown: assume CrashLogger's 64 KB, the most any plugin measured sets on this thread.
+        const PageStack::Reserve r = PageStack::ReserveFor(known ? held : 64 * 1024);
+        const PageStack::Exports& e = PageStackExports();
+        if (!e.OptionsReady()) {
+            SKSE::log::error("Magelight: this Ultralight runtime does not export {} - pages on the game's stack keep "
+                             "JavaScriptCore's own stack zones, so with a stack guarantee on it (CrashLogger 1.23 and "
+                             "later sets one) the first error a page leaves uncaught ends the overlay",
+                             e.missingOptions);
+            return;
+        }
+        char refused[96];
+        if (!PageStack::ApplyReserve(e, r, refused, sizeof refused))
+            SKSE::log::error("Magelight: JavaScriptCore refused the stack option {}", refused);
+        s_reserveGuarantee = r.guarantee;
+        SKSE::log::info("Magelight: JavaScript stack zones for pages on the game's stack, past a {} KB stack "
+                        "guarantee{}: a page error commits the stack no lower than {} KB above its end, scripts stop at "
+                        "least {} KB above it (reservedZoneSize {}, softReservedZoneSize {}, maxPerThreadStackUsage {})",
+                        r.guarantee / 1024, known ? "" : " (assumed: the guarantee could not be read)", r.hard / 1024,
+                        r.soft / 1024, r.hard, r.soft, r.maxUsage);
+    }
+
     static bool CreateUltralight()
     {
         ultralight::Config cfg;
@@ -5024,20 +5800,42 @@ float4 ps_straight(VSOut i) : SV_Target {
                          : s_fontHinting == "monochrome" ? ultralight::FontHinting::Monochrome
                          : s_fontHinting == "none"       ? ultralight::FontHinting::None
                                                          : ultralight::FontHinting::Normal;
-        cfg.font_gamma = s_fontGamma;
-        cfg.animation_timer_delay = s_animTimerDelay;
-        SKSE::log::info("Magelight: font hinting '{}', gamma {:.2f}, animation timer {:.4f} s", s_fontHinting,
-            s_fontGamma, s_animTimerDelay);
+        if (s_fontGammaSet) cfg.font_gamma = s_fontGamma;
+        SKSE::log::info("Magelight: font hinting '{}', gamma {}",
+            s_fontHinting, s_fontGammaSet ? fmt::format("{:.2f}", s_fontGamma) : std::string("from the font profile"));
+        // The edition caps every View's frame loop (requestAnimationFrame, CSS and Web animations, smooth scrolling,
+        // painting) at ULTRALIGHT_EDITION_MAX_FPS (0 = none) whatever rate FrameWork pumps it; input, a resize and a
+        // show still paint at once. ViewConfig::max_render_fps can only lower it.
+        if constexpr (ULTRALIGHT_EDITION_MAX_FPS > 0)
+            SKSE::log::info("Magelight: pages animate and repaint at most {} times a second (Ultralight edition cap)",
+                ULTRALIGHT_EDITION_MAX_FPS);
+        // The SDK's defaults, pinned so a later SDK changing them is a decision here. The host never calls
+        // Renderer::Recycle(Full) or PurgeMemory: on Free both drop the compiled script of every live page (its next
+        // run costs about as much as the first) and stall this thread, and the automatic reclaim (the recycler,
+        // idle GC, the compositor's pool sweep) reaches the same footprint after a View's release: its script heap
+        // and process memory within seconds, its video memory (tiles, textures, targets) within about 20 s (freed
+        // inside Render, which FrameWork runs at least once a second, a view shown or not).
+        // LowMemory saved nothing on SA's pages and slowed their script. Idle GC needs Update() every frame
+        // (FrameWork pumps it).
+        cfg.memory_profile = ultralight::MemoryProfile::Balanced;
+        cfg.idle_gc_enabled = true;
         ultralight::Platform::instance().set_config(cfg);
-        // The platform loader with a last resort that always loads (MagelightFonts.h): with Arial
-        // missing or unreadable, the stock one crashed the first page that needed it.
-        ultralight::Platform::instance().set_font_loader(
-            MagelightFonts::CreateLoader(ultralight::GetPlatformFontLoader(), &FontLog));
+        SKSE::log::info("Magelight: memory - profile balanced, idle GC after {:.1f} s without input, recycler every "
+                        "{:.2f} s, resource cache {} MB, compositor {}; the host never calls Recycle or PurgeMemory",
+                        cfg.idle_gc_idle_time, cfg.recycle_delay, cfg.memory_cache_size >> 20,
+                        kEnableCompositor ? "on" : "off");
+        // The SDK's Windows loader (compiled in, so no AppCore.dll) with a last resort that always loads
+        // (MagelightFonts.h): with Arial missing or unreadable, the bare loader takes down the first page that needs
+        // it (invariant 19). Built here, never at namespace scope: its base constructor is a delay-loaded runtime
+        // import, which would run in DllMain before PreloadRuntime and fail the plugin's load (invariant 3). Never
+        // freed, like the wrapper; stateless, so the renderer and Web Worker threads may share it.
+        static auto* const platformFonts = new ultralight::platform::FontLoaderWin();
+        ultralight::Platform::instance().set_font_loader(MagelightFonts::CreateLoader(platformFonts, &FontLog));
         // Our MlFileSystem, not AppCore's — see the class comment (.mjs, query
         // strings, page roots, the CSP).
-        ultralight::Platform::instance().set_file_system(&s_fileSystem);
-        ultralight::Platform::instance().set_logger(&s_ulLogger);
-        ultralight::Platform::instance().set_clipboard(&s_clipboard);
+        ultralight::Platform::instance().set_file_system(&s_fileSystem.value);
+        ultralight::Platform::instance().set_logger(&s_ulLogger.value);
+        ultralight::Platform::instance().set_clipboard(&s_clipboard.value);
 
         // Milestone 2: GPU rasterization. The driver must be registered BEFORE
         // Renderer::Create. Created against the GAME's device/context (both
@@ -5052,8 +5850,12 @@ float4 ps_straight(VSOut i) : SV_Target {
                     // The sample count applies to targets created from now on, so it is set before the renderer
                     // exists: no view (staggered or not) can have made one yet.
                     const int got = s_gpuSamples(s_gpu, s_msaa);
-                    if (got == s_msaa) SKSE::log::info("Magelight: MSAA {}x", got);
-                    else SKSE::log::info("Magelight: MSAA {}x (Magelight.json asks {}x, which this graphics card cannot do for page targets)", got, s_msaa);
+                    s_msaaInEffect = got > 1 ? got : 1;
+                    // An offer: Ultralight 2.0 asks for an antialiased target only for content it does not draw
+                    // analytically, and the memory lines say whether any did (TickMemoryReport).
+                    if (got <= 1) SKSE::log::info("Magelight: MSAA off");
+                    else if (got == s_msaa) SKSE::log::info("Magelight: MSAA {}x for the page targets Ultralight asks to antialias", got);
+                    else SKSE::log::info("Magelight: MSAA {}x for the page targets Ultralight asks to antialias (Magelight.json asks {}x, which this graphics card cannot do for page targets)", got, s_msaa);
                     ultralight::Platform::instance().set_gpu_driver(drv);
                     s_gpuActive = true;
                 }
@@ -5063,6 +5865,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
         }
 
+        if (!s_pagesOnFiber) ApplyGameStackReserve();
         s_ulRenderer = ultralight::Renderer::Create();
         if (!s_ulRenderer) {
             SKSE::log::error("Magelight: the Ultralight renderer could not be created");
@@ -5119,14 +5922,25 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool waking = v.dormant;
         v.dormant = false;
         v.domReady = false;
+        v.docDomReady = false;
+        v.hostLoad.pending = false;
         v.loadFailed = false;
         v.prepainted = false;
         v.paintableAt = 0;
+        v.settleRepaint = false;
+        v.settleRepainted = false;
         ultralight::ViewConfig vc;
         vc.is_accelerated = s_gpuActive;
         vc.is_transparent = true;
+        vc.clipboard_read_policy = ultralight::ClipboardReadPolicy::Deny;
         vc.initial_device_scale = v.deviceScale;
+        vc.enable_compositor = kEnableCompositor;
+        // Only the UI-mode view has View focus (DrainInputQueue's focus marker), so a background page's autofocus
+        // field never reports that it wants a keyboard or the IME. Unfocused, a page still animates and runs its
+        // timers, and its focused field still takes keys (tools/editor-test).
+        vc.initial_focus = false;
         v.pageCursor = 0;   // a new View has reported nothing yet
+        v.edit = {};
         v.ul = s_ulRenderer->CreateView(
             static_cast<std::uint32_t>(v.w), static_cast<std::uint32_t>(v.h), vc,
             GetOrCreateSession(v.sessionName));
@@ -5134,21 +5948,30 @@ float4 ps_straight(VSOut i) : SV_Target {
             SKSE::log::error("Magelight: CreateView failed for view {}", v.id);
             return false;
         }
+        // Created at w/h and deviceScale: a SetViewBounds or SetViewScale made while there was no View is applied.
+        v.boundsDirty = false;
+        v.scaleDirty = false;
+        // A new View is visible. One that loads hidden (the load queue, a hidden rebuild) is hidden before it has a
+        // page, so the page starts 'hidden' and paints nothing or runs no requestAnimationFrame until shown.
+        // set_visible runs no page code and this View has no page yet, so the lock is fine here.
+        if (!v.visible) v.ul->set_visible(false);
         v.loadNow = false;
-        v.ul->set_load_listener(&s_loadListener);
-        v.ul->set_view_listener(&s_viewListener);
-        v.ul->set_network_listener(&s_networkListener);
+        v.ul->set_load_listener(&s_loadListener.value);
+        v.ul->set_view_listener(&s_viewListener.value);
+        v.ul->set_editor_listener(&s_editorListener.value);
+        v.ul->set_network_listener(&s_networkListener.value);
         // Prefer the on-disk page (the path the React frontend ships
         // through). Relative paths resolve against s_runtimeDir via the
         // platform file system; a drive-letter path loads as-is (SA's
-        // HTML lives in SA's own mod folder). Inline banner fallback.
+        // HTML lives in SA's own mod folder). Inline banner fallback. A view
+        // a host navigation moved loads that URL again, fragment included.
         const bool absolute = v.htmlPath.size() > 1 && v.htmlPath[1] == ':';
         const std::filesystem::path onDisk =
             absolute ? std::filesystem::path(v.htmlPath) : (s_runtimeDir / v.htmlPath);
         if (!v.htmlPath.empty() && std::filesystem::exists(onDisk)) {
-            SKSE::log::info("Magelight: view {} loading from disk ({})", v.id, v.htmlPath);
-            const std::string url =
-                absolute ? PathToFileUrl(onDisk) : ("file:///" + v.htmlPath);
+            const std::string url = !v.pageUrl.empty() ? v.pageUrl
+                : absolute ? PathToFileUrl(onDisk) : ("file:///" + v.htmlPath);
+            SKSE::log::info("Magelight: view {} loading from disk ({})", v.id, v.pageUrl.empty() ? v.htmlPath : v.pageUrl);
             v.ul->LoadURL(url.c_str());
         } else {
             SKSE::log::warn("Magelight: view {} page '{}' missing — inline banner fallback",
@@ -5188,21 +6011,37 @@ float4 ps_straight(VSOut i) : SV_Target {
     static double s_lastUlUpdateMs = 0.0;   // the previous frame's Renderer::Update, ms (FrameWork)
 
     // The hidden view to prepaint this frame (nullptr: none), marked painted. One per frame, and not on a frame
-    // whose Update already ran over the load budget: the paint is the cost this moves off the first show, so it
-    // must not land on an already heavy frame. Render thread.
+    // whose Update (updateMs) already ran over the load budget: the paint is the cost this moves off the first show,
+    // so it must not land on an already heavy frame. Render thread. FrameWork shows its View where it syncs a show
+    // (between Update and RefreshDisplay) and hides it again after Render, so that one Render paints it as a show
+    // would, requestAnimationFrame included; its page gets one round of rAF callbacks and, in the next Update, two
+    // visibilitychange events that both read 'hidden'.
+    // A view is prepainted kPrepaintSettleMs after it became paintable (MlView::paintableAt: a DOM ready, a resize, or
+    // a host Navigate or Reload that kept its page), then once more (again = true) when OnPageSettled marks it, at most
+    // once until the next DOM ready or kept host request (settleRepainted): 2.0 starts decoding a page's images only
+    // once it is painted, so the first paint drew none, and this one moves their paint off the first show. Not gated
+    // on needs_paint, which is always false while hidden; a show of an unchanged page paints next to nothing.
     static constexpr std::uint64_t kPrepaintSettleMs = 1500;
-    static ultralight::View* TakePrepaintView(ViewId& id)
+    static ultralight::View* TakePrepaintView(ViewId& id, bool& again, double updateMs)
     {
         // Not in a headset: the paint is one long frame wherever it lands, and in VR that is a dropped frame the
         // player sees, which the first open (a menu the player chose to raise) hides better.
         if (VR::IsLive()) return nullptr;
-        if (s_lastUlUpdateMs > static_cast<double>(s_loadBudgetMs.load())) return nullptr;
+        if (updateMs > static_cast<double>(s_loadBudgetMs.load())) return nullptr;
         const std::uint64_t now = GetTickCount64();
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         for (auto& vp : s_views) {
             MlView& v = *vp;
-            if (!v.prepaint || v.prepainted || v.visible || !v.ul || !v.domReady || !v.paintableAt) continue;
+            if (!v.prepaint || v.visible || !v.ul || !v.domReady) continue;
             if (v.dormant || v.destroyPending || v.rebuildPending || v.boundsDirty || v.isInspector) continue;
+            if (v.settleRepaint) {
+                v.settleRepaint = false;
+                v.settleRepainted = true;
+                id = v.id;
+                again = true;
+                return v.ul.get();
+            }
+            if (v.prepainted || !v.paintableAt) continue;
             if (now - v.paintableAt < kPrepaintSettleMs) continue;
             v.prepainted = true;
             id = v.id;
@@ -5295,6 +6134,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // caller clears after the lock: WebKit's teardown runs page handlers that re-enter the locking listeners.
     static void ReleaseViewKeepRecordLocked(MlView& v, std::vector<ultralight::RefPtr<ultralight::View>>& released)
     {
+        ForgetEditStateLocked(v, true);   // while v.ul still names the View its waiting reports came from
         // overlay + host copy go BEFORE the texture (lifetime rule);
         // hibernating=true keeps the view's controller binding (0.28.4)
         VR::ReleaseView(v.id, /*hibernating=*/true);
@@ -5303,8 +6143,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         v.texW = v.texH = 0;
         v.dormant = true;
         v.domReady = false;
+        v.docDomReady = false;
+        v.hostLoad.pending = false;
         v.prepainted = false;
         v.paintableAt = 0;
+        v.settleRepaint = false;
+        v.settleRepainted = false;
         v.liveScale = 0.0f;
         released.push_back(std::move(v.ul));
         v.ul = nullptr;
@@ -5336,13 +6180,12 @@ float4 ps_straight(VSOut i) : SV_Target {
     // Render thread, after HibernateIdleViews and before MaterializeViews: RebuildViewAtScale. The View is released
     // as hibernation releases it and the record loads again in a new View created with initial_device_scale = the new
     // deviceScale: a visible view in this same frame (MaterializeViews loads a dormant visible view at once), a hidden
-    // one at once too unless it hibernates or loads on show (then it stays dormant until shown). Never
-    // set_device_scale on a laid-out page. A page hosting a Web Inspector is not rebuilt (the inspector is bound to
-    // its View): it keeps its live scale.
+    // one at once too unless it hibernates or loads on show (then it stays dormant until shown). The page is never
+    // rescaled live here (SetViewScale does that). A page hosting a Web Inspector is not rebuilt (the inspector is
+    // bound to its View): it keeps its live scale.
     static void ApplyPendingRebuilds()
     {
         std::vector<ultralight::RefPtr<ultralight::View>> released;
-        std::vector<ViewId> rebuilt;
         {
             std::lock_guard<std::mutex> lk(s_viewsMutex);
             for (auto& vp : s_views) {
@@ -5366,24 +6209,18 @@ float4 ps_straight(VSOut i) : SV_Target {
                     v.dormant = false;
                     v.loadNow = true;
                 }
-                rebuilt.push_back(v.id);
                 SKSE::log::info("Magelight: view {} released for a rebuild at device scale {:.3f}{}", v.id,
                     v.deviceScale, waitForShow ? " (hidden: it loads when shown)" : "");
             }
         }
         released.clear();   // WebKit teardown outside the lock, like a destroy
-        // The old page's focused text field went with it: clear its keyboard claims as a '__textfocus' '0' would.
-        for (const ViewId id : rebuilt) {
-            VR::NoteTextFocus(id, false);
-            if (IsUIModeActive() && id == static_cast<ViewId>(s_uiModeView.load()) &&
-                id != static_cast<ViewId>(s_kbViewId.load())) {
-                ImeOnTextFocus(false);
-                ShowOwnKeyboard(false);
-            }
-        }
     }
 
-    // Render thread: apply a pending SetViewBounds resize.
+    // Render thread: apply a pending SetViewBounds resize or SetViewScale. Under s_viewsMutex because neither call
+    // runs page script: the page lays out in the next Update and its resize, matchMedia and ResizeObserver handlers
+    // run in Render (a hidden View's in the Render of its next show or prepaint, whichever comes first). The header
+    // does not promise that; re-check it at every SDK bump (invariant 16), and move the calls out of the lock as
+    // ApplyPendingLifecycle does if it ever changes.
     static void ApplyPendingResizes()
     {
         std::lock_guard<std::mutex> lk(s_viewsMutex);
@@ -5391,17 +6228,34 @@ float4 ps_straight(VSOut i) : SV_Target {
             MlView& v = *vp;
             if (!v.ul || !v.boundsDirty) continue;
             v.boundsDirty = false;
-            if (v.domReady) {   // a resize repaints the whole page: prepaint it again once it settles
+            const bool sized = v.w > 0 && v.h > 0;
+            const auto w = static_cast<std::uint32_t>(v.w), h = static_cast<std::uint32_t>(v.h);
+            const float scale = v.deviceScale > 0.f ? v.deviceScale : 1.f;
+            const bool newScale = v.scaleDirty && std::fabs(scale - v.liveScale) >= 0.0005f;
+            v.scaleDirty = false;
+            const bool newSize = sized && (w != v.ul->width() || h != v.ul->height());
+            // Nothing changed (a size set back before this frame, a SetViewScale with the scale the View has): no
+            // call. On 2.0 a Resize at a fractional scale lays the page out again with its CSS size rounded up even
+            // at the same size and scale (innerWidth 1423 for 1920 px at 1.35, where the View created so has 1422).
+            if (!newScale && !newSize) continue;
+            // A resize repaints the whole page: prepaint it again kPrepaintSettleMs from now. A resize does not reset
+            // the page's settle (only a navigation does): a page that already settled gets only this prepaint (a
+            // settle repaint still due is folded into it), and one not painted yet settles after it and gets its
+            // settle repaint then. The per-load latch (settleRepainted) is left as it is.
+            if (v.domReady) {
                 v.prepainted = false;
                 v.paintableAt = GetTickCount64();
+                v.settleRepaint = false;
             }
-            if (v.scaleDirty) {   // 0.26.9 SetViewScale, applied here on the render thread
-                v.scaleDirty = false;
-                v.ul->set_device_scale(v.deviceScale > 0.f ? v.deviceScale : 1.f);
-                v.liveScale = v.deviceScale > 0.f ? v.deviceScale : 1.f;
+            if (newScale) {
+                // A new scale and the current size in one call, as the SDK asks when both may change.
+                if (sized) v.ul->Resize(w, h, scale);
+                else v.ul->set_device_scale(scale);
+                v.liveScale = scale;
+            } else {
+                v.ul->Resize(w, h);
             }
-            if (v.w > 0 && v.h > 0) {
-                v.ul->Resize(static_cast<std::uint32_t>(v.w), static_cast<std::uint32_t>(v.h));
+            if (sized) {
                 // CPU-path texture no longer matches — recreate lazily.
                 if (v.srv) { v.srv->Release(); v.srv = nullptr; }
                 if (v.tex) { v.tex->Release(); v.tex = nullptr; }
@@ -5422,7 +6276,14 @@ float4 ps_straight(VSOut i) : SV_Target {
         // (beforeunload/unload handlers, cancelled provisional loads), which
         // re-enters the console / load-failed listeners — and those take
         // s_viewsMutex. Same shape as DrainBridgeQueues.
-        struct Work { ultralight::RefPtr<ultralight::View> ul; ViewId id; std::string url; bool reload; };
+        struct Work {
+            ultralight::RefPtr<ultralight::View> ul;
+            ViewId id;
+            std::string url;
+            bool reload = false;
+            bool alsoReload = false;   // a ReloadView came with the navigation: it stands for it only if it loads
+            MlView::HostLoad before;   // put back if the call keeps the page
+        };
         std::vector<Work> work;
         std::vector<std::pair<ViewId, ultralight::RefPtr<ultralight::View>>> destroyed;
         // EvalJS requests still queued on a view being destroyed: their fn is
@@ -5444,30 +6305,97 @@ float4 ps_straight(VSOut i) : SV_Target {
                     if (v.consoleRate.suppressed)
                         SKSE::log::info("Magelight: [view {} console] {} more lines not logged (over {} a second)",
                             id, v.consoleRate.suppressed, kConsoleLinesPerSec);
+                    ForgetEditStateLocked(v, true);
                     destroyed.emplace_back(id, std::move(v.ul));   // released after the erase, outside the lock
                     it = s_views.erase(it);
                     continue;
                 }
-                if (v.ul && !v.navigateUrl.empty()) {
-                    work.push_back({ v.ul, v.id, v.navigateUrl, false });
-                    v.htmlPath = v.navigateUrl.rfind("file:///", 0) == 0 ? v.navigateUrl.substr(8) : v.navigateUrl;
-                    v.navigateUrl.clear();
+                if (v.ul && (!v.navigateUrl.empty() || v.reloadPending)) {
+                    // Set before the call, so a failure fired inside it is caught too.
+                    if (!v.hostLoad.pending)
+                        v.hostLoad = { true, v.docDomReady, v.reloadedFlag, v.htmlPath, v.pageUrl };
+                    Work w{ v.ul, v.id };
+                    w.before = v.hostLoad;
+                    if (!v.navigateUrl.empty()) {
+                        w.alsoReload = v.reloadPending;
+                        // Any other URL is stopped as it begins (OnBeginLoading) and leaves the page as it is.
+                        if (IsLocalPageUrl(v.navigateUrl)) {
+                            v.htmlPath = MlFileSystem::PathOfUrl(v.navigateUrl);
+                            v.pageUrl = v.navigateUrl;
+                        }
+                        w.url = std::move(v.navigateUrl);
+                        v.navigateUrl.clear();
+                    } else {
+                        w.reload = true;
+                    }
                     v.reloadedFlag = true;
-                } else if (v.ul && v.reloadPending) {
-                    work.push_back({ v.ul, v.id, {}, true });
-                    v.reloadedFlag = true;
+                    v.docDomReady = false;
+                    work.push_back(std::move(w));
                 }
                 v.reloadPending = false;
                 ++it;
             }
         }
+        // A call that begins no main-frame load (s_mainLoadsBegun) keeps the document: a LoadURL that only added or
+        // changed the page's fragment (the page scrolls and gets a hashchange), or one OnBeginLoading stopped. No DOM
+        // ready follows, so what the request cleared for a new page is put back below. A load that begins can still
+        // fail and keep the page, which OnFailLoading puts back the same way (MlView::hostLoad, pending until then).
+        // A page that is replaced reports no loss of its text focus, before or after (tools/editor-test). In a View
+        // that has had a window object, the new document's comes as it begins, before its reports, and drops the old
+        // page's state (OnWindowObjectReady); a failed load brings none, so the page keeps its focused field. In one
+        // that has had none, nothing tells the new document from the old before the new one reports, so the state is
+        // dropped once the call has begun the load.
+        std::vector<const Work*> kept, began;
         for (auto& w : work) {
+            const std::uint64_t begun = s_mainLoadsBegun;
             if (w.reload) {
                 SKSE::log::info("Magelight: view {} reloading", w.id);
                 w.ul->Reload();
             } else {
                 SKSE::log::info("Magelight: view {} navigating to {}", w.id, w.url);
                 w.ul->LoadURL(w.url.c_str());
+                if (s_mainLoadsBegun == begun && w.alsoReload) {
+                    SKSE::log::info("Magelight: view {} kept its page on that navigation - reloading it, as asked", w.id);
+                    w.ul->Reload();
+                }
+            }
+            if (s_mainLoadsBegun != begun) {
+                began.push_back(&w);
+                continue;
+            }
+            SKSE::log::info("Magelight: view {} kept its page on that {} (no DOM ready follows)", w.id,
+                w.reload ? "reload" : "navigation");
+            kept.push_back(&w);
+        }
+        if (!began.empty()) {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (const Work* w : began) {
+                MlView* v = FindViewLocked(w->id);
+                if (!v || v->ul.get() != w->ul.get()) continue;
+                bool windowed = false;
+                {
+                    std::lock_guard<std::mutex> ek(s_editMutex);
+                    windowed = s_docLoads.HasWindow(v->ul.get());
+                }
+                if (!windowed) ForgetEditStateLocked(*v);
+            }
+        }
+        if (!kept.empty()) {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (const Work* w : kept) {
+                MlView* v = FindViewLocked(w->id);
+                if (!v || v->ul.get() != w->ul.get()) continue;
+                v->hostLoad.pending = false;
+                v->docDomReady = w->before.docDomReady;
+                v->reloadedFlag = w->before.reloadedFlag;
+                // A page still before its DOM ready gets it as usual; a request made since cleared the rest for its
+                // own load.
+                if (!v->docDomReady || !v->navigateUrl.empty() || v->reloadPending) continue;
+                v->domReady = true;
+                v->prepainted = false;   // the page scrolled: prepainted again, as after a DOM ready
+                v->paintableAt = GetTickCount64();
+                v->settleRepaint = false;
+                v->settleRepainted = false;
             }
         }
         for (auto& [id, e] : orphanEvals)
@@ -5479,20 +6407,25 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     }
 
-    // ── Frame work (render thread) ──────────────────────────────────────────
-
-    // Modifier state via GetAsyncKeyState — the render thread has no message
-    // queue, so thread-local GetKeyState would lie here.
-    static unsigned CurrentKeyModifiers()
+    // Render thread: each View's Ultralight visibility follows its record (ShowView only changes the record, from any
+    // thread). A hidden View paints nothing in Render, runs no requestAnimationFrame or CSS animation and its page
+    // reads document.visibilityState 'hidden'; its timers, messages, InteropCalls and EvalJS still run. FrameWork
+    // calls this before the input and again between Update and RefreshDisplay (invariant 23). A view DestroyView
+    // marked is hidden here too, until ApplyPendingLifecycle erases it. set_visible runs no page code on 2.0.0-beta.2
+    // (the visibilitychange handler runs in the next Update); it is called outside the lock anyway, like the calls
+    // that do run page code (invariant 13), so an SDK whose set_visible does cannot re-enter a locking listener.
+    static void SyncViewVisibility()
     {
-        unsigned mods = 0;
-        if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    mods |= ultralight::KeyEvent::kMod_AltKey;
-        if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= ultralight::KeyEvent::kMod_CtrlKey;
-        if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   mods |= ultralight::KeyEvent::kMod_ShiftKey;
-        if ((MlGetAsyncKeyState(VK_LWIN) | MlGetAsyncKeyState(VK_RWIN)) & 0x8000)
-            mods |= ultralight::KeyEvent::kMod_MetaKey;
-        return mods;
+        std::vector<std::pair<ultralight::RefPtr<ultralight::View>, bool>> changes;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (auto& vp : s_views)
+                if (vp->ul && vp->ul->is_visible() != vp->visible) changes.emplace_back(vp->ul, vp->visible);
+        }
+        for (auto& [ul, show] : changes) ul->set_visible(show);
     }
+
+    // ── Frame work (render thread) ──────────────────────────────────────────
 
     // Render thread, each frame after the input: the titles WebCore reported, one per page, as '__tooltip' calls.
     // A change from Renderer::Update reaches the page a frame later; one that lands after a leave is kept by the page
@@ -5512,174 +6445,439 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (!v || (text.empty() && !v->tooltipText)) continue;
             v->tooltipText = !text.empty();
             const float c = Tooltip::CursorCss(s_cursorHeight, bh, v->deviceScale);
-            QueueOutboundLocked(*v, { kTooltipDispatch + MlJsonQuote(Tooltip::Payload(text, c)) + ");", {}, true });
+            QueueOutboundLocked(*v, { "__tooltip", Tooltip::Payload(text, c), false });
         }
         if (leaveAll)
             for (auto& vp : s_views) QueueTooltipLeaveLocked(*vp);
     }
 
-    // Translate queued Windows messages into Ultralight events. Render thread
-    // only — the sole thread allowed to touch views.
-    // Routing: keys/text -> the UI-mode (focused) view; mouse -> the topmost
-    // visible non-clickThrough view under that event's coordinates, falling
-    // back to the UI-mode view so drags that leave the panel keep working.
+    // ── Pointer and keys as the pages were sent them (render thread, DrainInputQueue) ──
+    // A press keeps its view until every button of its source is up, as in a browser: that source's moves and
+    // releases go there wherever it points (Ultralight takes coordinates outside the view and ends the press), so a
+    // drag released over another view or the game still ends. Each source has its own press and hover
+    // (Input::PointerRoutes); views are named by id and looked up before each use. Positions are the view's CSS px.
+    static Input::PointerRoutes s_pointer;
+    static ViewId        s_focusedView = 0;   // the view the focus marker last gave View focus (0 = none)
+    static ViewId        s_sentKeyView = 0;   // the view the last key event went to
+    static std::uint16_t s_sentKeys = 0;      // the Input::KeyBits it went with: the modifiers that page holds down
+
+    // Where the IME's window opens, in the view's CSS px: the composition character Ime::AnchorChar names (it does
+    // not jump as the candidates change length), else the caret. Empty when there is neither. Render thread.
+    static ultralight::Rect ImeAnchor(ultralight::Editor* ed, const Ime::Snapshot& snap)
+    {
+        if (!ed) return {};
+        if (!ed->HasComposition()) return ed->GetCaretBounds();
+        const ultralight::Rect r = ed->GetCompositionCharacterBounds(Ime::AnchorChar(snap));
+        return r.IsEmpty() ? ed->GetCompositionCharacterBounds(0) : r;
+    }
+
+    // A view about to lose View focus (UI mode ending or moving) keeps its reading as typed, as a browser's blur does:
+    // Ultralight 2.0's Unfocus leaves a composition open (no compositionend, no OnDiscardComposition), so the next IME
+    // change would replace it, in that view or in the next one. The IME drops its copy (kImeCtlMsg 3), which ends the
+    // page's list too. Render thread, outside s_viewsMutex (compositionend runs page script).
+    static void ImeFinishComposition(ultralight::View* v)
+    {
+        ultralight::Editor* ed = v ? v->editor() : nullptr;
+        if (!ed || !ed->HasComposition()) return;
+        ed->FinishComposition();
+        if (s_hwnd) PostMessageW(s_hwnd, kImeCtlMsg, 3, 0);
+    }
+
+    // s_imeEditorComposing, once a frame after the input and the focus reports: whether the UI-mode view's Editor holds
+    // a composition (false outside UI mode). Render thread, on the fiber; the view is looked up under s_viewsMutex and
+    // asked outside it.
+    static void NoteEditorComposition()
+    {
+        if (!s_focused.load()) {
+            s_imeEditorComposing.store(false);
+            return;
+        }
+        ultralight::RefPtr<ultralight::View> ul;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            if (MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()))) ul = v->ul;
+        }
+        s_imeEditorComposing.store(ul && ul->editor()->HasComposition());
+    }
+
+    // The view the last '__ime' message other than an 'end' went to (render thread): an 'end' goes there, and a
+    // change for another view first ends it there, so no page keeps a list the IME has closed.
+    static ViewId s_imePageView = 0;
+
+    // An IME op's '__ime' message, once the op has run: its state and text, the IME's state and the anchor. Render
+    // thread, outside s_viewsMutex (InteropCall takes it).
+    static void ImeTellPage(const EditOp& op, ViewId uiId, const ultralight::Rect& anchor)
+    {
+        const bool end = std::strcmp(op.imeState, "end") == 0;
+        if (s_imePageView && (end || s_imePageView != uiId)) InteropCall(s_imePageView, "__ime", Ime::Payload("end", "", {}));
+        if (end) {
+            if (!s_imePageView && uiId) InteropCall(uiId, "__ime", Ime::Payload("end", "", {}));
+            s_imePageView = 0;
+            return;
+        }
+        if (!uiId) return;
+        s_imePageView = uiId;
+        Ime::Snapshot snap = op.ime;
+        if (!anchor.IsEmpty()) {
+            snap.hasAnchor = true;
+            snap.anchorX = anchor.left;
+            snap.anchorY = anchor.top;
+            snap.anchorH = anchor.bottom - anchor.top;
+        }
+        // text: the committed string on 'commit', the composition on 'compose'.
+        const std::string text = op.kind == EditOp::Commit ? WideToUtf8(op.text)
+                               : std::strcmp(op.imeState, "compose") == 0 ? snap.composition : std::string();
+        InteropCall(uiId, "__ime", Ime::Payload(op.imeState, text, snap));
+    }
+
+    // Translate queued Windows messages into Ultralight events. Render thread only (the sole thread that touches
+    // views); no Ultralight call is made under s_viewsMutex.
+    // Routing: keys and text -> the UI-mode view. A pointer event -> the view a button its source holds was pressed
+    // on, else the topmost visible interactive view under the point, else the UI-mode view (a point outside every
+    // view reaches it as a move outside its page). The wheel always goes where it points.
     static void DrainInputQueue(float bw, float bh)
     {
         std::vector<InputMsg> msgs;
+        std::vector<EditOp> editOps;
         {
             std::lock_guard<std::mutex> lk(s_inputMutex);
             msgs.swap(s_inputQueue);
+            editOps.swap(s_editOps);
         }
         if (msgs.empty()) return;
 
         ultralight::RefPtr<ultralight::View> uiUl;
+        ViewId uiId = 0;
         int uiX = 0, uiY = 0;
+        float uiDs = 1.f;
         {
             std::lock_guard<std::mutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()))) {
                 uiUl = v->ul;
+                uiId = v->id;
                 float ex = 0, ey = 0;
                 EffectivePos(*v, bw, bh, ex, ey);
                 uiX = static_cast<int>(ex);
                 uiY = static_cast<int>(ey);
+                uiDs = v->deviceScale > 0.f ? v->deviceScale : 1.f;
             }
         }
-
-        // Topmost visible interactive view containing (mx,my); falls back to
-        // the UI-mode view. Outputs the target's screen origin.
-        // Also hands back the target's device scale and wheel step (0.28.5):
-        // one lock and one scan per event — two lambdas used to re-lock and
-        // re-scan for what this loop already had in hand (review 2026-09-09).
-        auto hitTest = [&](int mx, int my, int& tx, int& ty, float& ds, int& step) -> ultralight::RefPtr<ultralight::View> {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
-            auto take = [&](const MlView& v) {
-                ds   = v.deviceScale > 0.f ? v.deviceScale : 1.f;
-                step = v.scrollStep > 0 ? v.scrollStep : 40;   // 0.28.0 per-view wheel step
-            };
-            for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
-                MlView& v = **it;
-                if (!v.ul || !v.visible || v.clickThrough) continue;
-                float ex = 0, ey = 0;
-                EffectivePos(v, bw, bh, ex, ey);
-                if (mx >= ex && my >= ey && mx < ex + v.w && my < ey + v.h) {
-                    tx = static_cast<int>(ex);
-                    ty = static_cast<int>(ey);
-                    take(v);
-                    return v.ul;
-                }
-            }
-            tx = uiX; ty = uiY;
-            if (const MlView* u = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()))) take(*u);
-            return uiUl;
-        };
 
         // Ultralight takes mouse coordinates in LOGICAL (CSS) pixels: AppCore
         // converts window pixels with its DPI scale before FireMouseEvent, so
         // a view rendered at deviceScale S needs (px / S). Backbuffer-space px
         // reach here from both the Win32 sink and the VR laser (it posts into
-        // the same queue), so this one spot covers both. `ds` below is the
-        // hit view's scale, from hitTest.
-
+        // the same queue), so this one spot covers both.
         using UL = ultralight::MouseEvent;
+
+        // Where a pointer event goes: the view, its screen origin, device scale and wheel step. inside = the point
+        // is on that view (false for the UI-mode fallback and the held view).
+        struct PointerTarget {
+            ultralight::RefPtr<ultralight::View> ul;
+            ViewId id = 0;
+            int tx = 0, ty = 0;
+            float ds = 1.f;
+            int step = 40;
+            bool inside = false;
+            int X(int mx) const { return static_cast<int>((mx - tx) / ds); }
+            int Y(int my) const { return static_cast<int>((my - ty) / ds); }
+        };
+        auto targetOf = [&](const MlView& v) {   // s_viewsMutex held
+            PointerTarget t;
+            float ex = 0, ey = 0;
+            EffectivePos(v, bw, bh, ex, ey);
+            t.ul = v.ul;
+            t.id = v.id;
+            t.tx = static_cast<int>(ex);
+            t.ty = static_cast<int>(ey);
+            t.ds = v.deviceScale > 0.f ? v.deviceScale : 1.f;
+            t.step = v.scrollStep > 0 ? v.scrollStep : 40;   // 0.28.0 per-view wheel step
+            return t;
+        };
+        // The topmost visible interactive view containing (mx, my), else the UI-mode view.
+        auto hitTest = [&](int mx, int my) {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
+                const MlView& v = **it;
+                if (!v.ul || !v.visible || v.clickThrough) continue;
+                float ex = 0, ey = 0;
+                EffectivePos(v, bw, bh, ex, ey);
+                if (mx >= ex && my >= ey && mx < ex + v.w && my < ey + v.h) {
+                    PointerTarget t = targetOf(v);
+                    t.inside = true;
+                    return t;
+                }
+            }
+            const MlView* u = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+            return (u && u->ul) ? targetOf(*u) : PointerTarget{};
+        };
+        // The view `src`'s held buttons were pressed on, while it keeps its page; otherwise that hold is over.
+        auto captured = [&](unsigned src) {
+            const ViewId id = s_pointer.Captured(src);
+            if (!id) return PointerTarget{};
+            {
+                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                const MlView* v = FindViewLocked(id);
+                if (v && v->ul && !v->destroyPending) return targetOf(*v);
+            }
+            s_pointer.Drop(src);
+            return PointerTarget{};
+        };
+        auto pointerTarget = [&](unsigned src, int mx, int my) {
+            PointerTarget t = captured(src);
+            return t.ul ? t : hitTest(mx, my);
+        };
+        // `src`'s pointer went to view `id`. The view it left hides its tooltip and gets a move outside itself (its
+        // mouseout and mouseleave fire and its :hover clears), each when PointerRoutes::Hover says so.
+        auto noteHover = [&](unsigned src, ViewId id) {
+            const Input::PointerRoutes::Left gone = s_pointer.Hover(src, id);
+            if (!gone.tooltip) return;
+            ultralight::RefPtr<ultralight::View> left;
+            {
+                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                if (MlView* prev = FindViewLocked(gone.tooltip)) {
+                    QueueTooltipLeaveLocked(*prev);
+                    if (gone.leave && !prev->destroyPending) left = prev->ul;
+                }
+            }
+            if (left) {
+                UL out{ UL::kType_MouseMoved, -1, -1, UL::kButton_None };
+                left->FireMouseEvent(out);
+            }
+        };
+        auto buttonOf = [](const InputMsg& e) {
+            switch (e.msg) {
+            case WM_RBUTTONDOWN: case WM_RBUTTONUP: return UL::kButton_Right;
+            case WM_MBUTTONDOWN: case WM_MBUTTONUP: return UL::kButton_Middle;
+            case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+                return GET_XBUTTON_WPARAM(e.wparam) == XBUTTON2 ? UL::kButton_Forward : UL::kButton_Back;
+            default: return UL::kButton_Left;
+            }
+        };
+
+        // Every key event is made by Input::MakeKeyEvent (never the bare constructor: on VR it would lose every
+        // modifier), with the state the key was queued with.
+        auto keyEvent = [](ultralight::KeyEvent::Type type, WPARAM w, LPARAM l, bool sys, std::uint16_t keys) {
+            bool applied = true;
+            ultralight::KeyEvent evt = Input::MakeKeyEvent(type, w, l, sys, keys, &applied);
+            static bool s_warned = false;
+            if (!applied && !s_warned) {
+                s_warned = true;
+                SKSE::log::warn("Magelight: the render thread's keyboard state could not be read; keys reach pages "
+                                "with that thread's own modifiers");
+            }
+            return evt;
+        };
+        // A character as a Char key event to the UI-mode view: one UTF-16 unit, or a surrogate pair, which is built by
+        // hand (the constructor takes one unit; the public modifiers of a hand-built event count). The Windows keys are
+        // left out: no event the constructor makes reports metaKey (invariant 24).
+        auto fireChar = [&](const ultralight::Char16* units, unsigned n, LPARAM l, std::uint16_t keys) {
+            if (n == 1) {
+                uiUl->FireKeyEvent(keyEvent(ultralight::KeyEvent::kType_Char, units[0], l, false, keys));
+                return;
+            }
+            ultralight::KeyEvent evt;
+            evt.type = ultralight::KeyEvent::kType_Char;
+            evt.modifiers = Input::ModsFromKeyBits(static_cast<std::uint16_t>(keys & ~(Input::kKbLWin | Input::kKbRWin)));
+            evt.text = ultralight::String(ultralight::String16(units, n));
+            evt.unmodified_text = evt.text;
+            uiUl->FireKeyEvent(evt);
+        };
+        // Releases no message will bring (focus lost, UI mode left or moved): a key-up for each modifier the page
+        // that last got a key holds down, so a later click reports none (mouse events take their modifiers from the
+        // last key event), and a release of each held button at the last position its view was sent.
+        auto releaseKeys = [&]() {
+            const unsigned held = s_sentKeys & Input::kKbModifiers;
+            if (!held) return;
+            std::uint16_t keys = s_sentKeys;
+            s_sentKeys = static_cast<std::uint16_t>(s_sentKeys & ~Input::kKbModifiers);
+            ultralight::RefPtr<ultralight::View> ul;
+            {
+                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                if (MlView* v = s_sentKeyView ? FindViewLocked(s_sentKeyView) : nullptr) ul = v->ul;
+            }
+            if (!ul) return;
+            for (int i = 0; i < 8; ++i) {
+                if (!(held & (1u << i))) continue;
+                keys = static_cast<std::uint16_t>(keys & ~(1u << i));
+                const ultralight::KeyEvent evt = keyEvent(ultralight::KeyEvent::kType_KeyUp,
+                    static_cast<WPARAM>(Input::kModifierMsgVk[i]),
+                    Input::SyntheticKeyLParam(static_cast<UINT>(Input::kModifierVk[i]), true), false, keys);
+                ul->FireKeyEvent(evt);
+            }
+        };
+        auto releaseButtons = [&]() {
+            for (unsigned src = 0; src < Input::kPointerSources; ++src) {
+                const PointerTarget t = captured(src);
+                const Input::PointerRoutes::Held held = s_pointer.TakeHeld(src);
+                if (!t.ul) continue;
+                for (int b = UL::kButton_Left; b <= UL::kButton_Forward; ++b) {
+                    if (!(held.mask & (1u << b))) continue;
+                    UL up{ UL::kType_MouseUp, held.x, held.y, static_cast<UL::Button>(b) };
+                    t.ul->FireMouseEvent(up);
+                }
+            }
+        };
+
         for (const auto& e : msgs) {
             switch (e.msg) {
-            case 0:  // focus marker from SetUIMode — targets the UI-mode view
-                if (!uiUl) break;
-                if (e.wparam) uiUl->Focus();
-                else uiUl->Unfocus();
-                SKSE::log::info("Magelight: view {}", e.wparam ? "focused" : "unfocused");
+            case kEditOpMsg: {   // the UI-mode page's own editor
+                if (e.wparam >= editOps.size()) break;
+                const EditOp& op = editOps[e.wparam];
+                if (!uiUl || op.kind == EditOp::Notify) {   // nothing to edit: the page only hears of it
+                    if (*op.imeState) ImeTellPage(op, uiId, uiUl ? ImeAnchor(uiUl->editor(), op.ime) : ultralight::Rect{});
+                    break;
+                }
+                ultralight::Editor* ed = uiUl->editor();
+                if (op.kind == EditOp::Command) {
+                    const bool ran = ed->Execute(op.cmd);
+                    static std::atomic<int> s_n{ 0 };
+                    if (s_n.fetch_add(1) < 8)
+                        SKSE::log::info("Magelight: keyboard edit command {} {} in view {}", EditState::CommandName(op.cmd),
+                                        ran ? "ran" : "did nothing", uiId);
+                    break;
+                }
+                const ultralight::String16 t16(reinterpret_cast<const ultralight::Char16*>(op.text.data()), op.text.size());
+                const ultralight::String text(t16);
+                if (op.kind == EditOp::Insert) {
+                    if (op.text.empty() || ed->InsertText(text)) break;
+                    // No field takes text (a button, or nothing, has the focus): the characters go as Char key events,
+                    // as all VR typing did before, so a page that reads keypress still gets them. InsertText dispatched
+                    // nothing then (tools/editor-test), so nothing is sent twice.
+                    for (std::size_t i = 0; i < op.text.size(); ++i) {
+                        ultralight::Char16 u[2] = { static_cast<ultralight::Char16>(op.text[i]), 0 };
+                        unsigned n = 1;
+                        if (u[0] >= 0xD800 && u[0] <= 0xDBFF && i + 1 < op.text.size())   // SplitTyped keeps pairs whole
+                            u[n++] = static_cast<ultralight::Char16>(op.text[++i]);
+                        fireChar(u, n, 0, 0);
+                    }
+                    static std::atomic<int> s_n{ 0 };
+                    if (s_n.fetch_add(1) < 4)
+                        SKSE::log::info("Magelight: typed text with no editable field focused in view {} - sent as {} "
+                                        "key character(s)", uiId, op.text.size());
+                    break;
+                }
+                if (op.kind == EditOp::Compose && !op.text.empty()) {
+                    const ultralight::CompositionRange caret{ op.cursor, op.cursor };
+                    ed->SetComposition(text, op.segs.empty() ? nullptr : op.segs.data(), op.segs.size(), caret);
+                } else if (op.kind == EditOp::Commit) {
+                    ed->CommitComposition(text);
+                } else if (ed->HasComposition()) {   // an emptied composition, or the IME closed without a result
+                    if (op.kind == EditOp::End && op.keep) ed->FinishComposition();
+                    else ed->CancelComposition();
+                }
+                const ultralight::Rect r = ImeAnchor(ed, op.ime);
+                if (!r.IsEmpty() && s_hwnd) {
+                    s_imeCaretX.store(uiX + static_cast<int>(r.left * uiDs));
+                    s_imeCaretY.store(uiY + static_cast<int>(r.top * uiDs));
+                    s_imeCaretH.store(static_cast<int>((r.bottom - r.top) * uiDs));
+                    PostMessageW(s_hwnd, kImeCtlMsg, 2, 0);
+                }
+                if (*op.imeState) ImeTellPage(op, uiId, r);
+                break;
+            }
+            case 0: {   // focus marker (SetUIMode, SwitchUIModeView, the UI-mode view's late load): the UI-mode view
+                if (!e.wparam) {   // while the page still has key focus
+                    releaseKeys();
+                    releaseButtons();
+                } else if (s_sentKeyView != uiId) {
+                    releaseKeys();   // UI mode moved to another view: the page it left holds no modifier
+                }
+                // Only the UI-mode view has View focus (views are created without it): the one focused before loses
+                // it when UI mode moves. The reports these calls fire are marked (s_hostFocusCall): never a raise.
+                ultralight::RefPtr<ultralight::View> before;
+                if (s_focusedView && (s_focusedView != uiId || !e.wparam)) {
+                    std::lock_guard<std::mutex> lk(s_viewsMutex);
+                    if (MlView* v = FindViewLocked(s_focusedView); v && v->ul && v->ul != uiUl) before = v->ul;
+                }
+                s_hostFocusCall = true;
+                if (before) {
+                    ImeFinishComposition(before.get());
+                    before->Unfocus();
+                }
+                if (uiUl) {
+                    if (e.wparam) uiUl->Focus();
+                    else {
+                        ImeFinishComposition(uiUl.get());
+                        uiUl->Unfocus();
+                    }
+                }
+                s_hostFocusCall = false;
+                s_focusedView = (e.wparam && uiUl) ? uiId : 0;
+                if (uiUl) SKSE::log::info("Magelight: view {} {}", uiId, e.wparam ? "focused" : "unfocused");
+                break;
+            }
+            case kKeyReleaseMsg:
+                releaseKeys();
+                releaseButtons();
                 break;
             case WM_MOUSEMOVE: {
-                int tx = 0, ty = 0, step = 40; float ds = 1.f;
-                auto target = hitTest(GET_X_LPARAM(e.lparam), GET_Y_LPARAM(e.lparam), tx, ty, ds, step);
-                // Compared only, never dereferenced: the view it names is looked up in the registry first.
-                static ultralight::View* s_hoverUl = nullptr;
-                if (target.get() != s_hoverUl) {
-                    std::lock_guard<std::mutex> lk(s_viewsMutex);
-                    if (MlView* prev = FindViewByUlLocked(s_hoverUl)) QueueTooltipLeaveLocked(*prev);
-                    s_hoverUl = target.get();
-                }
-                if (!target) break;
-                UL evt{ UL::kType_MouseMoved,
-                        static_cast<int>((GET_X_LPARAM(e.lparam) - tx) / ds), static_cast<int>((GET_Y_LPARAM(e.lparam) - ty) / ds),
-                        UL::kButton_None };
-                target->FireMouseEvent(evt);
+                const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
+                const PointerTarget t = pointerTarget(e.source, mx, my);
+                noteHover(e.source, t.id);
+                if (!t.ul) break;
+                UL evt{ UL::kType_MouseMoved, t.X(mx), t.Y(my), UL::kButton_None };
+                t.ul->FireMouseEvent(evt);
+                s_pointer.Moved(e.source, t.id, evt.x, evt.y);
                 break;
             }
             case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
-            case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: {
-                const auto btn = (e.msg == WM_MBUTTONDOWN) ? UL::kButton_Middle
-                    : (e.msg == WM_RBUTTONDOWN) ? UL::kButton_Right : UL::kButton_Left;
-                int tx = 0, ty = 0, step = 40; float ds = 1.f;
-                auto target = hitTest(GET_X_LPARAM(e.lparam), GET_Y_LPARAM(e.lparam), tx, ty, ds, step);
-                if (!target) break;
-                UL evt{ UL::kType_MouseDown,
-                        static_cast<int>((GET_X_LPARAM(e.lparam) - tx) / ds), static_cast<int>((GET_Y_LPARAM(e.lparam) - ty) / ds), btn };
-                target->FireMouseEvent(evt);
+            case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN: {
+                const UL::Button btn = buttonOf(e);
+                const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
+                const PointerTarget t = pointerTarget(e.source, mx, my);
+                noteHover(e.source, t.id);
+                if (!t.ul) break;
+                UL evt{ UL::kType_MouseDown, t.X(mx), t.Y(my), btn };
+                t.ul->FireMouseEvent(evt);
+                // A press on the field that already has the focus reports nothing: DrainEditableStates looks for it.
+                if (btn == UL::kButton_Left && t.inside && t.id == uiId && s_uiClicks.size() < 16)
+                    s_uiClicks.push_back({ static_cast<float>(evt.x), static_cast<float>(evt.y) });
+                s_pointer.Press(e.source, t.id, btn, evt.x, evt.y);
                 break;
             }
-            case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: {
-                const auto btn = (e.msg == WM_MBUTTONUP) ? UL::kButton_Middle
-                    : (e.msg == WM_RBUTTONUP) ? UL::kButton_Right : UL::kButton_Left;
-                int tx = 0, ty = 0, step = 40; float ds = 1.f;
-                auto target = hitTest(GET_X_LPARAM(e.lparam), GET_Y_LPARAM(e.lparam), tx, ty, ds, step);
-                if (!target) break;
-                UL evt{ UL::kType_MouseUp,
-                        static_cast<int>((GET_X_LPARAM(e.lparam) - tx) / ds), static_cast<int>((GET_Y_LPARAM(e.lparam) - ty) / ds), btn };
-                target->FireMouseEvent(evt);
+            case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP: {
+                const UL::Button btn = buttonOf(e);
+                const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
+                const PointerTarget t = pointerTarget(e.source, mx, my);
+                const UL evt{ UL::kType_MouseUp, t.X(mx), t.Y(my), btn };
+                if (t.ul) t.ul->FireMouseEvent(evt);
+                s_pointer.Release(e.source, t.ul ? t.id : 0, btn, evt.x, evt.y);
                 break;
             }
             case WM_MOUSEWHEEL: {
-                // ~40 px per notch (WHEEL_DELTA = 120). Scrolls whatever sits
-                // under the cursor, like a real browser.
-                int tx = 0, ty = 0, step = 40; float ds = 1.f;
-                auto target = hitTest(GET_X_LPARAM(e.lparam), GET_Y_LPARAM(e.lparam), tx, ty, ds, step);
-                if (!target) break;
-                const int delta = GET_WHEEL_DELTA_WPARAM(e.wparam) * step / WHEEL_DELTA;   // default 40px per notch
+                // ~40 px per notch (WHEEL_DELTA = 120), at the point: the element under the pointer scrolls even on
+                // a page that has had no move. Outside every view the UI-mode page scrolls where its pointer was.
+                const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
+                const PointerTarget t = hitTest(mx, my);
+                if (!t.ul) break;
+                const int delta = GET_WHEEL_DELTA_WPARAM(e.wparam) * t.step / WHEEL_DELTA;   // default 40px per notch
                 ultralight::ScrollEvent evt{ ultralight::ScrollEvent::kType_ScrollByPixel, 0, delta };
-                target->FireScrollEvent(evt);
-                break;
-            }
-            // Key fields are populated manually (0.3.4) rather than via the
-            // SDK's Windows KeyEvent ctor. (The 0.3.1-0.3.5 fastfail family
-            // was the wrong-thread WebKit main-thread assert — see
-            // s_worldReady — not the events themselves.)
-            case WM_KEYDOWN: case WM_SYSKEYDOWN: {
-                if (!uiUl) break;
-                ultralight::KeyEvent evt;
-                evt.type = ultralight::KeyEvent::kType_RawKeyDown;
-                evt.virtual_key_code = static_cast<int>(e.wparam);
-                evt.native_key_code = static_cast<int>((e.lparam >> 16) & 0x1FF);
-                // key_identifier is what the page's e.key / e.keyIdentifier
-                // reads for non-printing keys (arrows, Escape, Enter) —
-                // without it they are "Unidentified" and focus navigation
-                // in pages breaks.
-                ultralight::GetKeyIdentifierFromVirtualKeyCode(evt.virtual_key_code, evt.key_identifier);
-                evt.modifiers = CurrentKeyModifiers();
-                evt.is_system_key = (e.msg == WM_SYSKEYDOWN);
-                evt.is_auto_repeat = (e.lparam & (1 << 30)) != 0;
-                evt.is_keypad = false;
-                uiUl->FireKeyEvent(evt);
-                if ((e.wparam == VK_BACK || e.wparam == VK_DELETE) && !evt.is_auto_repeat) {
-                    static std::atomic<int> s_n{ 0 };
-                    if (s_n.fetch_add(1) < 8)
-                        SKSE::log::info("Magelight: RawKeyDown vk=0x{:02X} id='{}' fired at view {}",
-                            evt.virtual_key_code, ultralight::String(evt.key_identifier).utf8().data(),
-                            static_cast<std::uint64_t>(s_uiModeView.load()));
+                if (t.inside) {
+                    evt.x = t.X(mx);
+                    evt.y = t.Y(my);
                 }
+                t.ul->FireScrollEvent(evt);
                 break;
             }
+            case WM_KEYDOWN: case WM_SYSKEYDOWN:
             case WM_KEYUP: case WM_SYSKEYUP: {
                 if (!uiUl) break;
-                ultralight::KeyEvent evt;
-                evt.type = ultralight::KeyEvent::kType_KeyUp;
-                evt.virtual_key_code = static_cast<int>(e.wparam);
-                evt.native_key_code = static_cast<int>((e.lparam >> 16) & 0x1FF);
-                ultralight::GetKeyIdentifierFromVirtualKeyCode(evt.virtual_key_code, evt.key_identifier);
-                evt.modifiers = CurrentKeyModifiers();
-                evt.is_system_key = (e.msg == WM_SYSKEYUP);
-                evt.is_keypad = false;
+                if (s_sentKeyView != uiId) releaseKeys();   // UI mode moved: the page it left holds no modifier
+                const bool down = e.msg == WM_KEYDOWN || e.msg == WM_SYSKEYDOWN;
+                const bool sys = e.msg == WM_SYSKEYDOWN || e.msg == WM_SYSKEYUP;
+                const ultralight::KeyEvent evt = keyEvent(
+                    down ? ultralight::KeyEvent::kType_RawKeyDown : ultralight::KeyEvent::kType_KeyUp,
+                    e.wparam, e.lparam, sys, e.keys);
                 uiUl->FireKeyEvent(evt);
+                s_sentKeyView = uiId;
+                s_sentKeys = e.keys;
+                if (down && (e.wparam == VK_BACK || e.wparam == VK_DELETE) && !(e.lparam & (1 << 30))) {
+                    static std::atomic<int> s_n{ 0 };
+                    if (s_n.fetch_add(1) < 8)
+                        SKSE::log::info("Magelight: RawKeyDown vk=0x{:02X} scan=0x{:03X} fired at view {}",
+                            e.wparam, (e.lparam >> 16) & 0x1FF, uiId);
+                }
                 break;
             }
             case WM_CHAR: {
@@ -5687,29 +6885,158 @@ float4 ps_straight(VSOut i) : SV_Target {
                 const ultralight::Char16 wch = static_cast<ultralight::Char16>(e.wparam);
                 // Control characters (Ctrl+C = 0x03, Ctrl+V = 0x16, ...) are
                 // editing commands already delivered by the RawKeyDown with
-                // kMod_CtrlKey; as text they would insert garbage. Tab and
+                // its Ctrl; as text they would insert garbage. Tab and
                 // Enter stay text (textarea newline / tab).
                 if (wch < 0x20 && wch != L'\t' && wch != L'\r' && wch != L'\n') break;
                 // A character outside the BMP (emoji, rare ideographs) arrives as two
                 // WM_CHARs; a lone half fired on its own is U+FFFD in the page. Hold the
-                // high half and fire the pair together (0.27.0).
+                // high half and fire the pair together.
                 static ultralight::Char16 s_pendingHigh = 0;
                 ultralight::Char16 units[2]; unsigned n = 0;
                 if (wch >= 0xD800 && wch <= 0xDBFF) { s_pendingHigh = wch; break; }
                 if (wch >= 0xDC00 && wch <= 0xDFFF) { if (!s_pendingHigh) break; units[n++] = s_pendingHigh; s_pendingHigh = 0; }
                 units[n++] = wch;
-                ultralight::String16 s16(units, n);
-                ultralight::KeyEvent evt;
-                evt.type = ultralight::KeyEvent::kType_Char;
-                evt.modifiers = CurrentKeyModifiers();
-                evt.text = ultralight::String(s16);
-                evt.unmodified_text = evt.text;
-                uiUl->FireKeyEvent(evt);
+                if (s_sentKeyView != uiId) releaseKeys();
+                fireChar(units, n, e.lparam, e.keys);
+                s_sentKeyView = uiId;
+                s_sentKeys = e.keys;
                 break;
             }
             default:
                 break;
             }
+        }
+    }
+
+    // ── Text focus: the VR keyboards and the IME (render thread) ──
+    // The reports the EditorListener recorded since the last call are applied to their views, and EditState::Tracker
+    // decides once what the keyboards and the IME do (the rules are in EditStateCore.h). FrameWork calls this right
+    // after DrainInputQueue, before the bridge drain and the second visibility sync: a keyboard raised by a click,
+    // a key or the focus marker gets its message in this frame's DrainBridgeQueues and is composited in this frame.
+    // A report fired later in the frame (a page's focus() from an InteropCall or a timer, a new page's autofocus in
+    // Render) is acted on in the next one.
+    static void DrainEditableStates()
+    {
+        std::vector<EditChange> raw;
+        {
+            std::lock_guard<std::mutex> lk(s_editMutex);
+            raw.swap(s_editChanges);
+        }
+        std::vector<EditState::Click> clicks;
+        clicks.swap(s_uiClicks);
+        std::vector<ViewId> resets;
+        resets.swap(s_editResets);
+        const bool resync = !resets.empty();
+        ViewId ui = IsUIModeActive() ? static_cast<ViewId>(s_uiModeView.load()) : 0;
+        if (ui == static_cast<ViewId>(s_kbViewId.load())) ui = 0;
+        static EditState::Tracker s_tracker;
+        if (s_tracker.Idle(ui, !raw.empty(), !clicks.empty(), resync)) return;
+
+        std::vector<EditState::Change> changes;
+        changes.reserve(raw.size());
+        ultralight::EditableState st{};
+        ultralight::RefPtr<ultralight::View> uiUl;
+        bool uiReported = false;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (const EditChange& c : raw) {
+                MlView* v = FindViewByUlLocked(c.ul);
+                if (!v) continue;
+                changes.push_back({ v->id, v->edit, c.st, c.hostFocus });
+                v->edit = c.st;
+                if (v->id == ui) uiReported = true;
+            }
+            if (MlView* u = ui ? FindViewLocked(ui) : nullptr) {
+                st = u->edit;
+                uiUl = u->ul;
+            }
+        }
+        // Where the focused field is now, for a press on it (EditState::FieldNow): the caret when the field was
+        // reported, and now. Ultralight calls, made outside the lock. The caret at the report is forgotten when UI mode
+        // moves or the UI-mode view's own state was reset, never for another view's reset (a load elsewhere).
+        static ultralight::Rect s_caretAtReport{ 0.f, 0.f, 0.f, 0.f };
+        static ViewId s_caretView = 0;
+        if (ui != s_caretView || std::find(resets.begin(), resets.end(), ui) != resets.end()) {
+            s_caretView = ui;
+            s_caretAtReport = { 0.f, 0.f, 0.f, 0.f };
+        }
+        const bool wants = uiUl && EditState::WantsKeyboard(st);
+        if (uiReported) s_caretAtReport = wants ? uiUl->editor()->GetCaretBounds() : ultralight::Rect{ 0.f, 0.f, 0.f, 0.f };
+        ultralight::Rect field{ 0.f, 0.f, 0.f, 0.f };
+        const ultralight::Rect* fieldNow = nullptr;
+        if (wants && !clicks.empty()) {
+            field = EditState::FieldNow(st, s_caretAtReport, uiUl->editor()->GetCaretBounds());
+            fieldNow = &field;
+        }
+        // A report on the UI-mode view's single-line field: the page says whether it is a number field, which takes no
+        // IME (EditState::kNumberFieldScript). Asked only in a View that has had a window object, where a script brings
+        // no new document's (EditState::DocLoads); outside s_viewsMutex, as every host script runs (invariant 16).
+        bool number = false;
+        if (uiUl && EditState::MayBeNumberField(st)) {
+            bool asked = false;
+            if (uiReported) {
+                bool windowed = false;
+                {
+                    std::lock_guard<std::mutex> lk(s_editMutex);
+                    windowed = s_docLoads.HasWindow(uiUl.get());
+                }
+                if (windowed) {
+                    if (auto ctxScope = uiUl->LockJSContext()) {
+                        std::string result;
+                        JsBridge::ErrorInfo err;
+                        number = JsBridge::Evaluate(*ctxScope, EditState::kNumberFieldScript, "magelight:numberfield", result,
+                                                    err) && result == "1";
+                    }
+                }
+                asked = true;
+            }
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            if (MlView* u = FindViewLocked(ui)) {
+                if (asked) u->editNumber = number;
+                else number = u->editNumber;
+            }
+        } else if (uiUl) {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            if (MlView* u = FindViewLocked(ui)) u->editNumber = false;
+        }
+        const EditState::Verdict vd = s_tracker.Step(ui, changes, st, clicks, resync, fieldNow, number);
+        if (!vd.touched) return;
+
+        ImeOnTextFocus(vd.ime);
+        static ViewId s_kbClaim = 0;   // the view the runtime keyboard was raised for (VR::NoteTextFocus)
+        if (vd.keyboard == EditState::Keyboard::Raise) {
+            if (s_kbClaim && s_kbClaim != ui) VR::NoteTextFocus(s_kbClaim, false);
+            s_kbClaim = ui;
+            VR::TextField f;
+            f.password = st.type == ultralight::EditableType::Password;
+            f.multiline = st.type == ultralight::EditableType::TextArea || st.type == ultralight::EditableType::ContentEditable;
+            VR::NoteTextFocus(ui, true, f);
+            ShowOwnKeyboard(true);
+        } else if (vd.keyboard == EditState::Keyboard::Hide) {
+            if (s_kbClaim) VR::NoteTextFocus(s_kbClaim, false);
+            s_kbClaim = 0;
+            ShowOwnKeyboard(false);
+        } else {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            QueueKeyboardThemeLocked();   // the field changed under a keyboard that stays as it is: its layout follows
+        }
+        // A line for each change the player can see, the keyboard in VR and the IME on flat (32 a session).
+        static int s_lines = 0, s_lastKb = -1, s_lastIme = -1;
+        const bool vr = VR::IsLive();
+        const int kbNow = vd.keyboard == EditState::Keyboard::Raise ? 1 : vd.keyboard == EditState::Keyboard::Hide ? 0 : s_lastKb;
+        const bool seen = vr ? (vd.keyboard == EditState::Keyboard::Raise || kbNow != s_lastKb)
+                             : static_cast<int>(vd.ime) != s_lastIme;
+        s_lastKb = kbNow;
+        s_lastIme = vd.ime ? 1 : 0;
+        if (seen && s_lines <= 32) {
+            if (s_lines++ == 32)
+                SKSE::log::info("Magelight: text focus lines capped for this session (32 logged)");
+            else if (vr)
+                SKSE::log::info("Magelight: text focus view {} {} -> keyboard {}", ui, EditState::FieldJson(st, number),
+                                kbNow == 1 ? "up" : "down");
+            else
+                SKSE::log::info("Magelight: text focus view {} {} -> IME {}", ui, EditState::FieldJson(st, number),
+                                vd.ime ? "on" : "off");
         }
     }
 
@@ -6374,12 +7701,15 @@ float4 ps_straight(VSOut i) : SV_Target {
         ultralight::ViewConfig vc;
         vc.is_accelerated = s_gpuActive;
         vc.is_transparent = false;
+        vc.clipboard_read_policy = ultralight::ClipboardReadPolicy::Deny;
+        vc.enable_compositor = kEnableCompositor;
+        vc.initial_focus = false;   // View focus comes with UI mode, which the inspector takes as it opens (invariant 25)
         const int h = bh / 2;
         auto ul = s_ulRenderer->CreateView(static_cast<std::uint32_t>(bw), static_cast<std::uint32_t>(h), vc, nullptr);
         if (!ul) return nullptr;
         // The network listener at File level; the inspector frontend is the one
         // page served with no CSP (MlFileSystem::OpenFile), a dev surface.
-        ul->set_network_listener(&s_networkListener);
+        ul->set_network_listener(&s_networkListener.value);
         auto v = std::make_unique<MlView>();
         v->id = s_nextViewId.fetch_add(1);
         v->htmlPath = "<inspector>";
@@ -6441,6 +7771,104 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!ul) return;
         ul->CreateLocalInspectorView();   // synchronous: OnCreateInspectorView -> HostInspectorView
         if (auto it = s_inspectorOf.find(target); it != s_inspectorOf.end()) SwitchUIModeView(it->second);
+    }
+
+    // ── Memory lines (1.5.0) ──────────────────────────────────────────────
+    // Ultralight's footprint in Magelight.log: periodically (memoryLogMinutes), ~5 s after UI mode ends (at most one
+    // a minute) and on request (RequestMemoryReport, at most one every 10 s). GetMemoryUsage costs about a
+    // millisecond and reclaims nothing; it runs after the frame's stage timing, so the line carries its own time.
+    static std::atomic<bool> s_memReportRequested{ false };     // any thread
+    static std::chrono::steady_clock::time_point s_memAfterUi{};   // render thread: the last UI-mode exit, {} = none
+
+    // Render thread, inside FrameWork (invariant 1) and outside s_viewsMutex: GetMemoryUsage runs no page code, but
+    // it is an Ultralight call like any other.
+    static void TickMemoryReport()
+    {
+        using Clock = std::chrono::steady_clock;
+        static Clock::time_point nextPeriodic{}, lastRequested{}, lastAfterUi{}, nextMsaaCheck{};
+        static bool rawLogged = false, msaaNoted = false;
+        const auto now = Clock::now();
+        if (nextPeriodic == Clock::time_point{}) nextPeriodic = now + std::chrono::seconds(60);   // after the first loads
+
+        // The first antialiased target is worth a line of its own: the startup line can only say MSAA is offered.
+        if (!msaaNoted && s_gpuActive && s_gpu && s_gpuStats && s_msaaInEffect > 1 && now >= nextMsaaCheck) {
+            nextMsaaCheck = now + std::chrono::seconds(1);
+            MgGpuStats st{};
+            st.size = sizeof(st);
+            if (s_gpuStats(s_gpu, &st) && st.antialiasedCreated > 0) {
+                msaaNoted = true;
+                SKSE::log::info("Magelight: Ultralight asked for an antialiased page target - MSAA {}x in use", s_msaaInEffect);
+            }
+        }
+
+        const char* why = nullptr;
+        bool full = false;
+        if (s_memReportRequested.load() && s_memReportRequested.exchange(false)
+            && (lastRequested == Clock::time_point{} || now - lastRequested >= std::chrono::seconds(10))) {
+            why = "on request";
+            full = true;
+            lastRequested = now;
+        }
+        if (s_memAfterUi != Clock::time_point{} && now - s_memAfterUi >= std::chrono::seconds(5)) {
+            s_memAfterUi = {};
+            if (lastAfterUi == Clock::time_point{} || now - lastAfterUi >= std::chrono::seconds(60)) {
+                lastAfterUi = now;
+                if (!why) {
+                    why = "after UI mode";
+                    full = s_devMode.load();
+                }
+            }
+        }
+        if (const int minutes = s_memLogMinutes.load(); minutes > 0 && now >= nextPeriodic) {
+            nextPeriodic = now + std::chrono::minutes(minutes);
+            if (!why) why = "periodic";
+        }
+        if (!why || !s_ulRenderer) return;
+
+        int live = 0, dormant = 0, notLoaded = 0;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (const auto& vp : s_views) {
+                if (vp->ul) ++live;
+                else if (vp->dormant) ++dormant;
+                else ++notLoaded;
+            }
+        }
+        const auto t0 = Clock::now();
+        const std::string report = s_ulRenderer->GetMemoryUsage().utf8().data();
+        const double reportMs = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        const MemoryReport::Figures f = MemoryReport::Parse(report);
+
+        // Whether any target took MSAA is the driver's to say: Ultralight's render-target bytes include the
+        // multisample surfaces but not who asked for them.
+        std::string msaa;
+        if (s_gpuActive) {
+            MgGpuStats st{};
+            st.size = sizeof(st);
+            if (s_msaaInEffect <= 1) msaa = "; MSAA off";
+            else if (!s_gpuStats || !s_gpuStats(s_gpu, &st)) msaa = "; MSAA ?";
+            else if (st.antialiasedCreated == 0) msaa = fmt::format("; MSAA {}x offered, no page target asked for it", s_msaaInEffect);
+            else
+                msaa = fmt::format("; MSAA {}x on {} of {} page targets ({} of the render targets), {} antialiased targets so far",
+                                   s_msaaInEffect, st.msaaSurfaces, st.renderTargets, MemoryReport::Size(static_cast<double>(st.msaaBytes)),
+                                   st.antialiasedCreated);
+        }
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof(ms);
+        const bool haveSys = GlobalMemoryStatusEx(&ms) != FALSE;
+        constexpr double kGB = 1073741824.0;
+        SKSE::log::info("Magelight: memory ({}) - {}; views {} live, {} hibernated, {} not loaded{}{}; read in {:.1f} ms",
+                        why, MemoryReport::Line(f), live, dormant, notLoaded, msaa,
+                        haveSys ? fmt::format("; system RAM {:.1f} of {:.1f} GB free, commit {:.1f} GB free",
+                                              ms.ullAvailPhys / kGB, ms.ullTotalPhys / kGB, ms.ullAvailPageFile / kGB)
+                                : std::string(),
+                        reportMs);
+        // A later SDK that reshaped the report gets the raw text once, so the parser can follow it.
+        const bool reshaped = !rawLogged && MemoryReport::Missing(f) >= 5;
+        if (full || reshaped) {
+            if (reshaped) rawLogged = true;
+            SKSE::log::info("Magelight: Ultralight memory report ({})\n{}", why, SysInfo::RedactProfile(report));
+        }
     }
 
     static void FrameWork(IDXGISwapChain* sc)
@@ -6555,7 +7983,12 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             for (MlView* v : dirty) InstallBridgeShims(*v, false);
         }
+        // Shows and hides made since the last frame: the UI-mode page is visible when its input arrives, and its
+        // visibilitychange handler runs in this frame's Update.
+        SyncViewVisibility();
         DrainInputQueue(bw, bh);
+        DrainEditableStates();   // before the bridge drain and the second sync: a keyboard raised here shows this frame
+        NoteEditorComposition();   // the Escape guard's view of the field's composition (window thread reads it)
         DrainTooltips(bh);
         DrainBridgeQueues();
         // The CursorMenu's kShow processes a frame or two after SetUIMode, and its movie only exists once it has:
@@ -6565,6 +7998,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         static int offFrames = -1;   // frames since the last exit; -1 = no exit sample pending
         if (s_focused.load()) {
             if (s_focusMenuHideSeen.load()) CheckFocusMenuClosed();
+            s_memAfterUi = {};   // back in UI mode: the after-UI memory line waits for this exit
             ++uiFrames;
             offFrames = -1;
             // The Cursor Menu reopened (MenuSink): its new movie is visible until hidden, at once and for a few
@@ -6610,6 +8044,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
             }
             if (uiFrames > 0) {
+                s_memAfterUi = std::chrono::steady_clock::now();
                 offFrames = 0;
                 // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
                 // every page's cursor; each reports again on the first mouse move (the core re-sends it per move).
@@ -6649,6 +8084,19 @@ float4 ps_straight(VSOut i) : SV_Target {
         };
 
         s_ulRenderer->Update();
+        // Shows and hides made by the input, the bridge drains and this Update (the VR keyboard on a text focus, a JS
+        // listener the page calls from them, an OnDomReady callback), so this frame paints and composites them. A
+        // show made by page code inside Render (requestAnimationFrame, resize, scroll, observer, transitionend
+        // callbacks) waits for the next frame's first sync. Before RefreshDisplay, never after it: a View shown after
+        // RefreshDisplay runs no requestAnimationFrame callback in this frame's Render, so a page that draws through
+        // rAF would show its old texture for a frame (tools/visibility-test).
+        SyncViewVisibility();
+        // A hidden view this frame's Render paints (SetViewPrepaint: its prepaint or its settle repaint), shown here
+        // for the same reason and hidden again right after Render.
+        ViewId preId = 0;
+        bool preAgain = false;
+        ultralight::View* pre = TakePrepaintView(preId, preAgain, stageMs(stageT0, ClockT::now()));
+        if (pre) pre->set_visible(true);
         // 1.4 pump contract: requestAnimationFrame, CSS animations/transitions
         // and smooth scrolling are driven per-display by RefreshDisplay —
         // Update()+Render() alone still paints, but every animation silently
@@ -6657,22 +8105,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const auto stageAfterUpdate = ClockT::now();
         s_lastUlUpdateMs = stageMs(stageT0, stageAfterUpdate);   // the next frame's load-queue budget (MaterializeViews)
         double frameUlRender = 0.0;   // THIS frame's render, for the composite subtraction
-        const bool anyVisible = AnyViewVisible();   // one reading for the prepaint's accounting and the render below
-        if (ViewId preId = 0; ultralight::View* pre = TakePrepaintView(preId)) {
-            const auto preT0 = ClockT::now();
-            StateBackup pbackup;
-            pbackup.Capture(s_context);
-            s_ulRenderer->RenderOnly(&pre, 1);
-            StateBackup::Neutralize(s_context);
-            if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
-            pbackup.Restore(s_context);
-            frameUlRender = stageMs(preT0, ClockT::now());
-            // A visible frame measures its render from stageAfterUpdate, so it already includes this one.
-            if (!anyVisible) s_acc.ulRender += frameUlRender;
-            static std::atomic<int> s_preLog{ 0 };
-            if (s_preLog.fetch_add(1) < 32)
-                SKSE::log::info("Magelight: view {} prepainted while hidden in {:.1f} ms", preId, frameUlRender);
-        }
+        const bool anyVisible = AnyViewVisible();   // one reading for the render below and the cursor
         PresentedFrame frame;   // this frame's views, for every presenter (flat + VR)
         // While the UI pass is live the composite records its quads for it instead of drawing them over the
         // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
@@ -6697,38 +8130,41 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (cutUV) { q.hasCut = true; std::memcpy(q.cut, cutUV, sizeof(q.cut)); }
             queued.push_back(q);
         };
-        if (anyVisible) {
-            // RenderOnly(visible), not Render(): Render() paints EVERY view
-            // whose page marked itself dirty, hidden ones included — a closed
-            // popup with a spinner, a closed dashboard with a blinking caret,
-            // repainted every frame for as long as some OTHER view (a HUD
-            // badge, SkyrimNet's chat) kept the loop rendering. The docs'
-            // RenderOnly takes the subset; hidden pages keep their dirty flag
-            // and paint on their next Show. needs_paint is sampled first —
-            // rendering clears it — and only for the views we hand over.
-            std::vector<ultralight::View*> toRender;
+        if (anyVisible || pre) {
+            // A view this frame draws is wanted (visible) and visible to Ultralight since the sync above: Render paints
+            // only those, so one shown since waits for the next frame instead of compositing a texture Render did not
+            // paint, and one hidden since is not drawn. needs_paint is sampled first, as rendering clears it.
             {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
-                toRender.reserve(s_views.size());
                 for (auto& vp : s_views) {
                     MlView& v = *vp;
-                    const bool paint = v.visible && v.ul;
-                    v.repaintedThisFrame = paint && v.ul->needs_paint();
-                    if (paint) {
-                        toRender.push_back(v.ul.get());
+                    const bool drawn = v.visible && v.ul && v.ul->is_visible();
+                    v.repaintedThisFrame = drawn && v.ul->needs_paint();
+                    if (drawn) {
                         v.prepainted = true;
+                        v.settleRepaint = false;   // this frame's Render paints it
                     }
                 }
             }
             // One state capture brackets everything we do to the pipeline this
-            // frame — Render (the driver creates geometry inside it, which
-            // binds an input layout), its command list (which freely rebinds
-            // RTs/shaders/scissor) and every composite draw alike.
+            // frame — Render (the driver's uploads run inside it), its command
+            // list (which freely rebinds RTs/shaders/scissor) and every
+            // composite draw alike.
             StateBackup backup;
             backup.Capture(s_context);
-            if (!toRender.empty()) s_ulRenderer->RenderOnly(toRender.data(), toRender.size());
+            // Render() paints every View Ultralight sees visible and skips hidden ones (a hidden page keeps what it
+            // drew and repaints only what changed on its next show). Visible pages' requestAnimationFrame callbacks
+            // run inside it, so it stays outside s_viewsMutex (invariant 16).
+            s_ulRenderer->Render();
+            if (pre) pre->set_visible(false);
             frameUlRender = stageMs(stageAfterUpdate, ClockT::now());
             s_acc.ulRender += frameUlRender;
+            if (pre) {
+                static std::atomic<int> s_preLog{ 0 };
+                if (s_preLog.fetch_add(1) < 32)
+                    SKSE::log::info("Magelight: view {} prepainted while hidden{} (this frame's render {:.1f} ms)", preId,
+                                    preAgain ? " again, its page settled" : "", frameUlRender);
+            }
             StateBackup::Neutralize(s_context);
             if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
             // Composite visible views in z-order ((layer, order) — the
@@ -6739,7 +8175,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
                 for (auto& vp : s_views) {
                     MlView& v = *vp;
-                    if (!v.visible || !v.ul) continue;
+                    if (!v.visible || !v.ul || !v.ul->is_visible()) continue;   // what Render painted (above)
                     float ex = 0, ey = 0;
                     EffectivePos(v, bw, bh, ex, ey);
                     // Presenter seam: the same reading the VR submitter gets.
@@ -6803,7 +8239,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             // but in the UI pass the CursorMenu draws after us.
             // This quad tracks the same MenuCursor position, sized from
             // cursorHeight at 1080p and scaled with the back buffer's height.
-            if (s_focused.load() && s_cursorSrv && bh > 0 && !VR::IsLive()) {
+            if (anyVisible && s_focused.load() && s_cursorSrv && bh > 0 && !VR::IsLive()) {   // never on a prepaint-only frame
                 const float px = static_cast<float>(s_cursorPosX.load());
                 const float py = static_cast<float>(s_cursorPosY.load());
                 const int artHeight = static_cast<int>(std::lround(s_cursorHeight * (bh / 1080.0f)));
@@ -6861,6 +8297,25 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
             }
             backup.Restore(s_context);
+        } else {
+            // Ultralight 2.0 creates and destroys GPU resources only inside Render (GPUDriver.h), so with nothing
+            // shown a View released meanwhile (hibernation, DestroyView, a rebuild) would keep its targets, tiles and
+            // textures until a view is next shown. Render at least once a second: with every View hidden it paints
+            // nothing (invariant 23) and costs microseconds.
+            static ClockT::time_point s_lastIdleRender{};
+            const auto now = ClockT::now();
+            if (now - s_lastIdleRender >= std::chrono::seconds(1)) {
+                s_lastIdleRender = now;
+                StateBackup backup;
+                backup.Capture(s_context);
+                const auto renderT0 = ClockT::now();
+                s_ulRenderer->Render();
+                frameUlRender = stageMs(renderT0, ClockT::now());
+                s_acc.ulRender += frameUlRender;
+                StateBackup::Neutralize(s_context);
+                if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);   // a View hidden after the second sync
+                backup.Restore(s_context);
+            }
         }
         {
             std::lock_guard<std::mutex> lk(s_uiPassMutex);
@@ -6901,12 +8356,23 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_acc = StageAcc{};
             s_acc.lastReport = stageEnd;
         }
+        TickMemoryReport();   // after the stage timing: its GetMemoryUsage is not page work
     }
 
     // The carrier's PostDisplay: draw the published quads into the render target the game's UI pass has bound,
-    // scaled from the back buffer they were laid out for. Main thread, inside the engine's UI render.
-    static void UiPassCompositeImpl()
+    // scaled from the back buffer they were laid out for. Main thread: inside the engine's UI render, or, for the
+    // end-of-frame fallback (s_endOfFrameFallback), at the engine's end of frame into the target it left bound. The
+    // fallback takes the frame only when a target is bound and never counts toward the no-target latch: without
+    // one, Present keeps drawing as before.
+    static void UiPassCompositeImpl(bool endOfFrameFallback)
     {
+        if (endOfFrameFallback) {
+            if (!s_context || !s_device || s_renderDead.load()) return;
+            ID3D11RenderTargetView* bound = nullptr;
+            s_context->OMGetRenderTargets(1, &bound, nullptr);
+            if (!bound) return;
+            bound->Release();
+        }
         s_lastUiPassFrame.store(s_compositeFrames.load());
         s_uiPassSeen.store(true);
         if (!s_context || !s_device || s_renderDead.load()) return;
@@ -6964,10 +8430,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         ReleaseQuads(quads);
     }
 
-    static void UiPassComposite()
+    static void UiPassComposite(bool endOfFrameFallback)
     {
         __try {
-            UiPassCompositeImpl();
+            UiPassCompositeImpl(endOfFrameFallback);
         } __except (LogSehAndDisable("UI pass", GetExceptionCode(),
                         (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
         }
@@ -6989,12 +8455,44 @@ float4 ps_straight(VSOut i) : SV_Target {
     // frame work, the overlay off for the session). The frame work runs on this fiber on the same thread, so
     // Ultralight keeps its one thread (invariant 1) and gets ulFiberMB of stack. Every Ultralight call is made in
     // the frame work, so WebKit has known this stack as the thread's own since Renderer::Create: its script limits
-    // and its collector's scan of the stack both read it. Main thread only.
+    // and its collector's scan of the stack both read it. Between frames the thread is back on the game's stack,
+    // where a collector helper thread scanning it with the fiber's bounds reads past the fiber (Ultralight 2.0
+    // crashes there: tools/fiber-gc-test), so the thread leaves the fiber holding the page VM's lock (s_vmLock).
+    // Main thread only.
     static LPVOID          s_ulFiber = nullptr;
     static LPVOID          s_ulFiberReturn = nullptr;   // the fiber the frame work hands back to
     static IDXGISwapChain* s_ulFiberSwapChain = nullptr;
     static unsigned        s_gameMxcsr = 0;             // the game's SSE mode at Present, which the pages run under
     static bool            s_ulFiberTried = false;
+
+    // Taken at the end of the first frame in which WebKit's VM exists (it is made with the first page, not with the
+    // renderer) and never released: the thread then holds it on every way off the fiber, between frames, before the
+    // first view, with every view hibernated, after an exception in a frame turned the overlay off, and through
+    // process exit. Released at each fiber entry and taken again on the way out instead, every lock WebKit takes in a
+    // frame is a full acquire and release rather than a recursive one (offline, tools/fiber-gc-test --bench, an idle
+    // page: about 165 us a frame against 20, CPU and GPU alike), and a frame that an exception stopped inside the
+    // lock's own code could leave it taken by nobody, so taking it on the way out would hang the game. The cost of
+    // holding it: collections finish only inside frames, so the heap peaks higher between them (offline, 10 rounds of
+    // garbage: 82-125 MB against 44-90, flat in both).
+    // While it is held, a collection the collector starts waits for the thread to stop at a safepoint, which it
+    // reaches only inside the frame work. Touched only on the fiber: WebKit keeps its per-thread state in fiber-local
+    // storage, so off the fiber the holder is a different thread to it. constinit and trivially destroyed: nothing
+    // runs at exit (invariant 3).
+    static constinit PageStack::VmLock s_vmLock;
+
+    // 0 no VM yet, 1 held, 2 taken now (the first VM, or WebKit made a new one), -1 the attempt faulted.
+    // SEH wrapper — no locals with destructors allowed in here.
+    static int GuardedHoldVmLock()
+    {
+        __try {
+            void* const before = s_vmLock.Vm();
+            if (!s_vmLock.Hold(s_pageStackExports)) return 0;
+            return s_vmLock.Vm() != before ? 2 : 1;
+        } __except (LogSehAndDisable("the page VM lock", GetExceptionCode(),
+                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+            return -1;
+        }
+    }
 
     static void CALLBACK UlFiberMain(void*)
     {
@@ -7004,6 +8502,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         for (;;) {
             _mm_setcsr(s_gameMxcsr);   // as before 1.3.0, WebKit runs under the game's floating-point mode
             GuardedFrameWorkHere(s_ulFiberSwapChain);
+            // After every frame, one an exception ended included, and here near the fiber's top: where the lock is
+            // first taken is where WebKit counts script depth from.
+            if (GuardedHoldVmLock() == 2)
+                SKSE::log::info("Magelight: WebKit's VM is up ({}); the main thread holds its lock whenever it is "
+                                "off the page stack", s_vmLock.Vm());
             SwitchToFiber(s_ulFiberReturn);
         }
     }
@@ -7035,6 +8538,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             SKSE::log::warn("Magelight: the renderer started before the page stack - pages run on the game's stack");
             return false;
         }
+        // Without the VM lock the fiber is a crash in waiting, so the pages take the game's stack (as ulFiberMB 0).
+        if (const PageStack::Exports& e = PageStackExports(); !e.LockReady()) {
+            SKSE::log::error("Magelight: this Ultralight runtime does not export {}, which the page stack needs - "
+                             "pages run on the game's stack instead (as with ulFiberMB 0). The SDK changed under "
+                             "Magelight: tell its author", e.missingLock);
+            return false;
+        }
         // The game's own floating-point state is saved across the switch with the flag (and by hand around it,
         // for a thread another plugin made a fiber).
         if (!IsThreadAFiber() && !ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH)) {
@@ -7050,17 +8560,28 @@ float4 ps_straight(VSOut i) : SV_Target {
             return false;
         }
         std::atexit(&LeaveUltralightAtExit);
+        s_pagesOnFiber = true;
         SKSE::log::info("Magelight: pages run on a stack of their own ({} MB, a fiber on the game's main thread)",
                         s_ulFiberMb);
         return true;
     }
 
     // How much of its own stack the game's frame leaves at Present: at the first frame and at each new low (16 KB
-    // steps). Without the page stack it is all the pages get. A stack guarantee (another plugin's, for its crash
-    // handler) moves the overflow up by its size, and WebKit's script limit does not count it: on the game's stack
-    // a script at that limit then overflows while its error is built.
+    // steps). Without the page stack it is all the pages get. A stack guarantee (CrashLogger's, for its crash handler)
+    // moves the overflow up by its size; on the game's stack the pages' JavaScript zones clear the guarantee the
+    // thread had when the renderer started (ApplyGameStackReserve), so a larger one set later is worth a line.
     static void NoteGameStack(bool onFiber)
     {
+        if (!onFiber && s_reserveGuarantee != SIZE_MAX) {
+            static bool s_grewWarned = false;
+            ULONG now = 0;
+            if (!s_grewWarned && SetThreadStackGuarantee(&now) && now > s_reserveGuarantee) {
+                s_grewWarned = true;
+                SKSE::log::warn("Magelight: the game's main thread now holds back {} KB of its stack (a stack "
+                                "guarantee), more than the {} KB the pages' JavaScript zones were sized for - an error a "
+                                "page leaves uncaught may end the overlay", now / 1024, s_reserveGuarantee / 1024);
+            }
+        }
         static std::size_t s_lowest = SIZE_MAX;
         const std::size_t  left = StackReserveLeftKb();
         if (left + 16 > s_lowest) return;
@@ -7700,9 +9221,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_engineMode = !REL::Module::IsVR()
             && (s_compositeMode == "engine" || (s_compositeMode == "auto" && SmoothMotionLoaded()))
             && InstallEngineEndHook();
-        if (s_engineMode)
+        if (s_engineMode) {
+            s_engineComposite.store(true);
             SKSE::log::info("Magelight: engine mode - the engine's device, drawn from its end-of-frame call{}",
                 SmoothMotionLoaded() ? " (NVIDIA Smooth Motion is loaded)" : "");
+        }
         InstallLatePresent(vtbl, vtbl1);
         {
             // An untrusted wrapper (frame generation on Direct3D 12, set above) keeps drawing at Present, into the
@@ -7856,8 +9379,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                                     // key path, so hand it the key; on flat the window proc
                                     // already queued it.
                                     if (VR::IsVRRuntime()) {
-                                        QueueInput(WM_KEYDOWN, VK_ESCAPE, 0);
-                                        QueueInput(WM_KEYUP, VK_ESCAPE, (1 << 30) | (1 << 31));
+                                        QueueInput(WM_KEYDOWN, VK_ESCAPE, Input::SyntheticKeyLParam(VK_ESCAPE, false));
+                                        QueueInput(WM_KEYUP, VK_ESCAPE, Input::SyntheticKeyLParam(VK_ESCAPE, true));
                                     }
                                 } else {
                                     SKSE::log::info("Magelight: Escape via sink — leaving UI mode");
@@ -7953,6 +9476,20 @@ float4 ps_straight(VSOut i) : SV_Target {
                         if (b->IsDown()) QueueInput(WM_MBUTTONDOWN, 0, pos);
                         else if (b->IsUp()) QueueInput(WM_MBUTTONUP, 0, pos);
                         break;
+                    case MK::kButton3:   // the side buttons, back then forward (DIMOUSESTATE2 order)
+                    case MK::kButton4: {
+                        const WORD x = b->GetIDCode() == MK::kButton3 ? XBUTTON1 : XBUTTON2;
+                        if (b->IsDown()) {
+                            QueueInput(WM_XBUTTONDOWN, MAKEWPARAM(0, x), pos);
+                            static std::atomic<bool> s_logged{ false };
+                            if (!s_logged.exchange(true))
+                                SKSE::log::info("Magelight: mouse button {} pressed over a page (sent as {})",
+                                    b->GetIDCode() == MK::kButton3 ? 4 : 5, x == XBUTTON1 ? "back" : "forward");
+                        } else if (b->IsUp()) {
+                            QueueInput(WM_XBUTTONUP, MAKEWPARAM(0, x), pos);
+                        }
+                        break;
+                    }
                     case MK::kWheelUp:
                         if (b->IsDown()) QueueInput(WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), pos);
                         break;
@@ -8005,6 +9542,13 @@ float4 ps_straight(VSOut i) : SV_Target {
         {
             if (e && e->opening) {
                 if (auto* ui = RE::UI::GetSingleton()) NoteMenuDepth(e->menuName, MenuNamed(ui, e->menuName));
+            }
+            if (e && !s_focused.load() && e->menuName.c_str() &&
+                GetTickCount64() - s_uiModeExitedMs.load() < 3000) {
+                const std::string_view name(e->menuName.c_str());
+                if (name == RE::CursorMenu::MENU_NAME || name == MagelightFocusMenu::MENU_NAME ||
+                    name == MagelightOverlayMenu::MENU_NAME)
+                    SKSE::log::info("Magelight: menu '{}' {} after UI mode ended", name, e->opening ? "OPENED" : "CLOSED");
             }
             if (e && s_focused.load()) {
                 SKSE::log::info("Magelight: menu '{}' {} while UI mode is on",
@@ -8292,6 +9836,8 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void ExitUIMode(std::uint64_t ticket)
     {
+        SKSE::log::info("Magelight: UI mode release asked (view {}{})", static_cast<std::uint64_t>(s_uiModeView.load()),
+                        ticket ? ", the holder's own release" : "");
         // Deliberately does NOT hide the view (Magelight.h contract — SA's
         // Free Look keeps the view rendered while the game owns input;
         // callers that want a hide pair this with ShowView(view, false)).
@@ -8334,6 +9880,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     bool DevModeEnabled()
     {
         return s_devMode.load();
+    }
+
+    void RequestMemoryReport()
+    {
+        s_memReportRequested.store(true);
     }
 
     bool InspectorAvailable()
@@ -8430,8 +9981,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             ShowView(view, true);
             QueueInput(0, 1, 0);   // re-run the focus marker: key focus follows s_uiModeView
             s_tooltipLeaveAll.store(true);
-            InvokeJS(old, "window.magelight&&window.magelight._dispatch('__uimode','0');");
-            InvokeJS(view, "window.magelight&&window.magelight._dispatch('__uimode','1');");
+            InteropCall(old, "__uimode", "0");
+            InteropCall(view, "__uimode", "1");
             strncpy_s(s_uiModeLabel, Api4::ViewLabel(view).c_str(), _TRUNCATE);
             SKSE::log::info("Magelight: UI mode switched from view {} to {}", old, s_uiModeLabel);
             Emit(HostEvent::UIModeSwitched, view);
@@ -8520,30 +10071,33 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void SetViewScale(ViewId view, float scale)
     {
-        // Below 1 Ultralight clips the page to scale squared of the view (a 0.8 scale draws only the top-left
-        // 64%), so a smaller page takes a CSS transform instead.
+        // Below 1, Ultralight paints only the top-left scale-squared part of the page (0.8 draws the top-left 64% of
+        // each side) unless the compositor is on (kEnableCompositor). With it on the floor stays until a scale below
+        // 1 has run in game; a smaller page takes a CSS transform instead.
         if (scale < 1.0f)
-            SKSE::log::info("Magelight: view {} device scale {:.3f} raised to 1.000 (below 1 clips the page)", view, scale);
+            SKSE::log::info("Magelight: view {} device scale {:.3f} raised to 1.000 (below 1 is not supported)", view, scale);
         scale = std::clamp(scale, 1.0f, 3.0f);
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return;
         v->deviceScale = scale;
-        if (v->ul) {
-            // Applied by the render thread in ApplyPendingResizes:
-            // set_device_scale re-lays out the page synchronously, and this
-            // is the API caller's thread (review 2026-09-09) — the same
-            // intent-flag shape as a resize.
-            v->scaleDirty  = true;
-            v->boundsDirty = true;            // the Resize that follows re-rasterises
+        if (!v->ul) {
+            // Not loaded yet (CreateViewEx passes ViewDesc::uiScale here), or hibernated: the next load creates its
+            // View at this scale. A line of its own, so a live change is never read into one.
+            SKSE::log::info("Magelight: view {} device scale {:.3f} (applies at its next load)", view, scale);
+            return;
         }
+        // Applied by ApplyPendingResizes on the render thread, the only thread that may call Ultralight
+        // (invariant 1); this is the API caller's thread. It makes no call when the View already has this scale.
+        v->scaleDirty  = true;
+        v->boundsDirty = true;
         SKSE::log::info("Magelight: view {} device scale {:.3f}", view, scale);
     }
 
     bool RebuildViewAtScale(ViewId view, float scale)
     {
         if (scale < 1.0f)
-            SKSE::log::info("Magelight: view {} rebuild scale {:.3f} raised to 1.000 (below 1 clips the page)", view, scale);
+            SKSE::log::info("Magelight: view {} rebuild scale {:.3f} raised to 1.000 (below 1 is not supported)", view, scale);
         scale = std::clamp(scale, 1.0f, 3.0f);
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
@@ -8563,7 +10117,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             SKSE::log::info("Magelight: view {} already at device scale {:.3f} - no rebuild", view, scale);
             return true;
         }
-        v->scaleDirty = false;   // never set_device_scale on this View: ApplyPendingRebuilds replaces it
+        v->scaleDirty = false;   // no live scale change on this View: ApplyPendingRebuilds replaces it
         v->rebuildPending = true;
         SKSE::log::info("Magelight: view {} rebuild at device scale {:.3f} requested", view, scale);
         return true;
@@ -8694,6 +10248,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         v->domReady = false;   // hold outbound calls for the new page
         v->prepainted = false;
         v->paintableAt = 0;
+        v->settleRepaint = false;
+        v->settleRepainted = false;
         v->loadFailed = false;
         return true;
     }
@@ -8713,6 +10269,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         v->domReady = false;   // hold outbound calls for the new page
         v->prepainted = false;
         v->paintableAt = 0;
+        v->settleRepaint = false;
+        v->settleRepainted = false;
         v->loadFailed = false;
         return true;
     }
@@ -8768,8 +10326,10 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (!v || v->destroyPending || v->isInspector) return false;
             if (v->prepaint == on) return true;
             v->prepaint = on;
+            if (!on) v->settleRepaint = false;
         }
-        SKSE::log::info("Magelight: view {} prepaint {}", view, on ? "on - painted once while hidden after it loads" : "off");
+        SKSE::log::info("Magelight: view {} prepaint {}", view,
+                        on ? "on - painted while hidden after it loads, and once more when its page settles" : "off");
         return true;
     }
 
@@ -9005,31 +10565,28 @@ float4 ps_straight(VSOut i) : SV_Target {
 // generic hook on top: an external tool (a custom keyboard, an accessibility
 // aid, a VR runtime that prefers a named entry point) can resolve
 // GetProcAddress(GetModuleHandle("Magelight.dll"), "Magelight_DeliverChar" /
-// "Magelight_DeliverVKey") and feed characters in (printable chars as wchar_t;
-// Backspace/Enter/arrows as a Windows VK). They land on the host's ordinary
-// queued-input path (the same one WM_CHAR / WM_KEYDOWN take from the window
-// proc), on the UI-mode view, exactly like typed keys. Gated: only while a
-// page is focused AND the VR presenter is live; dropped otherwise. Any thread
-// (the queue is mutex-guarded).
+// "Magelight_DeliverVKey") and feed characters in (printable chars as wchar_t,
+// a surrogate pair as two calls; Backspace/Enter/arrows as a Windows VK). They
+// reach the UI-mode view as the host's own VR keyboards type: text as an edit
+// (QueueTypedText; \t, \r and \n as the Tab and Enter keys), a VK as its key
+// down and up (and the character Enter and Tab type). Gated: only while a page
+// is focused AND the VR presenter is live; dropped otherwise. Any thread (the
+// queue is mutex-guarded).
 namespace {
     void DeliverCharImpl(wchar_t ch)
     {
         if (!Magelight::VR::IsLive()) return;
         if (!Magelight::s_focused.load() || Magelight::s_renderDead.load()) return;
         if (ch < 0x20 && ch != L'\t' && ch != L'\r' && ch != L'\n') return;
-        // RawKeyDown (unknown vk) -> Char -> KeyUp.
-        Magelight::QueueInput(WM_KEYDOWN, 0, 0);
-        Magelight::QueueInput(WM_CHAR, static_cast<WPARAM>(ch), 0);
-        Magelight::QueueInput(WM_KEYUP, 0, static_cast<LPARAM>(1u << 30) | static_cast<LPARAM>(1u << 31));
+        thread_local wchar_t t_high = 0;   // a caller's high surrogate, until its low half comes
+        wchar_t units[2]{};
+        if (const std::size_t n = Magelight::EditState::PairUnit(t_high, ch, units)) Magelight::QueueTypedText(units, n);
     }
     void DeliverVKeyImpl(int vk)
     {
         if (!Magelight::VR::IsLive()) return;
         if (!Magelight::s_focused.load() || Magelight::s_renderDead.load()) return;
-        if (vk <= 0 || vk > 0xFF) return;
-        const LPARAM scan = static_cast<LPARAM>(MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC) & 0xFF) << 16;
-        Magelight::QueueInput(WM_KEYDOWN, static_cast<WPARAM>(vk), scan);
-        Magelight::QueueInput(WM_KEYUP, static_cast<WPARAM>(vk), scan | static_cast<LPARAM>(1u << 30) | static_cast<LPARAM>(1u << 31));
+        Magelight::QueueVirtualKey(vk);
     }
 }
 extern "C" __declspec(dllexport) void Magelight_DeliverChar(wchar_t ch) { DeliverCharImpl(ch); }

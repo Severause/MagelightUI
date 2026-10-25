@@ -13,6 +13,14 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.5.0 | 10500 | Key events as in a browser: `KeyboardEvent.code`, a `key` from the player's layout and `location`, on flat and in VR; Alt, F10 and Alt+key reach the page; `QueryCapability("keyboardcode")`, `capabilities.keyboardCode` |
+| 1.5.0 | 10500 | Mouse buttons 4 and 5 as back / forward with `auxclick` (never `click` or `dblclick`); no middle-click autoscroll; `QueryCapability("auxbuttons")`, `capabilities.auxButtons` |
+| 1.5.0 | 10500 | Hidden pages pause: `document.visibilityState` / `visibilitychange` follow `ShowView`, `requestAnimationFrame` and CSS animations stop while hidden, `resize` / `scroll` / `matchMedia` / observer callbacks wait for the next show or prepaint; timers, messages and `InteropCall` keep running; `QueryCapability("pagevisibility")`, `capabilities.pageVisibility` |
+| 1.5.0 | 10500 | Script errors reported: an exception `InvokeJS`, Papyrus `Eval` or an `InteropCall` handler leaves uncaught is a level-2 `ConsoleMessage` event with its stack, a log line and the devMode banner; an `Error` in the console reads as its message and stack; `QueryCapability("scripterrors")`, `capabilities.scriptErrors` |
+| 1.5.0 | 10500 | The IME candidate list drawn in the page: `--ml-ime-*` variables, `data-ml-ime="off"`, a cancelable `magelight:ime` event carrying the whole state; `QueryCapability("imecandidates")`, `capabilities.imeCandidates` (flat only); `QueryCapability("ime")` is 0 in VR |
+| 1.5.0 | 10500 | The VR keyboard follows the focused field: `inputmode` layouts, `enterkeyhint`, the Undo / Redo / Select all / Cut / Copy / Paste bar; fields in iframes and `contenteditable` regions count; VR text arrives as `beforeinput` / `input` edits; window focus only while a page holds UI mode |
+| 1.5.0 | 10500 | Papyrus `LogMemoryUsage()` and `Magelight.json` `memoryLogMinutes`: Ultralight's memory figures in `Magelight.log` |
+| 1.5.0 | 10500 | A `Navigate` or `ReloadView` that replaces nothing (a fragment change, a page that fails to load) keeps the page and its calls flowing; a woken or rebuilt view loads its last `Navigate`'s URL; an older host keeps later calls to the view queued |
 | 1.2.0 | 10200 | `title` tooltips: the host passes the title under the pointer to the page core, which draws it (400 ms, below the cursor); `data-ml-tooltip="off"` or a cancelled `magelight:tooltip` event opts out, `--ml-tooltip-bg/-fg/-border/-font` style it; `capabilities.tooltips` |
 | 1.1.0 | 10100 | `CancelUIModeRequest(mod)` — withdraw your UI-mode entry the host has not run yet (and your queued requests), with no `UIModeEntered` or `UIModeRefused` for it; `kUIModeFlagReclaim` on `RequestUIMode` — withdraw your own release that has not run and keep the mode; `QueryCapability("uimodecancel")` |
 | 1.1.0 | 10100 | `magelight.hostTheme`: a part with a bad value is refused alone (the other still applies), and `reply: true` answers on the `__hostthemeresult` channel; `QueryCapability("hostthemereply")` |
@@ -49,6 +57,208 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.5.0 - Unreleased
+
+The first Magelight on Ultralight 2.0. It follows 1.3.0 (there is no Magelight 1.4; "1.4" below always means the
+Ultralight version 1.3.0 runs) and carries every fix made since 1.3.0. A 1.3.x patch, if one is ever needed, stays
+on Ultralight 1.4.
+
+### What players notice
+
+- **Magelight runs on Ultralight 2.0** (2.0.0-beta.2, the Free edition). Pages look as they did: text renders the
+  same, and Ultralight's compositor is now on, which made every SeverActions page measured cheaper per frame (its
+  idle main page 0.04 ms of CPU against 0.10, its quick wheel's hovers 0.08 ms of GPU time against 0.25) at the cost
+  of about 70 MB more video memory for its five pages. Text gamma is now the engine's own 2.2 unless `Magelight.json`
+  sets `fontGamma` (1.3.0 used 1.8).
+- **Memory goes back on its own.** Magelight keeps Ultralight 2.0's memory defaults and never forces a collection
+  (a forced one stalls a frame and throws away every page's compiled script); a hidden view that hibernates hands
+  back its script heap within about 2 s and its video memory within about 20 s. A view that hibernates while no
+  view is shown now gives its video memory back too: Magelight renders once a second while nothing is shown, which
+  paints nothing and costs a few microseconds.
+- **A prepainted page opens with its images drawn.** Ultralight 2.0 decodes a page's images only when it paints the
+  page, so a prepaint left them for the first open (29 ms for a page with 5 images, 86 ms with 19). A prepaint view
+  is now painted once more, still hidden, when its page settles, and its first open costs about 0.3 ms.
+- **Japanese fonts in a collection keep their face.** MS UI Gothic and MS PGothic drew as MS Gothic when Magelight
+  read the font file itself (the last-resort font, or a font under a non-ASCII profile path).
+- **The IME's candidate list shows in the page** (from Dekana's PR #7, ported to the native composition). Windows
+  draws the candidates in a window that never appears over the game, so players typing Chinese, Japanese or Korean
+  picked their characters blind. Magelight now asks Windows for no IME window and the page draws the list in a box
+  at the composition, in the field's own font and size, in the page's colours, with the row Space or Enter acts on
+  highlighted.
+- **IME typing is the field's own composition.** The reading goes into the focused field through the engine's
+  editor, with `compositionstart` / `compositionupdate` / `compositionend` and the clause being converted underlined.
+  The IME attaches in iframes and `contenteditable` regions too, never in a password or number field. A click
+  elsewhere, UI mode ending or Alt+Tab keeps the reading as typed instead of losing it.
+- **Escape while composing belongs to the IME.** The first Escape closes the candidate list and the next cancels
+  the reading, without closing the page or reaching the page's own Escape handler (a chat page lost the text
+  being typed). An Escape the Korean IME commits a syllable on is the page's after the commit, so one Escape commits
+  and closes the chat where it took two (reported by Dekana).
+- **An error in a page can no longer end the overlay or the game.** Pages run on their own 8 MB stack again, with
+  the page engine's lock held whenever the game's thread is off it: on Ultralight 2.0 the garbage collector
+  otherwise crashed scanning that thread (`MgWCore.dll+0x2B34EA`, or an illegal instruction at `+0x1866F30`). On the
+  game's own stack, with CrashLogger 1.23 or later, the first error a page left uncaught ended the overlay or the
+  game with a stack overflow (0xC00000FD at `MgWCore.dll+0x173F003`); it now reaches the page's `error` event, and a
+  runaway script ends in `RangeError`, as in a browser.
+- **No exception at exit when the runtime did not load.** With the runtime folder missing or one of its DLLs
+  unloadable, Magelight stays loaded but off; quitting the game then no longer raises 0xC06D007E from
+  `Magelight.dll`.
+- **Click-through HUD views show behind a swapchain wrapper.** With a `d3d11.dll` or `dxgi.dll` proxy (ENB,
+  ReShade), a HUD view on its own was drawn at Present, which such a setup may never show, so it appeared only once
+  another page opened. It is now drawn from the engine's end of frame (`the views draw from the engine's end-of-frame
+  call, not at Present` in the log).
+- **A page no longer puts your weapons and spells away.** Opening a page suspended the game's fighting controls,
+  and the game sheathes a weapon and drops a readied spell when they go off. Fighting stays on while Magelight's
+  focus menu is in place, whose input context already keeps attack and block from the game.
+- **The game's cursor is no longer rebuilt as a page opens and closes.** Magelight opened and closed the Cursor
+  Menu itself beside its focus menu, which the engine already does, so the cursor was torn down and rebuilt within a
+  millisecond on most entries and exits, and a cursor mod that keeps state on that menu could crash (a page opened
+  over a menu that already shows the cursor still rebuilds it once). The Journal and the Inventory also keep their
+  cursor when a page closed a moment before they opened.
+- **No false stall reports from an alt-tabbed game.** The game stops presenting while it is in the background, and
+  the stall watchdog read that as a hang and filled `Magelight.log` with `Magelight stall` stacks. On flat it now
+  counts only from the game's return to the foreground, with one `none sampled` line for the time away; a game
+  window that stops responding is still sampled.
+- **The VR keyboard follows the focused field.** It rises for a field in an iframe or a `contenteditable` region
+  too, comes back on a click in the field after closing it, and goes down when the field loses focus, UI mode moves
+  to another view or the page navigates. It picks its layout from the field (a keypad for numbers and phone numbers,
+  `@` and `.com` for email, `/` and `.com` for URLs), labels Enter from `enterkeyhint`, and carries Undo, Redo,
+  Select all, Cut, Copy and Paste. SteamVR's keyboard opens in password mode for a password field and multi-line for
+  a textarea, and Enter from it now fires `keydown`, so a page's Enter-to-send works from it.
+- **The mouse behaves as in a browser.** A drag ends where it began: while a button or a VR trigger is held, moves
+  and the release go to the view it was pressed on, each VR hand on its own. The wheel scrolls what is under the
+  pointer, in VR where each hand's ray points. A middle click no longer starts autoscroll. Leaving a view clears its
+  hover, and leaving UI mode or Alt+Tab releases every button and modifier the page saw held.
+
+### For mod authors: new API and capabilities
+
+Gate each on `hostVersionNumber >= 10500` or its capability.
+
+- **Key events carry the player's keyboard** (`QueryCapability("keyboardcode")`, page `capabilities.keyboardCode`).
+  `KeyboardEvent.code` is filled (`KeyA`, `Numpad5`, `ArrowLeft`, `ShiftRight`; it was `""`), `key` follows the
+  player's layout (`"ñ"`, `"Dead"`, `"@"` for AltGr+Q on a Spanish layout) and `location` tells left, right and keypad
+  apart, on flat and in VR (where Shift, Ctrl and Alt now reach the page too: Ctrl+A selected nothing). Alt, F10 and
+  Alt+key now reach the UI-mode page as system keys (`altKey` was false on every click; an `accesskey` is not
+  triggered, and the game still gets them).
+- **Mouse buttons 4 and 5 reach the page as back and forward** (`QueryCapability("auxbuttons")`,
+  `capabilities.auxButtons`): `button` 3 and 4 on `mousedown` / `mouseup`, then `auxclick`, never `click` or
+  `dblclick`. A middle click gives `mousedown`, `mouseup` and `auxclick` and focuses, scrolls and follows nothing:
+  this changes a default for every page.
+- **The IME candidate box is the page's to style or replace** (`QueryCapability("imecandidates")`,
+  `capabilities.imeCandidates`; flat only). `--ml-ime-bg`, `-fg`, `-border`, `-font`, `-selected-bg`, `-selected-fg`
+  and `-max-width` (34em by default) style it; a colour left unset falls back to the `--ml-tooltip-*` one, then to the
+  field's own colours and the ground painted under it, else grey, always 3:1 readable. `data-ml-ime="off"` or cancelling the
+  `magelight:ime` event draws your own: that event now fires before the box for each change and carries the whole
+  state (`composition`, `caret`, `candidates`, `selectedIndex`, `clauses`, `target`, `anchor` in the view's CSS px)
+  beside `state` and `text`, with a `candidates` state for a list that opened, changed or closed.
+- **Field attributes drive the VR keyboard**: `inputmode` (`numeric`, `decimal`, `tel`, `email`, `url`, `none` for a
+  page with its own keypad; an `<input type=number>` with none gets the decimal keypad) and `enterkeyhint` (Done, Go,
+  Next, Prev, Search, Send).
+- **Memory in the log.** `Magelight.log` gives Ultralight's footprint (script heap, engine heap, caches, tiles, video
+  memory, views live and hibernated, the game's process memory) about a minute after the first load, every
+  `memoryLogMinutes` (new `Magelight.json` key, default 10, `0` = none) and about 5 s after UI mode ends. Papyrus
+  `LogMemoryUsage()` (console: `cgf "Magelight.LogMemoryUsage"`) writes one on the next frame with the full report,
+  at most once every 10 s.
+- **`Navigate` and `ReloadView` that replace nothing keep the view working.** A `Navigate` that only adds or changes
+  the fragment scrolls the page (`hashchange`, no DOM ready, no `ViewReloaded`), and one whose page fails to load
+  keeps it (`ViewLoadFailed`, `it keeps its page`); before, every later `InteropCall`, `InvokeJS` and `EvalJS` to the
+  view stayed queued for the session. A navigated view wakes from hibernation or is rebuilt on the URL `Navigate`
+  loaded, query and fragment included, and `GetViewInfo`'s `htmlPath` names the page's file, decoded, with no query
+  or fragment.
+- **A prepainted page sees its paints.** The view is shown for the one frame each prepaint paint takes (usually two
+  a load), so a round of `requestAnimationFrame` and the held `resize`, `scroll`, `matchMedia` and observer callbacks
+  run in it, and `document.visibilityState` reads `'visible'` there: do not take a `'visible'` read in such a callback
+  as the player opening the page. No API change.
+- **`SetViewScale` and `SetViewBounds` that change nothing make no engine call**, and a new scale reaches the engine
+  with the size in one `Resize`. On a view with no page yet or a hibernated one, the log says
+  `device scale X (applies at its next load)`.
+- **An `Error` in the console reads as its message and stack** (`console.error(err)`), with any fields of its own
+  after the message as JSON; it read as that JSON alone (`{}` for most Errors). Console lines in the log end with the
+  column as well as the line.
+- **`__mlNative` is a real function** (`[object Function]`, its own `name` and `length`); every call form behaves as
+  before.
+
+### Behaviour changes to check
+
+- **Pages animate and repaint at most 60 times a second.** The Free edition of Ultralight 2.0 caps each view's
+  `requestAnimationFrame`, CSS animations and transitions, smooth scrolling and script-driven repaints at 60 a
+  second; on 1.3.0 they followed the game's frame rate. Input, a resize and a show still paint at once.
+  `animationTimerDelay` in `Magelight.json` is ignored, with a warning.
+- **`KeyboardEvent.code` names the physical key**, as in a browser: the key labelled A on AZERTY reads `KeyQ`. A page
+  that turns a keydown into a Windows virtual-key code (a hotkey capture for a plugin that polls
+  `GetAsyncKeyState`) must read `keyCode`, which is unchanged and follows the layout. A hotkey capture
+  that prefers `code` binds the wrong key on a non-US keyboard until it reads `keyCode` first.
+- **`metaKey` is always false**: the engine reads no Windows key. A key-up's `repeat` is false.
+- **Hidden pages pause, as a background tab does** (`QueryCapability("pagevisibility")`,
+  `capabilities.pageVisibility`). `document.visibilityState` and `visibilitychange` follow `ShowView`;
+  `requestAnimationFrame`, CSS animations and transitions stop while a view is hidden, and `resize`, `scroll`,
+  `matchMedia` and `ResizeObserver` / `IntersectionObserver` callbacks wait for the next show or prepaint, once,
+  coalesced. Timers, messages, promises, `InteropCall`, `EvalJS` and `magelight.send` keep running, and what a page
+  changed while hidden is on screen in its first shown frame. A hide made in a paint-time callback (`transitionend`,
+  a `requestAnimationFrame`) takes effect at once, but a show made there is painted a frame later, so a hand-over
+  between views made in one leaves a frame with neither drawn.
+- **A page has window focus only while it holds UI mode.** `document.hasFocus()` was true from load for a page that
+  never held it. A page now gets `focus` when it takes UI mode and `blur` when it loses it; animations, timers and
+  typing are unaffected.
+- **Text focus comes from the engine.** The `focusin` / `focusout` script Magelight injected into every page is gone,
+  with `window.__mlIsText`, and a `__textfocus` a page sends is ignored. Only the page holding UI mode raises the VR
+  keyboard or attaches the IME. `QueryCapability("ime")` is 0 in VR, where the IME never attaches.
+- **VR typing is an edit.** Text from every VR keyboard reaches a field as `beforeinput` / `input` (`insertText`),
+  so `maxlength`, a cancelled `beforeinput` and React's `onChange` work; letters no longer fire `keypress` or
+  `textInput` (with no field focused they still arrive as `keypress`). Backspace, Enter, Tab, the arrows and Escape
+  stay key events.
+- **`Magelight_DeliverChar` and `Magelight_DeliverVKey`.** `DeliverChar` no longer sends a `keydown` with `key`
+  `Unidentified` before each character. `DeliverVKey(VK_RETURN)` and OpenComposite's Enter also type the character a
+  physical Enter types, so they submit a form. Every key Magelight makes up carries the scancode and extended bit
+  Windows would send, so an arrow reads `ArrowLeft`, not `Numpad4`.
+- **Script errors are reported** (`QueryCapability("scripterrors")`, `capabilities.scriptErrors`). An exception left
+  uncaught by `InvokeJS`, Papyrus `Eval` or an `InteropCall` handler used to vanish; it is now a
+  `[view N InvokeJS/ERROR]` or `[view N InteropCall('fn')/ERROR]` line with its message, location and up to 12 stack
+  frames, a level-2 `ConsoleMessage` event with the whole stack, and the devMode banner. `EvalJS` and `EvalAsync` still
+  hand the exception to the caller. A mod's script still runs unnamed, so its relative `import()` resolves as before.
+  The host's messages to the page core arrive as `InteropCall`s, so a page that replaced `window.magelight` sees them
+  reported as `InteropCall('__uimode')` and the like.
+- **A one-pixel layout difference at fractional scales.** On Ultralight 2.0 a view resized or rescaled after it was
+  created gets its CSS size rounded up, and one created at that size and scale rounded down (`innerWidth` 1423 against
+  1422 for 1920 px at 1.35), so a page can sit a pixel apart between an open after a resize and one after the view
+  woke from hibernation. Text was never garbled or soft at any scale tested. `RebuildViewAtScale` still reloads the
+  page; a live `SetViewScale` has not been run in game since hosts before 0.28.5, and the docs no longer call it
+  unsafe.
+- **`ulFiberMB` takes 8 to 64** (8 by default; it took 2 to 64). Below about 6 MB a page's first uncaught error
+  overflows on Ultralight 2.0, so a smaller number is raised to 8, with a log line. With `"ulFiberMB": 0` pages run
+  on the game's stack and Magelight sets the engine's stack reserve past the stack guarantee the thread holds when
+  the first save loads (CrashLogger 1.23+ holds 64 KB), so uncaught errors are survived there too, but a script gets
+  at most 384 KB of stack (enough for a 32768-argument `apply`), and a layout from the bottom of a deep
+  recursion can still run the stack out. A guarantee another plugin sets later is not covered, and a runtime that
+  lacks an engine export the page stack needs falls back to the game's stack; the log says which.
+
+### Packaging, licences and tools
+
+- **AppCore.dll is no longer shipped.** Magelight used only its Windows font loader, whose zlib source the SDK
+  publishes; it is compiled into `Magelight.dll`, unmodified, and gives byte-identical pages. Ultralight 2.0's AppCore
+  imports CoreMessaging.dll and the WinRT api-sets (reported missing under Proton), which would leave the host off.
+  The runtime folder holds `Magelight1.dll`, `Magelight1Core.dll`, `MgWCore.dll` and `MagelightGPU.dll`; a
+  `MgACore.dll` left by an older install is never loaded.
+- **Licences follow the 2.0 layout.** `MagelightGPU.dll` is adapted from the SDK's zlib D3D11 reference driver, so
+  `license\LGPL-2.1.txt` is gone; `THIRD_PARTY_LICENSES.txt` carries the zlib text for the driver and the font loader,
+  and `NOTICES.txt` names Ultralight 2.0.0-beta.2 and its Free License Agreement v2.
+- **Build and stage checks.** `build.ps1` refuses any other SDK build, removes a stale `MgACore.dll` and recreates
+  `license\` on every run. `tools\check_stage.ps1` fails on a `MgACore.dll` or a staged binary naming it (ASCII or
+  UTF-16), and loads the staged host with the runtime out of reach: it must load, register a view and exit cleanly.
+  The GPU driver contract is 2 (`MgGpu_GetStats`), so a `MagelightGPU.dll` from an earlier 1.5.0 test build is
+  refused.
+- **Log lines.** The MSAA line says it applies to the page targets Ultralight asks to antialias (2.0 asked for none
+  on any page measured), and the memory line says whether any did. For three seconds after UI mode ends the log
+  shows the Cursor Menu, the focus menu and the overlay opening and closing. While UI mode is on it names each
+  Escape's route (20 lines a session) and every release of UI mode. The devMode banner names a script URL that ends
+  in `/` in full, and the Papyrus registration line counts the natives it registers (28).
+- **New offline tests**, each to re-run at every SDK bump: `tools/input-test` (keys on the flat and VR paths, the
+  polled-keys filter, the releases and the pointer routing), `tools/editor-test` (text focus, typed text, the VR
+  keyboard's layouts), `tools/ime-test` and `tools/ime-box-test` (the candidate list and where its box lands),
+  `tools/fiber-gc-test` (the page stack's lock: must crash without it), and new sections of `tools/visibility-test`
+  (hidden pages, the settle paint). `MgStackTest` opens on F7 and adds an uncaught error in a timer and in a click
+  listener.
+- `EvalJS`'s header comment now says an `undefined` result gives `"undefined"`, as it always has.
 
 ## 1.3.0
 

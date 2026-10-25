@@ -1,0 +1,82 @@
+===== Memory Usage Report =====
+
+-- Process Memory --
+    Working Set (RSS):       182.57 MB  (peak: 534.21 MB)
+    Private Commit:          172.02 MB
+      bmalloc committed:       6.75 MB  (WebCore/JSC)
+      mimalloc committed:         0 B   (UltralightCore)
+
+-- JavaScript --
+    GC Object Space:           2.27 MB  (capacity: 4.56 MB)
+    Extra Memory:              1.78 MB  (strings, ArrayBuffers, backing stores)
+    Live Objects:             45270    (protected: 119, globals: 2)
+    Live Documents:               2
+
+-- WebCore Allocator (bmalloc/libpas) --
+    Committed:                 6.75 MB
+      Live:                    6.71 MB
+      Free (held):               43 KB
+      Metadata:                   2 KB
+    Fragmentation:               45 KB  (0.6% of committed)
+    Decommitted:             145.63 MB
+      Free (decommitted):    145.63 MB
+    Cached:                       0 B 
+
+-- WebCore Resource Cache --
+    Images:                       0 B   (decoded: 0 B)
+    CSS Stylesheets:            833 KB
+    Scripts:                   2.32 MB
+    Fonts:                        0 B 
+
+-- WebCore Compositor --
+    BitmapTexturePool:        44.44 MB  (26 textures, 0 GPU / 26 CPU)
+      pool limits:          budget floor 150 MB, idle 2.0 s, sweep 300 ms, pad 128 px, excess 400000 px
+      Layer Tiles:            44.44 MB  (26 textures)
+      Idle Pool:                  0 B   (0 textures)
+        Driven by:
+          Layer Tiles:          100.0%
+    Compositor budget:       300.00 MB
+      used at last pass:      44.44 MB
+      tiles held:             44.44 MB
+      magnified (est.):       21.00 MB
+      held surplus (est.):        0 B 
+      intermediates peak:         0 B 
+      raster-scale steps:         0    (deferred: 0, clamped layers: 0)
+    ShadowBufferPool:             0 B   (0 buffers)
+
+-- WebCore Fonts --
+    Font objects:                57    (inactive: 0)
+
+-- GPU Resources (VRAM estimated) --
+    Textures:                     0 B , VRAM: 0 B  (0 textures)
+      Texture Pool:               0 B   (in-use: 0 B)
+    Render Targets:               0 B   (0 targets)
+      Render Texture Pool:        0 B   (in-use: 0 B)
+    Geometry Buffers:             0 B , VRAM: 0 B  (0 buffers)
+
+-- Caches --
+    Font Cache:                 235 KB
+    Photon Cache:                 0 B   (pages: 0 B)
+    Shadow Cache:                 0 B 
+
+-- Pools --
+    Bitmap Pool:                496 KB  (in-use: 138 KB)
+    Paint Pool:                 607 KB
+    Geometry Pool:                0 B 
+    Path Tessellator:             8 B 
+
+-- HTML5 Canvas Elements --
+    Total:                        0
+    Accelerated:                  0
+    Unaccelerated:                0
+
+-- ImageBuffers --
+    GPU (accelerated):            0 B   (0 buffers)
+    CPU (unaccelerated):          0 B   (0 buffers)
+
+-- Internal Canvas Instances --
+    CPU:                         28
+    GPU:                          0
+    GPU Deferred:                 0
+    Recorder:                     0
+===============================

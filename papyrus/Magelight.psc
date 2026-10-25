@@ -95,3 +95,6 @@ Function PlaySound(int view, string name) Global Native
 ; "loopback" (also http(s) and ws(s) to localhost or 127.0.0.1). Registers the mod if needed. "any",
 ; other words and a plugin's mod return false; internet reach is a plugin's call. Host 0.30.0+.
 bool Function SetNetworkPolicy(string modId, string policy) Global Native
+; Write Ultralight's memory figures and its full memory report to Magelight.log on the next frame, at most once
+; every 10 seconds (a call sooner is dropped). For the console: cgf "Magelight.LogMemoryUsage". Host 1.5.0+.
+Function LogMemoryUsage() Global Native

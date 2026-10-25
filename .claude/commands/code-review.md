@@ -41,12 +41,15 @@ Run and report before dispatching agents (failures are Critical, confidence 100)
 
 - `powershell -ExecutionPolicy Bypass -File tools/check_stage.ps1` — namespaced runtime,
   no stock DLL names in the stage, API header in sync with SA's vendored copy (pass
-  `-SaHeader <path>` when the SA checkout is known), CMake version present.
+  `-SaHeader <path>` when the SA checkout is known), CMake version present, and the host
+  DLL loads with the runtime out of reach (no static runs Ultralight code in DllMain).
 - If `api/MagelightUI_API.h` or `src/MagelightApiExport.cpp` changed: diff the struct member
   order against the export initializer order by eye AND list it in the report — this is the
   highest-value check in the repo.
 - If `gpu/` changed: `git diff --stat` against the last commit and a `diff` of the touched
-  function against `extern/appcore-ref/` (the reviewer needs the upstream side).
+  function against its upstream twin in the SDK's reference driver,
+  `extern/ultralight/platform/src/GPUDriver.cpp` and `platform/src/gpu/d3d11/` (the reviewer
+  needs the upstream side; `extern/appcore-ref/` is the 1.4 driver's base, history only).
 
 ## Step 4: Dispatch reviewers in parallel
 
@@ -66,7 +69,7 @@ prompt says: read the rubric file first, then review. Launch all relevant lenses
 
 Each agent prompt MUST be self-contained (subagents see none of this conversation):
 1. The exact scope: changed-file list + the diff file path (or the `git diff`/`gh pr diff` command).
-2. Full-file access: the agent MAY read whole files (and `extern/appcore-ref/` for driver diffs)
+2. Full-file access: the agent MAY read whole files (and the SDK's `extern/ultralight/platform/` for driver diffs)
    so a guard just outside the hunk isn't reported as missing.
 3. Read-only: no edits.
 4. Self-verify: confirm the cited line exists and the claim holds; report confidence >= 60 only.

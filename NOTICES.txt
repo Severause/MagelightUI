@@ -9,49 +9,50 @@ Their license texts are installed in SKSE/Plugins/Magelight/license/,
 next to a copy of this file; THIRD_PARTY_LICENSES.txt is also at the root
 of the download.
 
-Ultralight (c) 2024 Ultralight, Inc. All rights reserved. Ultralight is a
+Ultralight (c) 2026 Ultralight, Inc. All rights reserved. Ultralight is a
 trademark of Ultralight, Inc.
-Please see the accompanying NOTICES.txt for full text.
+Please see the accompanying NOTICES.md for full text.
+(Ultralight's NOTICES.md is installed as license/Ultralight-NOTICES.md.)
 
 1. Ultralight  https://ultralig.ht
    Files: SKSE/Plugins/Magelight/Magelight1.dll, Magelight1Core.dll,
-          MgWCore.dll, MgACore.dll, resources/ (icudt67l.dat, cacert.pem)
+          MgWCore.dll, resources/ (icudt67l.dat, cacert.pem)
    License: the Ultralight runtime reaches you under the Ultralight End
    User License Agreement (EULA.txt). Magelight's author uses it under the
-   Ultralight Free License Agreement v1 (Ultralight-LICENSE.txt).
+   Ultralight Free License Agreement v2 (Ultralight-LICENSE.txt).
    Ultralight's notices for the libraries it bundles are in
    Ultralight-NOTICES.md (WebKit LGPL 2.1/BSD, ICU, FreeType, HarfBuzz,
    skia, SQLite, libpng, libjpeg-turbo, zlib and others).
-   The four DLLs are Ultralight 1.4.0b's, renamed, with the module-name
-   strings inside them rewritten in place (same length) so they import
-   each other under the new names, with the written permission of
-   Ultralight, Inc.; no code is changed. The private names keep another
-   plugin's copy of Ultralight from being loaded in their place. That
-   permission is Magelight's author's: a mod that bundles Magelight ships
-   these files as they are and does not rename or patch Ultralight's DLLs
-   itself.
+   The three DLLs are Ultralight 2.0.0-beta.2's, renamed, with the
+   module-name strings inside them rewritten in place (same length) so
+   they import each other under the new names, with the written
+   permission of Ultralight, Inc.; no code is changed. The private names
+   keep another plugin's copy of Ultralight from being loaded in their
+   place. That permission is Magelight's author's: a mod that bundles
+   Magelight ships these files as they are and does not rename or patch
+   Ultralight's DLLs itself.
    Ultralight's modifications to WebKit are published under LGPL 2.1 at
    https://github.com/ultralight-ux/WebCore
 
-2. Ultralight AppCore (GPU driver)  (c) Ultralight, Inc.
-   File: SKSE/Plugins/Magelight/MagelightGPU.dll
-   License: GNU Lesser General Public License v2.1 (LGPL-2.1.txt).
-   MagelightGPU.dll is derived from AppCore's Direct3D 11 GPUDriver and
-   GPUContext (https://github.com/ultralight-ux/AppCore) and is kept in
-   its own DLL behind a C ABI so the LGPL applies to that library alone.
-   Corresponding source: the gpu/ folder of the Magelight UI repository at
-   the tag of this release, built by CMakeLists.txt and build.ps1 in the
-   same tree. For Magelight UI 1.1.0 that is tag v1.1.0:
-   https://github.com/Severause/MagelightUI/tree/v1.1.0/gpu
-   You may replace MagelightGPU.dll with your own build. A replacement must
-   import Magelight1.dll and Magelight1Core.dll rather than Ultralight.dll
-   and UltralightCore.dll; build.ps1 makes that rename for its own build.
+2. Ultralight platform reference code  (c) 2026 Ultralight, Inc.
+   License: zlib (the text is in THIRD_PARTY_LICENSES.txt).
+   The Ultralight SDK publishes its platform implementations as source
+   under the zlib license. Two parts of it are in Magelight:
+   - SKSE/Plugins/Magelight/MagelightGPU.dll is an altered version of the
+     SDK's Direct3D 11 reference GPU driver (platform/src/gpu/d3d11). Its
+     source, with the changes marked, is the gpu/ folder of the Magelight
+     UI repository.
+   - Magelight.dll contains the SDK's Windows font loader
+     (platform/src/fonts: FontLoaderWin, TextAnalysisSource), unmodified.
+   MagelightGPU.dll also embeds Ultralight's compiled Direct3D 11 shader
+   programs. They are not under the zlib license: they are proprietary to
+   Ultralight, Inc. and licensed only for use with the Ultralight library.
 
 3. WebKit Web Inspector (the optional DevTools download)
    Files: SKSE/Plugins/Magelight/inspector/
    License: BSD 2-Clause, Copyright (C) 2007-2021 Apple Inc. and the
    WebKit contributors; portions under the licenses named in each file.
-   Shipped unmodified from the Ultralight 1.4.0b SDK.
+   Shipped unmodified from the Ultralight 2.0.0-beta.2 SDK.
 
 4. Libraries compiled into Magelight.dll and MagelightGPU.dll. Their
    copyright lines and full license texts are in THIRD_PARTY_LICENSES.txt.

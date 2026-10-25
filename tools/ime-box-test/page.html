@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: #3a4a5a; font-family: sans-serif; }
+  #f { position: fixed; left: 200px; bottom: 30px; width: 800px; font: 20px sans-serif; padding: 6px 10px; }
+  /* Page CSS that would reshape a bare div: the page core's box must not take it. */
+  body > div { height: 100%; }
+  div { display: flex; padding: 20px; }
+  #fr { position: absolute; left: 100px; top: 100px; width: 900px; height: 300px; border: 1px solid #888; background: #fff; }
+</style>
+</head>
+<body>
+  <iframe id="fr"></iframe>
+  <input id="f" value="こんにちは、元気">
+</body>
+</html>

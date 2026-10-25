@@ -82,7 +82,7 @@ storage jar a plugin uses (see [Which mods a script can drive](#which-mods-a-scr
 | `RequestUIMode(view, pauseGame)` / `ReleaseUIMode(modId)` | one holder at a time; `false` + `GetLastError` when held. Escape leaves UI mode unless the page has taken Escape (`magelight.send('__escapecapture','1')`); the host's toggle key (PageUp unless `Magelight.json` sets `toggleKey`) always does |
 | `IsUIModeActive()` / `GetUIModeView()` | work for any mod |
 | `Call(view, functionName, argument)` | `window.functionName(argument)` on the page |
-| `Eval(view, script)` | raw JS, fire and forget |
+| `Eval(view, script)` | raw JS, fire and forget; an exception it leaves uncaught is logged as `[view N InvokeJS/ERROR]` with its stack (1.5.0; earlier hosts dropped it) |
 | `EvalAsync(view, script, token)` | raw JS with the value back: `Magelight_JSResult` (`token\|result`) or `Magelight_JSError` (`token\|exception`) |
 | `BindHotkey(view, dxScancode, action)` | 1 toggle UI mode · 2 toggle UI mode paused · 3 toggle visible · 0 unbind. The host's toggle key (PageUp, 201) is refused. Avoid keys the game binds (F5 Quicksave, F9 Quickload), F12 (Steam's screenshot key) and keys other mods are likely to use: the press that opens a view also reaches the game |
 | `SetCutout(view, x, y, w, h)` | see-through rectangle (view pixels); `w = 0` clears |
@@ -93,6 +93,7 @@ storage jar a plugin uses (see [Which mods a script can drive](#which-mods-a-scr
 | `RegisterListener(view, name)` | page calls `window.name(payload)` → ModEvent `Magelight_JS_name` |
 | `SetNetworkPolicy(modId, policy)` | 0.30.0. `"file"` (the default) or `"loopback"`, case-insensitive; `true` when applied. `"any"`, an unknown word or a plugin-owned mod returns `false`. See [Network](#network) |
 | `GetLastError(modId)` | why the mod's last failed host call failed (UI mode held, hotkey taken, …); works for any mod. The ownership refusals below are logged to `Magelight.log` only |
+| `LogMemoryUsage()` | 1.5.0. Writes Ultralight's memory figures and its full memory report to `Magelight.log` on the next frame, at most once every 10 s (a call sooner is dropped). Meant for the console: `cgf "Magelight.LogMemoryUsage"` |
 | `PlaySound(view, name)` | a UI sound through the game's audio (0.29.0): `ok`/`click` `cancel` `prevnext` `focus`/`hover` `open` `close` `inactive`, any vanilla `UI*`/`ITM*` descriptor by EditorID (`UIJournalOpen`, `ITMGoldUpSD`, …), `none`, or `Plugin.esp\|0xFormID` of a SNDR; unknown = silent, logged once |
 
 ## Events (ModEvents)

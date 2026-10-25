@@ -88,17 +88,22 @@ namespace
         return found == 31;
     }
 
-    // Ultralight hands the bytes to FreeType as face 0, so a collection is checked at its first font.
-    bool IsLoadableFont(const RefPtr<Buffer>& b)
+    // A collection is checked at the face Ultralight will open: `face` (FontFile::face_index), or the first when -1.
+    bool IsLoadableFont(const RefPtr<Buffer>& b, int face = -1)
     {
         if (!b || !b->data() || b->size() == 0) return false;
         const auto* d = static_cast<const std::uint8_t*>(b->data());
         const std::size_t n = b->size();
-        if (n >= 16 && Be32(d) == 0x74746366 /*ttcf*/) return Be32(d + 8) > 0 && SfntAt(d, n, Be32(d + 12));
-        return SfntAt(d, n, 0);
+        if (n >= 16 && Be32(d) == 0x74746366 /*ttcf*/) {
+            const std::uint32_t count = Be32(d + 8);
+            const std::uint32_t i = face < 0 ? 0u : static_cast<std::uint32_t>(face);
+            if (i >= count || (n - 12) / 4 <= i) return false;
+            return SfntAt(d, n, Be32(d + 12 + std::size_t(i) * 4));
+        }
+        return face <= 0 && SfntAt(d, n, 0);
     }
 
-    // Wide-path read: Ultralight opens a font path with a narrow fopen, which decodes it in the ANSI code page.
+    // Wide-path read: Ultralight cannot open a font path that is not ASCII, not even one the ANSI code page spells.
     RefPtr<Buffer> ReadWhole(const String& path)
     {
         const std::wstring w = Wide(path);
@@ -216,12 +221,15 @@ namespace
             if (file && !file->is_in_memory()) {
                 const String path = file->filepath();
                 if (last || !IsAscii(Wide(path))) {
+                    // The bytes keep the face the platform picked: a collection read as face -1 renders whichever face
+                    // matches the weight and style, not the family asked for (MS UI Gothic inside msgothic.ttc).
+                    const int face = file->face_index();
                     const RefPtr<Buffer> bytes = ReadWhole(path);
-                    file = bytes ? FontFile::Create(bytes) : nullptr;
+                    file = bytes ? FontFile::Create(bytes, face) : nullptr;
                     readHere = true;
                 }
             }
-            if (file && (last || readHere) && !IsLoadableFont(file->buffer())) file = nullptr;
+            if (file && (last || readHere) && !IsLoadableFont(file->buffer(), file->face_index())) file = nullptr;
 
             if (!file) {
                 NoteMiss(family);
@@ -243,7 +251,7 @@ namespace
             if (!file) return Installed(family) ? "installed, but the system cannot hand it over" : "not installed";
             const RefPtr<Buffer> bytes = file->is_in_memory() ? file->buffer() : ReadWhole(file->filepath());
             if (!bytes) return "its file cannot be read: " + Utf8(file->filepath());
-            if (!IsLoadableFont(bytes)) return "its file is not a TrueType or OpenType font";
+            if (!IsLoadableFont(bytes, file->face_index())) return "its file is not a TrueType or OpenType font";
             return {};
         }
 

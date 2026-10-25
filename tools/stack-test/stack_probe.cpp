@@ -1,12 +1,13 @@
 // stack_probe - the stack stress tests (MgStackTest/views/test/stack-tests.js) in Ultralight, offline, on a thread
-// with the game's main-thread stack (1 MB reserve, from SkyrimSE.exe's header) of which <usedKB> is already in use,
-// the way Magelight ran pages under the game's frame before 1.3.0. <reserveKB> > 0 passes a JavaScript stack reserve
-// (JSC_ environment variables through ucrtbase's _putenv_s, before Renderer::Create; the hard zone two thirds of it,
-// "auto" two fifths of the stack left, 128..384 KB: an approach set aside, see README.md); 0 keeps WebKit's
-// defaults. One line per test; a test that runs the real stack out ends the process with 0xC00000FD.
-// [guaranteeKB] sets a stack guarantee on the thread first (SetThreadStackGuarantee), as a plugin may on the game's
-// main thread.
-//   build.bat, then: stack_probe.exe <usedKB> <reserveKB|auto|0> <sdkDir> <stack-tests.js> [guaranteeKB]
+// with the game's main-thread stack (1 MB reserve, from SkyrimSE.exe's header) of which <usedKB> is already in use at
+// every Ultralight call, the way Magelight runs pages with "ulFiberMB": 0. <guaranteeKB> sets a stack guarantee on
+// the thread first (SetThreadStackGuarantee), as CrashLogger 1.23+ does on the game's main thread. "host" sets the
+// JavaScript stack zones Magelight sets for that stack (src/PageStackCore.h's ReserveFor of the guarantee read back,
+// through JSC::Options before Renderer::Create); "default" keeps JavaScriptCore's. One line per test; a test that
+// runs the real stack out ends the probe (a caught 0xC00000FD exits 3; one in a thread the probe cannot catch it in
+// ends the process with 0xC00000FD).
+//   build.bat, then: stack_probe.exe <usedKB> <guaranteeKB> <sdkDir> <stack-tests.js> [host|default] [ids]
+// [ids]: test ids or indexes, comma-separated (default: all, in order).
 
 #include <windows.h>
 #include <malloc.h>
@@ -16,19 +17,24 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <AppCore/Platform.h>
 #include <Ultralight/Ultralight.h>
 
+#include "PageStackCore.h"
+
 using namespace ultralight;
+namespace PS = Magelight::PageStack;
 
 namespace
 {
     int         g_usedKb = 0;
-    int         g_reserveKb = 0;
     int         g_guaranteeKb = 0;
+    bool        g_hostReserve = true;
     std::string g_sdk;
     std::string g_script;
+    std::string g_only;
     RefPtr<Renderer> g_renderer;
     RefPtr<View>     g_view;
     bool             g_ready = false;
@@ -42,38 +48,31 @@ namespace
         }
     } g_loader;
 
-    // kb 0 removes the variables.
-    void SetReserve(int kb)
+    std::string Js(const std::string& js)
     {
-        using PutEnvFn = int(__cdecl*)(const char*, const char*);
-        HMODULE ucrt = GetModuleHandleW(L"ucrtbase.dll");
-        if (!ucrt) ucrt = LoadLibraryW(L"ucrtbase.dll");
-        const auto putEnv = ucrt ? reinterpret_cast<PutEnvFn>(GetProcAddress(ucrt, "_putenv_s")) : nullptr;
-        if (!putEnv) {
-            std::printf("ucrtbase's _putenv_s not found\n");
-            return;
+        String ex;
+        const String r = g_view->EvaluateScript(String(js.c_str()), &ex);
+        std::string out = r.utf8().data();
+        if (!ex.empty()) out += std::string("  (exception: ") + ex.utf8().data() + ")";
+        return out;
+    }
+
+    // One step at the probe's depth: start test `index` (index >= 0), or a frame and a look for its result.
+    void Step(int index, char* out, std::size_t outSize)
+    {
+        std::string r;
+        if (index >= 0) {
+            Js("window.__mgr='';MgStackTests.start(MgStackTests.tests[" + std::to_string(index) +
+               "],function(r){window.__mgr=MgStackTests.line(r);});''");
+        } else {
+            g_renderer->Update();
+            g_renderer->Render();
         }
-        const unsigned soft = static_cast<unsigned>(kb) * 1024u;
-        const std::string softText = kb ? std::to_string(soft) : std::string();
-        const std::string hardText = kb ? std::to_string(soft / 3 * 2) : std::string();
-        putEnv("JSC_reservedZoneSize", hardText.c_str());
-        putEnv("JSC_softReservedZoneSize", softText.c_str());
+        r = Js("window.__mgr");
+        strncpy_s(out, outSize, r.c_str(), _TRUNCATE);
     }
 
-    // Test `index` as one result line. The C++ objects live here, below the SEH frame in GuardedRun.
-    void RunTestAt(int index, char* out, std::size_t outSize)
-    {
-        const std::string js = "(function(){var t=MgStackTests.tests[" + std::to_string(index) + "];if(!t)return '';"
-                               "var r=MgStackTests.runOne(t);return [MgStackTests.passed(r)?'ok  ':'FAIL',r.id,"
-                               "r.outcome,'depth '+r.depth,r.ms+' ms',r.extra].join('  ');})()";
-        String exception;
-        const String result = g_view->EvaluateScript(String(js.c_str()), &exception);
-        std::string line = result.utf8().data();
-        if (!exception.empty()) line += std::string("  (exception: ") + exception.utf8().data() + ")";
-        strncpy_s(out, outSize, line.c_str(), _TRUNCATE);
-    }
-
-    // Uses about `kb` of stack in 16 KB frames, then runs the test at that depth.
+    // Uses about `kb` of stack in 16 KB frames, then runs the step at that depth.
     __declspec(noinline) void Deep(int kb, int index, char* out, std::size_t outSize)
     {
         if (kb > 0) {
@@ -84,10 +83,10 @@ namespace
             p[1] = p[0];   // keeps the frame live past the call (no tail call)
             return;
         }
-        RunTestAt(index, out, outSize);
+        Step(index, out, outSize);
     }
 
-    int GuardedRun(int index, char* out, std::size_t outSize)
+    int GuardedStep(int index, char* out, std::size_t outSize)
     {
         __try {
             Deep(g_usedKb, index, out, outSize);
@@ -98,23 +97,54 @@ namespace
         }
     }
 
+    std::vector<int> Selected(int count)
+    {
+        std::vector<int> out;
+        if (g_only.empty() || g_only == "all") {
+            for (int i = 0; i < count; ++i) out.push_back(i);
+            return out;
+        }
+        std::stringstream ss(g_only);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            if (item.empty()) continue;
+            if (item.find_first_not_of("0123456789") == std::string::npos) {
+                out.push_back(std::atoi(item.c_str()));
+                continue;
+            }
+            const int i = std::atoi(Js("String(MgStackTests.tests.map(function(t){return t.id;}).indexOf('" + item + "'))").c_str());
+            if (i >= 0) out.push_back(i);
+            else std::printf("no test '%s'\n", item.c_str());
+        }
+        return out;
+    }
+
     DWORD WINAPI ProbeThread(void*)
     {
         if (g_guaranteeKb > 0) {
             ULONG guarantee = static_cast<ULONG>(g_guaranteeKb) * 1024;
             SetThreadStackGuarantee(&guarantee);
         }
-        ULONG held = 0;   // 0 reads it back, as Magelight's log does
+        ULONG held = 0;   // 0 reads it back, as Magelight does
         SetThreadStackGuarantee(&held);
         std::printf("stack guarantee on the thread: %lu KB\n", held / 1024);
-        if (g_reserveKb > 0) SetReserve(g_reserveKb);
+        if (g_hostReserve) {
+            const PS::Exports e = PS::Resolve(GetModuleHandleW(L"WebCore.dll"));
+            const PS::Reserve r = PS::ReserveFor(held);
+            char refused[96];
+            if (!e.OptionsReady()) std::printf("WebCore does not export %s: JavaScriptCore's own zones\n", e.missingOptions);
+            else if (!PS::ApplyReserve(e, r, refused, sizeof refused)) std::printf("JSC refused %s\n", refused);
+            std::printf("JavaScript stack zones (the host's): hard %zu KB, soft %zu KB, at most %zu KB a thread\n",
+                        r.hard / 1024, r.soft / 1024, r.maxUsage / 1024);
+        } else {
+            std::printf("JavaScript stack zones: JavaScriptCore's defaults\n");
+        }
         Config cfg;
         Platform::instance().set_config(cfg);
         Platform::instance().set_font_loader(GetPlatformFontLoader());
         Platform::instance().set_file_system(GetPlatformFileSystem(String(g_sdk.c_str())));
         Platform::instance().set_logger(GetDefaultLogger("stack_probe_ul.log"));
         g_renderer = Renderer::Create();
-        if (g_reserveKb > 0) SetReserve(0);
         if (!g_renderer) {
             std::printf("the renderer could not be created\n");
             return 2;
@@ -133,29 +163,40 @@ namespace
             std::printf("the page never loaded\n");
             return 2;
         }
-        String exception;
-        g_view->EvaluateScript(String(g_script.c_str()), &exception);
-        if (!exception.empty()) {
-            std::printf("stack-tests.js threw: %s\n", exception.utf8().data());
+        const std::string threw = Js(g_script + "\n;''");
+        if (!threw.empty()) {
+            std::printf("stack-tests.js: %s\n", threw.c_str());
             return 2;
         }
-        const int count = std::atoi(g_view->EvaluateScript("String(MgStackTests.tests.length)").utf8().data());
-        std::printf("used %d KB of a 1 MB stack, JavaScript reserve: %s\n", g_usedKb,
-                    g_reserveKb ? (std::to_string(g_reserveKb) + " KB").c_str() : "WebKit's defaults");
+        const int count = std::atoi(Js("String(MgStackTests.tests.length)").c_str());
+        std::printf("used %d KB of a 1 MB stack at every call\n", g_usedKb);
         std::fflush(stdout);
         static char line[2048];
-        for (int i = 0; i < count; ++i) {
+        int failures = 0;
+        for (const int i : Selected(count)) {
             line[0] = 0;
             std::printf("  running test %d...\r", i);
             std::fflush(stdout);
-            if (GuardedRun(i, line, sizeof line)) {
+            bool overflow = GuardedStep(i, line, sizeof line) != 0;
+            // An asynchronous test ends in a later frame.
+            for (int f = 0; !overflow && !line[0] && f < 400; ++f) {
+                overflow = GuardedStep(-1, line, sizeof line) != 0;
+                Sleep(5);
+            }
+            if (overflow) {
                 std::printf("STACK OVERFLOW in test %d - the probe stops\n", i);
                 std::fflush(stdout);
-                ExitProcess(3);
+                TerminateProcess(GetCurrentProcess(), 3);
             }
+            if (!line[0]) std::snprintf(line, sizeof line, "FAIL  test %d never finished", i);
+            if (std::string(line).rfind("ok", 0) != 0) ++failures;
             std::printf("%s\n", line);
             std::fflush(stdout);
         }
+        std::printf("done: %d failure(s)\n", failures);
+        std::fflush(stdout);
+        // Ultralight's teardown at process exit fails fast with the renderer still alive.
+        TerminateProcess(GetCurrentProcess(), failures ? 1 : 0);
         return 0;
     }
 }
@@ -163,19 +204,14 @@ namespace
 int main(int argc, char** argv)
 {
     if (argc < 5) {
-        std::printf("usage: stack_probe <usedKB> <reserveKB|auto|0> <sdkDir> <stack-tests.js> [guaranteeKB]\n");
+        std::printf("usage: stack_probe <usedKB> <guaranteeKB> <sdkDir> <stack-tests.js> [host|default] [ids]\n");
         return 1;
     }
     g_usedKb = std::atoi(argv[1]);
-    // "auto": two fifths of the stack left where pages run, 128..384 KB.
-    if (std::string(argv[2]) == "auto") {
-        const int left = 1024 - g_usedKb;
-        g_reserveKb = left * 2 / 5 < 128 ? 128 : left * 2 / 5 > 384 ? 384 : left * 2 / 5;
-    } else {
-        g_reserveKb = std::atoi(argv[2]);
-    }
+    g_guaranteeKb = std::atoi(argv[2]);
     g_sdk = argv[3];
-    if (argc > 5) g_guaranteeKb = std::atoi(argv[5]);
+    if (argc > 5) g_hostReserve = std::string(argv[5]) != "default";
+    if (argc > 6) g_only = argv[6];
     std::ifstream in(argv[4], std::ios::binary);
     std::stringstream ss;
     ss << in.rdbuf();

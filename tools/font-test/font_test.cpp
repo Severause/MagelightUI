@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include <Ultralight/Ultralight.h>
 
 #include "MagelightFonts.h"
+#include "../fiber-gc-test/FiberRun.h"
 
 #pragma comment(lib, "Ultralight.lib")
 #pragma comment(lib, "UltralightCore.lib")
@@ -75,6 +77,30 @@ namespace
 
     void Log(int level, const char* m) { std::printf("  [%s] %s\n", level ? "warn" : "info", m); }
 
+    // Writes ultralight.log and puts fatal and error lines on stdout. Not AppCore's default logger: it raises a
+    // message box for a fatal line, which in a windowless child holds the scenario until the parent kills it.
+    class FileLogger final : public Logger
+    {
+    public:
+        FileLogger() : file_(std::fopen("ultralight.log", "w")) {}
+        void LogMessage(LogLevel level, const String& message) override
+        {
+            const std::lock_guard lock(mutex_);   // called from any of the library's threads
+            if (file_) {
+                std::fprintf(file_, "%s\n", message.utf8().data());
+                std::fflush(file_);
+            }
+            if (level == LogLevel::Fatal || level == LogLevel::Error) {
+                std::printf("  [ultralight] %s\n", message.utf8().data());
+                std::fflush(stdout);
+            }
+        }
+
+    private:
+        std::mutex mutex_;
+        std::FILE* file_;
+    };
+
     LONG WINAPI DieQuietly(EXCEPTION_POINTERS* e)
     {
         // Name the faulting module and offset, to match a field log's "(module +0xOFFSET)".
@@ -121,7 +147,7 @@ namespace
         Platform::instance().set_font_loader(fonts);
         const auto base = dir.u8string();
         Platform::instance().set_file_system(GetPlatformFileSystem(String(reinterpret_cast<const char*>(base.c_str()))));
-        Platform::instance().set_logger(GetDefaultLogger("ultralight.log"));
+        Platform::instance().set_logger(new FileLogger);
         std::printf("  fallback_font() = %s\n", fonts->fallback_font().utf8().data());
 
         RefPtr<Renderer> renderer = Renderer::Create();
@@ -133,6 +159,7 @@ namespace
             renderer->Update();
             renderer->RefreshDisplay(0);
             renderer->Render();
+            FiberRun::BetweenFrames();
             Sleep(5);
         }
         String exception;
@@ -199,16 +226,19 @@ namespace
 
     bool Near(double a, double b) { return std::fabs(a - b) < 0.5; }
 
-    // The field log's crash: lastResortFallbackFont dereferencing a null font (Ultralight 1.4.0b.081c48b).
-    bool FieldCrash(const Result& r)
+    // The stock loader's end with no usable font on the pinned SDK build (2.0.0-beta.2): lastResortFallbackFont
+    // fails a check and stops at a breakpoint. The offset moves with the SDK build.
+    bool LastResortCrash(const Result& r)
     {
-        return r.code == EXCEPTION_ACCESS_VIOLATION && r.out.find("at WebCore.dll +0xFB7F77") != std::string::npos;
+        return r.code == EXCEPTION_BREAKPOINT && r.out.find("at WebCore.dll +0x10113F") != std::string::npos &&
+               r.out.find("lastResortFallbackFont failed to create font") != std::string::npos;
     }
 }
 
 int main(int argc, char** argv)
 {
-    if (argc > 1) return RunScenario(argv[1]);
+    // MG_PAGE_FIBER=1 (inherited by each child): the scenario runs on the page fiber, as Magelight runs pages.
+    if (argc > 1) return FiberRun::Run(argc, argv, [](int, char** v) { return RunScenario(v[1]); });
 
     // The non-ASCII folder the "nonascii" system serves PathTest from.
     const auto dir = ExeDir();
@@ -246,11 +276,11 @@ int main(int argc, char** argv)
               "normal system: an unknown family, Times New Roman and Arial measure the same wrapped and stock");
         check(!Near(safeNormal.w[1], safeNormal.w[3]), "normal system: 'Magelight Fallback' is a font of its own when wrapped");
     }
-    check(FieldCrash(stockStripped), "no fonts at all: the stock loader crashes at the field log's WebCore.dll +0xFB7F77");
+    check(LastResortCrash(stockStripped), "no fonts at all: the stock loader fails its last-resort check at WebCore.dll +0x10113F");
     check(safeStripped.code == 0 && safeStripped.w.size() == 5, "no fonts at all: the wrapped loader renders");
     if (safeStripped.w.size() == 5 && safeNormal.w.size() == 5)
         check(Near(safeStripped.w[0], safeNormal.w[1]), "no fonts at all: text falls back to the bundled font");
-    check(FieldCrash(stockBadpath), "unreadable font files: the stock loader crashes at WebCore.dll +0xFB7F77");
+    check(LastResortCrash(stockBadpath), "unreadable font files: the stock loader fails its last-resort check at WebCore.dll +0x10113F");
     check(safeBadpath.code == 0 && safeBadpath.w.size() == 5, "unreadable font files: the wrapped loader renders");
     if (safeBadpath.w.size() == 5 && safeNormal.w.size() == 5)
         check(Near(safeBadpath.w[0], safeNormal.w[1]), "unreadable font files: text falls back to the bundled font");

@@ -48,9 +48,11 @@ with the frontend essentially untouched.
   `window.magelight.on(channel, fn)` with pre-mount replay instead of hand-rolled
   ready-handshakes (Magelight buffers sends that arrive before your app mounts).
 - **Marshalling:** pass raw JSON as one string arg, no extra escaping — same rule on both.
-- **Text input and IME:** Magelight detects text-field focus itself (`focusin`/`focusout`
-  on real inputs) and uses the Windows IME: the candidate list opens at the caret and the
-  composition shows inline in the field. PrismaUI's IME is the `prismaIME_state` page event, with
+- **Text input and IME:** Magelight follows the focused field itself, with no script in the
+  page (from 1.5.0 an input, a textarea, a `contenteditable` region or a field in an iframe), on
+  the page holding UI mode, and uses the Windows IME there, whose own windows it never shows: the
+  composition shows inline in the field and the page core draws the candidate list in a box at it
+  (`data-ml-ime="off"` opts a page out, from 1.5.0). PrismaUI's IME is the `prismaIME_state` page event, with
   the page drawing its own composition and candidate overlay; on Magelight delete that listener
   and overlay. For an "IME active" indicator, listen for `magelight:ime` ([CPP.md](CPP.md), "IME").
 - **UI sounds (Magelight-only gain, 0.29.0):** neither host's pages can play audio (Ultralight has no
@@ -71,7 +73,7 @@ with the frontend essentially untouched.
   mod, migrate it through your own save data.
 - **Frontend build:** strip `crossorigin` from module tags and set `base: './'` — required
   over `file:///` on Magelight, tolerated-but-pointless on PrismaUI. If you targeted es2019
-  for an older engine, es2022 works on Magelight's Ultralight 1.4 (WebKit 615). Both are what
+  for an older engine, es2022 works on Magelight's Ultralight (WebKit 615, in 1.4 and 2.0). Both are what
   `@magelight/vite-plugin` sets for you.
 
 ## The C++ mapping
@@ -83,7 +85,7 @@ call maps like this:
 | PrismaUI | Magelight | Note |
 |---|---|---|
 | `CreateView(path, onDomReady)` | `CreateViewEx(mod, &desc, &out)` | fullscreen via `ViewDesc::fullscreen`, or give real bounds/anchor |
-| `Show` / `Hide` | `ShowView(view, bool)` | identical |
+| `Show` / `Hide` | `ShowView(view, bool)` | the same call; from 1.5.0 a hidden page pauses (difference 6 below) |
 | `Focus(view, pauseGame, disableFocusMenu)` | `RequestUIMode(view, flags)` | returns a `Result` — someone else may own UI mode; queue or refuse. There is no focus menu to disable: the host's own `MagelightFocus` menu is managed for you |
 | `Unfocus(view)` | `ReleaseUIMode(mod)` | never hides the view — same as Unfocus |
 | `IsHidden(view)` | — | no query; track what you showed |
@@ -100,7 +102,7 @@ call maps like this:
 | `RegisterConsoleCallback` (V2) | the `ConsoleMessage` host event | every console message in full, whatever `Magelight.log` records |
 | Destroy (unused by most) | `DestroyView(view)` | async; views can also `ReloadView`/`Navigate` |
 
-Five behavioral differences to design around:
+Seven behavioral differences to design around:
 
 1. **Threading contract is explicit.** `onEvent` and `EvalJS` results arrive on the callback
    thread you pick at `RegisterMod` (default: game thread — the only thread where `RE::` is
@@ -128,6 +130,26 @@ Five behavioral differences to design around:
    and CSS `cursor: none` hides the host's for a page that draws its own ([CPP.md](CPP.md),
    "Your own cursor"). Since 0.31.1 `SetViewCursorTint` recolours the host's drawn cursor to
    match your palette, with no image files ([CPP.md](CPP.md), "Tinting the host cursor").
+6. **A hidden page pauses** (1.5.0, Ultralight 2.0). On PrismaUI, and on Magelight before 1.5.0, a
+   hidden page is only not drawn: its animations and events run as if it were shown. From 1.5.0
+   its page reads `document.visibilityState` `'hidden'` and gets `visibilitychange` on each hide
+   and show; its `requestAnimationFrame` callbacks and CSS animations and transitions stop, so
+   `transitionend` and `animationend` wait for the next show (a panel that finishes closing on one
+   of them does that at its next open, so it can open showing what it held at the close); and its
+   `resize` and `scroll` events, `matchMedia` `change` events and `ResizeObserver` /
+   `IntersectionObserver` callbacks wait for the next show or prepaint and arrive once (a panel
+   that relayouts after a debounced `resize` opens at its old layout until the timer fires: do
+   that work in the handler). Timers, messages, `InteropCall` and `InvokeJS` keep running.
+   `capabilities.pageVisibility` in the page, or `QueryCapability("pagevisibility")` in C++, says
+   the host does this ([CPP.md](CPP.md), "Hidden pages").
+7. **Key events carry `code` and the layout's `key`** (1.5.0, Ultralight 2.0). On PrismaUI, and on
+   Magelight before 1.5.0, `KeyboardEvent.code` was `""`. From 1.5.0, as in a browser, `code`
+   names the key's place on a US keyboard (the key labelled A on a French AZERTY keyboard reads
+   `KeyQ`) and `key` is the character the player's layout types (`"ö"`, `"&"` for AZERTY's
+   unshifted 1). A page that turns a keydown into a Windows virtual-key
+   code, such as a hotkey capture for a plugin that polls `GetAsyncKeyState`, must read `keyCode`,
+   which is unchanged: one that prefers `code` binds the wrong key on a non-US keyboard
+   ([SDK.md](SDK.md), "Keyboard and mouse").
 
 ## Distribution changes
 
@@ -135,9 +157,9 @@ Your FOMOD's dependency line changes from PrismaUI to Magelight; pages move from
 `Data/PrismaUI/views/...` to `Data/Magelight/<modId>/views/...` (the folder is your
 namespace — see [MANIFEST.md](MANIFEST.md)). Declare `minHost` and the host itself renders
 the "needs Magelight a.b.c" panel for users on an older host. Bundle-versus-require and the
-licensing your mod inherits are covered in [DISTRIBUTION.md](DISTRIBUTION.md) — both hosts
-ship the Ultralight 1.4 free tier (PrismaUI 1.4.1-dev, Magelight 1.4.0b), so nothing about your
-license posture changes.
+licensing your mod inherits are covered in [DISTRIBUTION.md](DISTRIBUTION.md). Both hosts ship
+Ultralight's free tier, but not the same build: PrismaUI ships 1.4.1-dev, Magelight 2.0.0-beta.2
+from 1.5.0 (1.4.0b before), whose licence is not 1.4's word for word, so read it before you bundle.
 
 If your mod is Papyrus-only, you were never on PrismaUI — start at
 [PAPYRUS.md](PAPYRUS.md) instead; there is nothing to unlearn.
