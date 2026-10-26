@@ -114,6 +114,8 @@ namespace Magelight {
     //                             // page holds UI mode (see InstallPolledKeyFilter)
     //   "skipGameCursor": true    // 1.2.0: the game's cursor is not drawn while a page holds UI mode, flat only
     //                             // (see InstallGameCursorSkip)
+    //   "pinGameCursor": true     // 1.5.1: the game's Cursor Menu is not closed while a page holds UI mode
+    //                             // (see InstallCursorMenuPin)
     //   "loadStagger": true, "loadBudgetMs": 8   // 0.31.0: hidden views start their first load one per frame
     //                                            // (see MaterializeViews); false = all in one frame (1-100)
     //   "cursorFile": "", "cursorHeight": 24, "cursorHotspotX": 0, "cursorHotspotY": 0   // the host cursor
@@ -280,6 +282,7 @@ namespace Magelight {
     static std::atomic<bool>      s_exceptionTelemetry{ true };
     static bool                   s_blockPolledKeys = true;   // Magelight.json; read before InstallPolledKeyFilter
     static bool                   s_skipGameCursor = true;    // Magelight.json "skipGameCursor"; read before InstallGameCursorSkip
+    static bool                   s_pinGameCursor = true;     // Magelight.json "pinGameCursor"; read before InstallCursorMenuPin
     static std::atomic<int>       s_stallThresholdMs{ 1500 };
     // Staggered view loading (0.31.0, MaterializeViews): "loadStagger" and "loadBudgetMs" in Magelight.json.
     static std::atomic<bool>      s_loadStagger{ true };
@@ -590,6 +593,8 @@ namespace Magelight {
                 s_blockPolledKeys = it->get<bool>();
             if (auto it = j.find("skipGameCursor"); it != j.end() && it->is_boolean())
                 s_skipGameCursor = it->get<bool>();
+            if (auto it = j.find("pinGameCursor"); it != j.end() && it->is_boolean())
+                s_pinGameCursor = it->get<bool>();
             if (auto it = j.find("stallThresholdMs"); it != j.end() && it->is_number())
                 s_stallThresholdMs.store(std::clamp(it->get<int>(), 250, 60000));
             if (auto it = j.find("loadStagger"); it != j.end() && it->is_boolean())
@@ -2777,9 +2782,9 @@ namespace Magelight {
     // The sprite is the menu's movie, whose root is made transparent (flat only: VR keeps its own pointer path): the
     // engine re-shows the movie itself every frame, which made GFxMovieView::SetVisible blink, but never touches the
     // root's own _alpha/_visible, and a reskinned cursor movie hides the same way. FrameWork re-asserts this shortly
-    // after entry, every second, and for a few frames after the Cursor Menu reopens (s_cursorRehideFrames: it is not
-    // kept open, so another menu's open that makes the engine close and re-show it builds a new, visible movie, which
-    // drew over the pages until the next second); exit restores the root.
+    // after entry, every second, and for a few frames after the Cursor Menu reopens (s_cursorRehideFrames: with
+    // "pinGameCursor" false it is not kept open, so another menu's open that makes the engine close and re-show it
+    // builds a new, visible movie, which drew over the pages until the next second); exit restores the root.
     // The Windows cursor is left to the engine, which keeps it hidden over the game (a minimize and restore hides a
     // stray one again). Never call MenuCursor::SetCursorVisibility here: its show is a forced ShowCursor(TRUE) loop
     // until the count is >= 0, not a restore of the earlier state, so the Windows cursor stayed up beside the game's
@@ -2830,6 +2835,43 @@ namespace Magelight {
         REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_CursorMenu[0] };
         s_origCursorPostDisplay = reinterpret_cast<CursorPostDisplayFn>(vtbl.write_vfunc(0x6, &Hook_CursorPostDisplay));
         SKSE::log::info("Magelight: the game's cursor is not drawn while a page holds the mouse (Cursor Menu PostDisplay)");
+    }
+
+    // While a page holds UI mode the Cursor Menu is not closed. When another menu opens over a page, the engine closes
+    // the Cursor Menu and opens a new one within a frame or two, and a mod that reads the cursor's movie every frame
+    // (FUCK's gamepad cursor hide reads "_root" from its input hook) crashes on the half-built or half-torn-down one.
+    // Only kHide is refused, as PrismaUI does for its own focus: the exit's hide arrives after s_focused is cleared,
+    // and kForceHide always passes. "pinGameCursor": false installs nothing. Game thread.
+    using CursorProcessMessageFn = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
+    static CursorProcessMessageFn     s_origCursorProcessMessage = nullptr;
+    static std::atomic<std::uint64_t> s_cursorPinLoggedMs{ 0 };   // GetTickCount64 of the last kept-open log line
+    static RE::UI_MESSAGE_RESULTS Hook_CursorProcessMessage(RE::IMenu* self, RE::UIMessage& msg)
+    {
+        if (msg.type == RE::UI_MESSAGE_TYPE::kHide && s_focused.load()) {
+            const std::uint64_t now = GetTickCount64();
+            if (now - s_cursorPinLoggedMs.load() > 10000) {
+                s_cursorPinLoggedMs.store(now);
+                SKSE::log::info("Magelight: the Cursor Menu kept open while a page holds UI mode (the engine asked to "
+                                "close it, as it does when another menu opens over the page)");
+            }
+            return RE::UI_MESSAGE_RESULTS::kIgnore;
+        }
+        return s_origCursorProcessMessage ? s_origCursorProcessMessage(self, msg) : RE::UI_MESSAGE_RESULTS::kPassOn;
+    }
+
+    static void InstallCursorMenuPin()
+    {
+        static bool s_done = false;
+        if (s_done) return;
+        s_done = true;
+        if (!s_pinGameCursor) {
+            SKSE::log::info("Magelight: the game's Cursor Menu is left to the engine (Magelight.json pinGameCursor false)");
+            return;
+        }
+        REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_CursorMenu[0] };
+        s_origCursorProcessMessage =
+            reinterpret_cast<CursorProcessMessageFn>(vtbl.write_vfunc(0x4, &Hook_CursorProcessMessage));
+        SKSE::log::info("Magelight: the game's Cursor Menu stays open while a page holds UI mode (Cursor Menu ProcessMessage)");
     }
 
     // Menu depth diagnostics. In the UI-pass composite the views draw in MagelightOverlay's PostDisplay, so every
@@ -9218,6 +9260,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         ApplyExceptionTelemetrySetting();
         InstallPolledKeyFilter();
         InstallGameCursorSkip();
+        InstallCursorMenuPin();
         s_engineMode = !REL::Module::IsVR()
             && (s_compositeMode == "engine" || (s_compositeMode == "auto" && SmoothMotionLoaded()))
             && InstallEngineEndHook();

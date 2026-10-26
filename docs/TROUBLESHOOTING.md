@@ -314,8 +314,11 @@ For a second cursor over the page, read these lines:
   mod the line's movie names.
 - `Windows' own cursor shows over the game ...` (a warning): the second cursor is Windows' arrow, not the
   game's. Alt-tabbing out and back usually hides it.
+- `the Cursor Menu kept open while a page holds UI mode ...` (at most every 10 s): since 1.5.1 another menu
+  opening over a page no longer makes the game rebuild its cursor, which a mod reading the cursor's movie every
+  frame could crash on. `"pinGameCursor": false` turns it off.
 - `menu 'Cursor Menu' CLOSED` then `OPENED while UI mode is on`, usually right after another menu opens: the
-  game rebuilt its cursor, which starts visible. Since 1.2.0 it is not drawn at all with `skipGameCursor`,
+  game rebuilt its cursor, which starts visible (since 1.5.1 only with `pinGameCursor` false). Since 1.2.0 it is not drawn at all with `skipGameCursor`,
   and hidden at once otherwise; before, it showed for up to a second each time.
 - `menu 'Cursor Menu' CLOSED after UI mode ended` (for three seconds after a page closes, with the focus menu
   and `MagelightOverlay`): the cursor's menus closing. One close per exit is normal; a CLOSED then OPENED pair
@@ -394,6 +397,7 @@ it read, or says that defaults are in effect.
 | `cursorForce`, `modCursors` | `false`, `true` | 0.31.0: mods may bring their own cursor. `cursorForce` `true` shows yours (your `cursorFile`, else the drawn cursor) everywhere, over every mod's cursor and over pages that hide the pointer. `modCursors` `false` ignores mods' cursor images and colours (0.31.1), but a page that draws its own pointer still hides yours. See "The cursor looks different over one mod, or disappears" |
 | `loadStagger`, `loadBudgetMs` | `true`, `8` | 0.31.0: views not yet opened start loading their pages one per frame after a load, the next once the previous page is ready or failed (or 100 ms passed) and the last frame's page work took under `loadBudgetMs` (1-100), at most about a second per batch; a view being opened, or visible at creation, loads at once. `false` loads every page in the same frame, as before 0.31.0. See "Performance" |
 | `skipGameCursor` | `true` | 1.2.0: while a page holds UI mode, the game's own cursor is not drawn (its Cursor Menu's draw is skipped), so the game's Cursor Menu cannot draw over Magelight's cursor (a mod drawing a cursor of its own still can). Flat only. `false` installs nothing |
+| `pinGameCursor` | `true` | 1.5.1: while a page holds UI mode, the game's Cursor Menu is not closed when another menu opens over the page (the engine would close it and build a new one, which a mod reading it every frame can crash on); it still closes with the page. Flat and VR. `false` installs nothing |
 | `blockPolledKeys` | `true` | 0.31.10: while a page holds UI mode, other SKSE plugins that ask Windows for the key state themselves (`GetAsyncKeyState` / `GetKeyState`) read every keyboard key as up, so typing into a page cannot fire their hotkeys. The plugin whose page it is is exempt. `false` installs no filter |
 | `stallWatchdog`, `stallThresholdMs` | `true`, `1500` | Log the present and main threads' stacks when no frame is presented for this long (250-60000 ms); the first time per session, every other thread's too. On flat, not while another program's window is in the foreground (alt-tab): the gap counts from the game's return, unless the game's window stops responding |
 | `exceptionTelemetry` | `true` | The `Magelight VEH` lines (see "Magelight VEH" below). `false` takes Magelight's exception handler out of the game entirely, from the main menu on |

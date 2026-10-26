@@ -58,6 +58,17 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 1.5.1 - Unreleased
+
+### What players notice
+
+- **Opening a menu over a page no longer rebuilds the game's cursor.** When another menu opened while a page held
+  the mouse (an item's context menu, a mirror's carrier menu), the game closed its Cursor Menu and opened a new one
+  within a frame or two. A mod that reads that menu every frame could crash on the one being torn down or built:
+  FUCK 1.7.3 does, from its input hook, and crashed when SkyrimNet's chat opened or closed. While a page holds UI
+  mode the Cursor Menu is now kept open, as PrismaUI keeps it for its own pages; it still closes when the page
+  does. `Magelight.json` `"pinGameCursor": false` leaves it to the game as before.
+
 ## 1.5.0 - Unreleased
 
 The first Magelight on Ultralight 2.0. It follows 1.3.0 (there is no Magelight 1.4; "1.4" below always means the
