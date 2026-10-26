@@ -18,10 +18,19 @@ bounds, anchors and named layers (PrismaUI views are fullscreen; it has a stacki
 bounds), a Papyrus API, hot reload in devMode, per-mod storage isolation, VR on SteamVR directly
 as well as through OpenComposite (PrismaUI's VR build runs through OpenComposite Unleashed only),
 and a `minHost` version gate that tells users what to install instead of rendering a blank page.
+From 1.5.0 (Ultralight 2.0) also: hidden pages that pause instead of running unseen (PrismaUI
+updates and paints every view each frame, shown or not), the IME composed in the field with no
+page code (PrismaUI hands the page the IME's state to draw), and UI sounds through the game's
+audio, which neither engine can play itself.
 
 **You might stay for:** PrismaUI is installed by every one of your current users and its
 CPU path is fine for a light page; your page does nothing PrismaUI can't do; you don't want
-to touch a working integration. (Project-state facts — Nexus build version, game-version
+to touch a working integration. One design difference cuts the other way: PrismaUI runs
+Ultralight on a thread of its own, so a page's work stays off the game's frame. Magelight runs
+it on the game's main thread, inside the frame. GPU rendering and paused hidden pages keep a
+typical page cheap there, but a page that runs heavy script every frame costs the game that
+time. A dedicated thread for Magelight's page work is planned, which would take that cost off the
+game's frame as well. (Project-state facts — Nexus build version, game-version
 compatibility — change over time; check them fresh rather than trusting
 any summary, including this one.)
 
@@ -71,6 +80,12 @@ with the frontend essentially untouched.
   and sessions are isolated per mod by default (`"default"` opts back into a shared jar: the
   `sessionName` field from C++, the `"session"` key in a manifest). User data stored under PrismaUI does **not** move — if that matters for your
   mod, migrate it through your own save data.
+- **Rendering:** from 1.5.0 Magelight runs Ultralight 2.0 and PrismaUI 1.4.1, so a page can look
+  slightly different. Text gamma is 2.0's default 2.2 where PrismaUI keeps 1.4's 1.8; text that
+  looks lighter or heavier than on PrismaUI is that, and `Magelight.json` `"fontGamma": 1.8` is
+  1.4's look. Ultralight's compositor is on, which costs more video memory per page, and 2.0
+  decodes a page's images only when it paints them, so a page's first open can be slower unless
+  it is prepainted (`SetViewPrepaint`, manifest `prepaint`).
 - **Frontend build:** strip `crossorigin` from module tags and set `base: './'` — required
   over `file:///` on Magelight, tolerated-but-pointless on PrismaUI. If you targeted es2019
   for an older engine, es2022 works on Magelight's Ultralight (WebKit 615, in 1.4 and 2.0). Both are what
@@ -107,7 +122,8 @@ Seven behavioral differences to design around:
 1. **Threading contract is explicit.** `onEvent` and `EvalJS` results arrive on the callback
    thread you pick at `RegisterMod` (default: game thread — the only thread where `RE::` is
    safe). JS listeners (`RegisterJSListener`/`RegisterJSListenerEx`) do not: they run inline on
-   the render thread, as PrismaUI's callbacks effectively do. Marshal from them with
+   the render thread (PrismaUI's run on its own UI thread: on neither host are they on the game
+   thread). Marshal from them with
    `PostGameTask` (0.30.1+), not SKSE's `AddTask`: copy the argument, then post the work before
    touching `RE::`. On Skyrim VR an `AddTask` made inside the frame can hang the game
    ([CPP.md](CPP.md), "The rules that bite").
@@ -149,7 +165,9 @@ Seven behavioral differences to design around:
    unshifted 1). A page that turns a keydown into a Windows virtual-key
    code, such as a hotkey capture for a plugin that polls `GetAsyncKeyState`, must read `keyCode`,
    which is unchanged: one that prefers `code` binds the wrong key on a non-US keyboard
-   ([SDK.md](SDK.md), "Keyboard and mouse").
+   ([SDK.md](SDK.md), "Keyboard and mouse"). Also from 1.5.0: Alt, F10 and Alt+key reach the page
+   (a system key; Alt+F4 and the like still work), and mouse buttons 4 and 5 arrive as `button`
+   3 and 4 with `auxclick`, never `click`, with no middle-click autoscroll.
 
 ## Distribution changes
 

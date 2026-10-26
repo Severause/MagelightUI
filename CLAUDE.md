@@ -122,7 +122,14 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    menu is still closed once the queue has run (`CheckFocusMenuClosed`). The engine opens and closes
    the Cursor Menu with it: queue no Cursor Menu message of your own while it is registered, open the
    overlay (no kUsesCursor) before it, and keep kAssignCursorToRenderer on the overlay, or the engine
-   rebuilds the cursor, which cursor mods can crash on.
+   rebuilds the cursor, which cursor mods can crash on. Another menu opening over a page makes the engine close
+   and reopen the Cursor Menu as well, so its ProcessMessage refuses kHide while `s_focused` and the focus
+   menu is open (`InstallCursorMenuPin`, `"pinGameCursor"`): the exit's hide arrives after `s_focused` is cleared,
+   and a focus menu the game closed itself is off the stack before its cursor hide is read. Never read or write
+   the Cursor Menu movie's ActionScript variables from a task: the game updates that movie on another thread, and
+   a mod reading it from its input hook crashed when Magelight did. On flat its own AdvanceMovie hides it
+   (`Hook_CursorAdvanceMovie`, after the game's advance, as PrismaUI does); `HideVanillaCursor`'s `_root` writes
+   run only if that hook was not installed.
 8. **es2022 bundles** (the SDK's WebKit 615); `crossorigin` stripped; `base: './'`.
 9. **Blank pages must name themselves**: console listener + `OnFailLoading` → log + event.
    Console errors and warnings reach the log by default, gated only by the player's
@@ -163,7 +170,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   `...\Skyrim Special Edition\Data` and/or your mod-manager mod folder (e.g.
   `<modlist>\mods\Magelight UI`). Zip: `tools\package.ps1 -Version <ver> -Suffix -dev`
   (never `Compress-Archive`: it writes `\` into entry names).
-- Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`,
+- Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
   `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `ulFiberMB`; `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
