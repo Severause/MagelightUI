@@ -40,11 +40,7 @@ Magelight ships its Ultralight runtime under private file names precisely so it 
 collide with PrismaUI's copy in the same process. A user can install both hosts and run
 PrismaUI mods and Magelight mods side by side. One caveat: if your C++ polls PrismaUI's
 `HasAnyActiveFocus` to avoid overlapping UI, query Magelight's `IsUIModeActive()` too when
-both hosts are present — neither host sees the other's focused view. That applies to players as
-well: neither host knows when the other takes the mouse and keyboard. A PrismaUI page that takes
-focus while a Magelight page is open opens PrismaUI's own modal focus menu, which can keep the
-keyboard and show the Windows pointer beside Magelight's drawn cursor. One mod's pages belong on
-one host, and a mod that supports both should not open a page on each at once.
+both hosts are present — neither host sees the other's focused view.
 
 ## What carries over
 
