@@ -111,7 +111,9 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    the page-root union, and the Content-Security-Policy injected into every page. `resources/` must
    resolve.
 6. **Mouse rides the SKSE input sink + MenuCursor**; the window never gets WM mouse messages.
-   `ToggleControls(..., storeState=false)`; `ForceExitUIMode` on every load boundary.
+   `ToggleControls(..., storeState=false)`; `ForceExitUIMode` on every load boundary. The Windows cursor is
+   not what a page follows, so while a page holds the mouse it is clipped to the game window (`ConfineCursor`,
+   flat only) and let go on exit and on focus loss, or a freed one clicks on another monitor too.
 7. **Own engine menu** (`MagelightFocus`, kUsesCursor) on UI-mode entry — the engine drives
    MenuCursor only while a cursor-using menu is topmost. On VR an exit with a controller button
    down that was pressed while the page was open keeps that menu and the suspended controls until
@@ -168,7 +170,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   `...\Skyrim Special Edition\Data` and/or your mod-manager mod folder (e.g.
   `<modlist>\mods\Magelight UI`). Zip: `tools\package.ps1 -Version <ver> -Suffix -dev`
   (never `Compress-Archive`: it writes `\` into entry names).
-- Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `pinGameCursor`,
+- Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
   `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `ulFiberMB`; `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.

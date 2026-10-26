@@ -73,6 +73,12 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   within a frame or two, another moment such a mod could crash in. While a page holds UI mode the Cursor Menu is
   now kept open, as PrismaUI keeps it for its own pages; it still closes when the page does. `Magelight.json`
   `"pinGameCursor": false` leaves it to the game as before.
+- **The Windows cursor stays in the game while a page holds the mouse.** A page's cursor follows the game's own
+  mouse input, so when something left the Windows cursor free (a second UI host taking focus, a non-exclusive mouse)
+  it could wander onto another monitor while the page's cursor kept moving, and each click landed on both. While a
+  page holds the mouse and the game is in front, the Windows cursor is now kept inside the game window; it is let go
+  when the page closes, when you Alt+Tab away and when the game loses focus, and any clip that was there before is
+  put back. Flat only. `Magelight.json` `"clipCursor": false` turns it off.
 
 ## 1.5.0 - Unreleased
 
