@@ -318,7 +318,7 @@ For a second cursor over the page, read these lines:
   opening over a page no longer makes the game rebuild its cursor, which a mod reading the cursor's movie every
   frame could crash on. `"pinGameCursor": false` turns it off.
 - `menu 'Cursor Menu' CLOSED` then `OPENED while UI mode is on`, usually right after another menu opens: the
-  game rebuilt its cursor, which starts visible (since 1.5.1 only with `pinGameCursor` false). Since 1.2.0 it is not drawn at all with `skipGameCursor`,
+  game rebuilt its cursor, which starts visible (since 1.5.1 rarely, unless `pinGameCursor` is false). Since 1.2.0 it is not drawn at all with `skipGameCursor`,
   and hidden at once otherwise; before, it showed for up to a second each time.
 - `menu 'Cursor Menu' CLOSED after UI mode ended` (for three seconds after a page closes, with the focus menu
   and `MagelightOverlay`): the cursor's menus closing. One close per exit is normal; a CLOSED then OPENED pair

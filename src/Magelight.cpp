@@ -2840,14 +2840,23 @@ namespace Magelight {
     // While a page holds UI mode the Cursor Menu is not closed. When another menu opens over a page, the engine closes
     // the Cursor Menu and opens a new one within a frame or two, and a mod that reads the cursor's movie every frame
     // (FUCK's gamepad cursor hide reads "_root" from its input hook) crashes on the half-built or half-torn-down one.
-    // Only kHide is refused, as PrismaUI does for its own focus: the exit's hide arrives after s_focused is cleared,
-    // and kForceHide always passes. "pinGameCursor": false installs nothing. Game thread.
+    // Only kHide is refused, as PrismaUI does for its own focus, and only while the page's menu still holds the cursor:
+    // the exit's hide arrives after s_focused is cleared, and when the game closes the focus menu itself (UI mode then
+    // follows a frame later, CheckFocusMenuClosed) the menu is off the stack by the time the cursor's hide is read.
+    // kForceHide always passes. "pinGameCursor": false installs nothing. Runs on the thread processing UI messages (on
+    // AE not always the main thread, see MenuSink): it reads atomics and the menu stack only.
+    static bool FocusMenuHoldsCursor()
+    {
+        if (!s_focusMenuRegistered) return true;   // no focus menu: Magelight shows and hides the cursor itself
+        auto* ui = RE::UI::GetSingleton();
+        return ui && ui->IsMenuOpen(MagelightFocusMenu::MENU_NAME);
+    }
     using CursorProcessMessageFn = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
     static CursorProcessMessageFn     s_origCursorProcessMessage = nullptr;
     static std::atomic<std::uint64_t> s_cursorPinLoggedMs{ 0 };   // GetTickCount64 of the last kept-open log line
     static RE::UI_MESSAGE_RESULTS Hook_CursorProcessMessage(RE::IMenu* self, RE::UIMessage& msg)
     {
-        if (msg.type == RE::UI_MESSAGE_TYPE::kHide && s_focused.load()) {
+        if (msg.type == RE::UI_MESSAGE_TYPE::kHide && s_focused.load() && FocusMenuHoldsCursor()) {
             const std::uint64_t now = GetTickCount64();
             if (now - s_cursorPinLoggedMs.load() > 10000) {
                 s_cursorPinLoggedMs.store(now);

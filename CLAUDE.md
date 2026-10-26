@@ -121,8 +121,9 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    the Cursor Menu with it: queue no Cursor Menu message of your own while it is registered, open the
    overlay (no kUsesCursor) before it, and keep kAssignCursorToRenderer on the overlay, or the engine
    rebuilds the cursor, which cursor mods can crash on. Another menu opening over a page makes the engine close
-   and reopen the Cursor Menu as well, so its ProcessMessage refuses kHide while `s_focused`
-   (`InstallCursorMenuPin`, `"pinGameCursor"`); the exit's hide arrives after `s_focused` is cleared.
+   and reopen the Cursor Menu as well, so its ProcessMessage refuses kHide while `s_focused` and the focus
+   menu is open (`InstallCursorMenuPin`, `"pinGameCursor"`): the exit's hide arrives after `s_focused` is cleared,
+   and a focus menu the game closed itself is off the stack before its cursor hide is read.
 8. **es2022 bundles** (the SDK's WebKit 615); `crossorigin` stripped; `base: './'`.
 9. **Blank pages must name themselves**: console listener + `OnFailLoading` → log + event.
    Console errors and warnings reach the log by default, gated only by the player's
