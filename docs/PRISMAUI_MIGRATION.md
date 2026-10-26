@@ -29,7 +29,8 @@ to touch a working integration. One design difference cuts the other way: Prisma
 Ultralight on a thread of its own, so a page's work stays off the game's frame. Magelight runs
 it on the game's main thread, inside the frame. GPU rendering and paused hidden pages keep a
 typical page cheap there, but a page that runs heavy script every frame costs the game that
-time. (Project-state facts — Nexus build version, game-version
+time. A dedicated thread for Magelight's page work is planned, which would take that cost off the
+game's frame as well. (Project-state facts — Nexus build version, game-version
 compatibility — change over time; check them fresh rather than trusting
 any summary, including this one.)
 
