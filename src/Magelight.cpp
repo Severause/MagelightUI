@@ -2768,8 +2768,9 @@ namespace Magelight {
     // exits hide the UI-mode view (the demo + SA close behavior); the public
     // ExitUIMode passes false so a view can stay rendered while the game
     // owns input (SA's Free Look).
-    // The cursor movie HideVanillaCursor last hid while UI mode is on, compared, never read: the watchdog warns when
-    // that same movie draws again, while a rebuilt Cursor Menu (a new movie, shown) is only hidden again.
+    // The cursor movie last hidden while UI mode is on (Hook_CursorAdvanceMovie, or the fallback HideVanillaCursor),
+    // compared, never read: the hook shows that movie again after UI mode, and the fallback's watchdog warns when it
+    // draws again, while a rebuilt Cursor Menu (a new movie, shown) is only hidden again.
     static std::atomic<const void*> s_hiddenCursorMovie{ nullptr };
     // When UI mode last ended (GetTickCount64): MenuSink logs the Cursor Menu, the focus menu and the overlay for
     // three seconds after.
@@ -2777,7 +2778,43 @@ namespace Magelight {
     // Frames left in which FrameWork hides the cursor sprite again after the Cursor Menu reopened (MenuSink).
     static std::atomic<int> s_cursorRehideFrames{ 0 };
 
-    // Game thread. The CursorMenu stays OPEN while UI mode is on (it drives the MenuCursor position) but its sprite
+    // Flat: the Cursor Menu's own AdvanceMovie hides its movie while a page holds UI mode and shows it again after,
+    // as PrismaUI does, so the movie's state is only changed where the game updates it, never from a task (a mod reads
+    // it from its input hook, and two threads in the movie at once crash). The hide is set after the advance: the game
+    // shows the movie again earlier in the frame, and nothing between the advance and the menu's PostDisplay does.
+    // PrismaUI's own hook on this slot sets visibility before its call through, so ours is last in either order.
+    // s_hiddenCursorMovie is the movie it last hid; a new movie at the same address is shown anyway.
+    using CursorAdvanceMovieFn = void (*)(RE::IMenu*, float, std::uint32_t);
+    static CursorAdvanceMovieFn s_origCursorAdvanceMovie = nullptr;
+    static bool CursorHiddenInAdvance() { return s_origCursorAdvanceMovie != nullptr; }
+    static void Hook_CursorAdvanceMovie(RE::IMenu* self, float interval, std::uint32_t currentTime)
+    {
+        if (s_origCursorAdvanceMovie) s_origCursorAdvanceMovie(self, interval, currentTime);
+        RE::GFxMovieView* movie = self ? self->uiMovie.get() : nullptr;
+        if (!movie) return;
+        if (s_focused.load()) {
+            if (movie->GetVisible()) movie->SetVisible(false);
+            s_hiddenCursorMovie.store(movie);
+        } else if (s_hiddenCursorMovie.load() == movie) {
+            movie->SetVisible(true);
+            s_hiddenCursorMovie.store(nullptr);
+        }
+    }
+
+    static void InstallCursorAdvanceHide()
+    {
+        static bool s_done = false;
+        if (s_done) return;
+        s_done = true;
+        if (REL::Module::IsVR()) return;   // VR keeps its own pointer path; HideVanillaCursor leaves VR alone too
+        REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_CursorMenu[0] };
+        s_origCursorAdvanceMovie = reinterpret_cast<CursorAdvanceMovieFn>(vtbl.write_vfunc(0x5, &Hook_CursorAdvanceMovie));
+        SKSE::log::info("Magelight: the game's cursor is hidden in its own menu's update while a page holds the mouse "
+                        "(Cursor Menu AdvanceMovie)");
+    }
+
+    // Game thread. The fallback for Hook_CursorAdvanceMovie, which does nothing here once it is installed.
+    // The CursorMenu stays OPEN while UI mode is on (it drives the MenuCursor position) but its sprite
     // must not draw: at Present it lands under the overlay, but in the UI pass the CursorMenu draws after us, on top.
     // The sprite is the menu's movie, whose root is made transparent (flat only: VR keeps its own pointer path): the
     // engine re-shows the movie itself every frame, which made GFxMovieView::SetVisible blink, but never touches the
@@ -2792,7 +2829,7 @@ namespace Magelight {
     // SampleCursorState logs the threads.
     static void HideVanillaCursor(bool hide)
     {
-        if (REL::Module::IsVR()) return;
+        if (REL::Module::IsVR() || CursorHiddenInAdvance()) return;
         if (!hide) s_hiddenCursorMovie.store(nullptr);
         if (auto* ui = RE::UI::GetSingleton()) {
             if (const auto menu = ui->GetMenu(RE::CursorMenu::MENU_NAME); menu && menu->uiMovie) {
@@ -2806,7 +2843,7 @@ namespace Magelight {
     // The game draws its cursor in the Cursor Menu's PostDisplay (a kCustomRendering menu). While a page holds UI mode
     // on flat that draw is skipped, so nothing that shows the sprite again (a cursor replacer's script, another mod, a
     // rebuilt menu) can put the game's cursor over Magelight's. The menu stays open and keeps moving the MenuCursor;
-    // HideVanillaCursor stays as the second line. "skipGameCursor": false installs nothing. Main thread (the UI pass).
+    // Hook_CursorAdvanceMovie hides the movie as well. "skipGameCursor": false installs nothing. Main thread (the UI pass).
     using CursorPostDisplayFn = void (*)(RE::IMenu*);
     static CursorPostDisplayFn s_origCursorPostDisplay = nullptr;
     // Draws skipped since the last watchdog pass (it logs the first count of a session: proof the skip works).
@@ -2935,9 +2972,10 @@ namespace Magelight {
         return nullptr;
     }
 
-    // The game's cursor sprite as the log describes it: the Cursor Menu open or not, its depth, whether its movie's
-    // root is hidden (_alpha, _visible: HideVanillaCursor) and the movie it loads (a cursor replacer names its own).
-    // shows: the sprite draws (open, _visible and _alpha above 0); movie: the movie read. Game thread.
+    // The game's cursor sprite as the log describes it: the Cursor Menu open or not, its depth, whether its movie is
+    // hidden (the movie's visible flag with Hook_CursorAdvanceMovie; its root's _alpha and _visible with the fallback
+    // HideVanillaCursor) and the movie it loads (a cursor replacer names its own). shows: the sprite draws; movie: the
+    // movie read. Game thread. With the hook it reads no ActionScript variable: a task must not.
     static std::string DescribeCursorSprite(RE::UI* ui, bool* shows = nullptr, const void** movie = nullptr)
     {
         if (shows) *shows = false;
@@ -2947,11 +2985,22 @@ namespace Magelight {
         const bool open = ui->IsMenuOpen(RE::CursorMenu::MENU_NAME);
         const int depth = static_cast<int>(menu->depthPriority);
         if (!menu->uiMovie) return fmt::format("{}, depth {}, no movie", open ? "open" : "closed", depth);
+        const auto* def = menu->uiMovie->GetMovieDef();
+        const char* url = def ? def->GetFileURL() : nullptr;
+        if (CursorHiddenInAdvance()) {
+            // The movie's own visible flag, which the hook sets: no _root read from this thread (see the hook).
+            const bool shown = menu->uiMovie->GetVisible();
+            const bool drawnNow = open && shown;
+            if (shows) *shows = drawnNow;
+            if (movie) *movie = menu->uiMovie.get();
+            const char* hookState = GameCursorSkipped() ? (drawnNow ? "shown but not drawn (skipGameCursor)" : "hidden, not drawn (skipGameCursor)")
+                                                        : (drawnNow ? "DRAWN" : "hidden");
+            return fmt::format("{}, depth {}, {} (movie visible {}), movie '{}'", open ? "open" : "closed", depth,
+                               hookState, shown, url ? url : "?");
+        }
         const double alpha = menu->uiMovie->GetVariableDouble("_root._alpha");
         RE::GFxValue v;
         const bool visible = menu->uiMovie->GetVariable(&v, "_root._visible") && v.IsBool() && v.GetBool();
-        const auto* def = menu->uiMovie->GetMovieDef();
-        const char* url = def ? def->GetFileURL() : nullptr;
         const bool drawn = open && visible && alpha > 0.0;
         if (shows) *shows = drawn;
         if (movie) *movie = menu->uiMovie.get();
@@ -3267,7 +3316,7 @@ namespace Magelight {
         SKSE::log::info("Magelight: {} {} queued", s_focusMenuRegistered ? "focus menu" : "cursor-menu",
                         on ? "show" : "hide");
         if (!on) s_uiModeExitedMs.store(GetTickCount64());
-        // We draw our own cursor topmost; the show message above processes async, so FrameWork re-asserts this.
+        // We draw our own cursor topmost. Fallback only: Hook_CursorAdvanceMovie hides the game's on flat.
         HideVanillaCursor(on);
         if (!on) s_mouseDown.store(false);
         if (auto* cm = RE::ControlMap::GetSingleton()) {
@@ -8285,7 +8334,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
             }
             // Our own cursor, topmost. The vanilla cursor sprite is hidden while
-            // UI mode is up (HideVanillaCursor), and its draw is skipped
+            // UI mode is up (Hook_CursorAdvanceMovie), and its draw is skipped
             // (skipGameCursor): at Present it would land under the overlay,
             // but in the UI pass the CursorMenu draws after us.
             // This quad tracks the same MenuCursor position, sized from
@@ -9270,6 +9319,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         InstallPolledKeyFilter();
         InstallGameCursorSkip();
         InstallCursorMenuPin();
+        InstallCursorAdvanceHide();
         s_engineMode = !REL::Module::IsVR()
             && (s_compositeMode == "engine" || (s_compositeMode == "auto" && SmoothMotionLoaded()))
             && InstallEngineEndHook();
@@ -9608,7 +9658,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 // A reopened Cursor Menu is a new movie, shown: hide it now, not at the next once-a-second pass. The
                 // sink can run off the main thread, so the hide is posted (and FrameWork repeats it a few frames);
                 // with skipGameCursor the sprite is not drawn meanwhile anyway.
-                if (e->opening && e->menuName.c_str() &&
+                if (e->opening && e->menuName.c_str() && !CursorHiddenInAdvance() &&
                     std::string_view(e->menuName.c_str()) == RE::CursorMenu::MENU_NAME && !REL::Module::IsVR()) {
                     GameTask::Scope scope;
                     s_cursorRehideFrames.store(8);
@@ -9621,8 +9671,8 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // Game thread. If the engine dropped the CursorMenu under us while UI
     // mode is on, put it back (and say so) — without it the MenuCursor
-    // position never updates and our cursor sprite stands still. Also keeps
-    // the vanilla cursor sprite hidden (HideVanillaCursor).
+    // position never updates and our cursor sprite stands still. Without
+    // Hook_CursorAdvanceMovie it also keeps the vanilla sprite hidden (HideVanillaCursor).
     static void CursorMenuWatchdog()
     {
         if (!s_focused.load()) return;
@@ -9645,7 +9695,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             bool shows = false;
             const void* movie = nullptr;
             const std::string sprite = DescribeCursorSprite(ui, &shows, &movie);
-            if (shows && movie && movie == s_hiddenCursorMovie.load() && s_spriteReshown < 5) {
+            if (!CursorHiddenInAdvance() && shows && movie && movie == s_hiddenCursorMovie.load() && s_spriteReshown < 5) {
                 ++s_spriteReshown;
                 if (GameCursorSkipped()) {
                     SKSE::log::info("Magelight: something showed the game's cursor again while a page holds the mouse "

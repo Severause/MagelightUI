@@ -304,10 +304,13 @@ For a second cursor over the page, read these lines:
 - `the game's cursor while a page holds the mouse: ...` (at each UI-mode entry, when it changes): the
   Cursor Menu's depth, whether its sprite is `hidden` (Magelight hides it) or `DRAWN`, whether it draws
   over or under the pages, the movie it loads (a cursor replacer names its own file), and whether
-  Windows' cursor shows over the game.
+  Windows' cursor shows over the game. Since 1.5.1 it reads `(movie visible false)`: the cursor is hidden in
+  its own menu's update (`the game's cursor is hidden in its own menu's update ...` at startup), never from
+  another thread, since a mod reading the cursor every frame crashed when both did.
 - `the game's cursor draw is being skipped ...` (once a session): `skipGameCursor` is working, so the
   game's own cursor cannot be the second one; read the menu list and the Windows line instead.
-- `something showed the game's cursor again ...`: after Magelight hid the sprite, something set it
+- `something showed the game's cursor again ...` (before 1.5.1; since then the cursor is hidden in its own
+  menu's update every frame and this line no longer appears): after Magelight hid the sprite, something set it
   visible again, usually a cursor replacer's own script or another mod. With `skipGameCursor` (the
   default) it is only noted, since the sprite is not drawn anyway. With `skipGameCursor` false it is a
   warning: Magelight hides it again every second, so it flickers or seems stuck; try without the cursor

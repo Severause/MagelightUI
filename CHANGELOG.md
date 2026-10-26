@@ -62,12 +62,17 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
+- **No more crash with a mod that reads the game's cursor every frame.** FUCK 1.7.3 reads the game's cursor menu
+  from its input hook every frame, and with Magelight the game crashed there, often right after SkyrimNet's chat
+  opened. Magelight hid the game's cursor by writing into that menu from SKSE tasks, which the game runs on other
+  threads while it updates the menu; two mods reaching into the same Flash movie at once is what broke. The cursor
+  is now hidden inside the cursor menu's own update, as PrismaUI does, so Magelight never touches it from another
+  thread. Flat only (VR leaves the game's cursor alone, as before).
 - **Opening a menu over a page no longer rebuilds the game's cursor.** When another menu opened while a page held
   the mouse (an item's context menu, a mirror's carrier menu), the game closed its Cursor Menu and opened a new one
-  within a frame or two. A mod that reads that menu every frame could crash on the one being torn down or built:
-  FUCK 1.7.3 does, from its input hook, and crashed when SkyrimNet's chat opened or closed. While a page holds UI
-  mode the Cursor Menu is now kept open, as PrismaUI keeps it for its own pages; it still closes when the page
-  does. `Magelight.json` `"pinGameCursor": false` leaves it to the game as before.
+  within a frame or two, another moment such a mod could crash in. While a page holds UI mode the Cursor Menu is
+  now kept open, as PrismaUI keeps it for its own pages; it still closes when the page does. `Magelight.json`
+  `"pinGameCursor": false` leaves it to the game as before.
 
 ## 1.5.0 - Unreleased
 
