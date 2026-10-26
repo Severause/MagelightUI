@@ -62,8 +62,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **No more crash with a mod that reads the game's cursor every frame.** FUCK 1.7.3 reads the game's cursor menu
-  from its input hook every frame, and with Magelight the game crashed there, often right after SkyrimNet's chat
+- **No more crash with a mod that reads the game's cursor every frame.** A mod that reads the game's cursor menu
+  from its input hook every frame could crash the game alongside Magelight, often right after a chat page
   opened. Magelight hid the game's cursor by writing into that menu from SKSE tasks, which the game runs on other
   threads while it updates the menu; two mods reaching into the same Flash movie at once is what broke. The cursor
   is now hidden inside the cursor menu's own update, as PrismaUI does, so Magelight never touches it from another
