@@ -2881,7 +2881,7 @@ namespace Magelight {
 
     // While a page holds UI mode the Cursor Menu is not closed. When another menu opens over a page, the engine closes
     // the Cursor Menu and opens a new one within a frame or two, and a mod that reads the cursor's movie every frame
-    // (FUCK's gamepad cursor hide reads "_root" from its input hook) crashes on the half-built or half-torn-down one.
+    // (a gamepad cursor hide reading "_root" from its input hook) crashes on the half-built or half-torn-down one.
     // Only kHide is refused, as PrismaUI does for its own focus, and only while the page's menu still holds the cursor:
     // the exit's hide arrives after s_focused is cleared, and when the game closes the focus menu itself (UI mode then
     // follows a frame later, CheckFocusMenuClosed) the menu is off the stack by the time the cursor's hide is read.
