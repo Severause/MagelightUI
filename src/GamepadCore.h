@@ -9,6 +9,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <initializer_list>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace Magelight::Gamepad {
 
@@ -331,5 +336,296 @@ namespace Magelight::Gamepad {
         double m_nextRepeat = 0.0;
         bool m_initialRepeat = false;
     };
+
+    // Windows virtual keys the keys style taps (kept here so the header needs no <windows.h>).
+    inline constexpr int kVkReturn = 0x0D, kVkEscape = 0x1B, kVkLeft = 0x25, kVkUp = 0x26, kVkRight = 0x27, kVkDown = 0x28;
+
+    inline constexpr std::size_t kMaxEvents = 128;
+
+    struct Event {
+        Control control = Control::None;
+        Action action = Action::None;
+        Phase phase = Phase::None;
+        float value = 0.0f, x = 0.0f, y = 0.0f;
+    };
+
+    // One input batch as the host sees it. owner 0: no view owns the pad. A new ownerEpoch for the same owner (its
+    // page reloaded) re-arms the held-button rules as a new owner would.
+    struct BatchIn {
+        double now = 0.0;                // seconds, any steady clock
+        bool connected = false;
+        std::uint64_t owner = 0;
+        std::uint64_t ownerEpoch = 0;
+        ViewConfig config;               // the owner's
+        Mode mode = Mode::Navigation;    // the owner's, as the last batch left it
+        bool escapeCaptured = false;     // the owner's page took Escape (SetEscapeCapture / __escapecapture)
+        PadSnapshot pad;                 // read when the ledger is seeded: a connect, an owner change, an overflow
+    };
+
+    struct PointerOut {
+        float dx = 0.0f, dy = 0.0f;      // reference px; the host scales by the view's height / 1080
+        std::vector<bool> buttons;       // left button: true down, false up, in order
+        bool release = false;            // release a left press the cursor still holds
+    };
+
+    struct BatchOut {
+        std::uint64_t generation = 0;
+        bool reset = false;              // the page cancels held custom input (owner change, overflow, reload)
+        bool stateChanged = false;       // mode, device or connection changed: worth a packet without events
+        Mode mode = Mode::Navigation;
+        bool gamepadDevice = false;      // the pad, not the mouse and keyboard, is in use
+        double dt = 0.0;
+        std::vector<Event> events;       // navigation style
+        std::vector<int> keys;           // keys style: virtual keys to tap, in order
+        PointerOut pointer;              // cursor mode
+    };
+
+    // Turns one batch of engine gamepad events into what the owning page gets. Begin, then Button / Stick for each
+    // event in the batch (true: the host unlinks it), then End. Game thread only.
+    class Router {
+    public:
+        Tuning tuning;
+
+        void Begin(const BatchIn& in)
+        {
+            m_ledger.tuning = tuning;
+            m_in = in;
+            m_out = {};
+            if (in.connected != m_connected) {
+                m_connected = in.connected;
+                m_ledger.ResetDevice();
+                if (m_connected) m_ledger.Seed(in.pad);
+                m_out.stateChanged = true;
+            }
+            const std::uint64_t owner = (m_connected && tuning.enabled && in.config.enabled) ? in.owner : 0;
+            const std::uint64_t previous = m_ledger.Owner();
+            if (owner && owner == previous && in.ownerEpoch != m_epoch) {
+                m_ledger.SetOwner(0);
+                m_ledger.Seed(in.pad);
+            }
+            m_epoch = in.ownerEpoch;
+            m_out.reset = m_ledger.SetOwner(owner);
+            if (m_out.reset) {
+                m_out.stateChanged = true;
+                ReleaseCursorPress();
+            }
+            m_mode = in.config.allowCursor ? in.mode : Mode::Navigation;
+            m_dt = m_haveTime ? std::clamp(in.now - m_lastTime, 0.0, 0.05) : 0.0;
+            m_lastTime = in.now;
+            m_haveTime = true;
+        }
+
+        bool Button(Control c, float value)
+        {
+            const bool active = m_ledger.Owner() != 0;
+            if (c == Control::None) return active;   // a pad control we do not name stays out of the game too
+            const Transition t = m_ledger.Button(c, value);
+            if (t.phase == Phase::Press) NoteGamepadDevice();
+            if (!active || t.phase == Phase::None) return t.consume;
+            const ViewConfig& cfg = m_in.config;
+            const Action action = BindingAction(cfg, c);
+            // B (and cancel) belongs to the page only while it holds Escape; otherwise the focus menu's Cancel
+            // closes the view, and the page must not also see it.
+            if ((c == Control::East || action == Action::Cancel) && !m_in.escapeCaptured) return t.consume;
+            if (action >= Action::Up && action <= Action::Right) {
+                // Presses and repeats come from the clock in End, so a held direction emits once per batch.
+                if (t.phase == Phase::Release && cfg.style == Style::Navigation) Emit({ c, action, Phase::Release });
+                if (t.phase == Phase::Press && m_mode == Mode::Cursor) SetMode(Mode::Navigation);
+                return t.consume;
+            }
+            if (action == Action::ToggleCursor && t.phase == Phase::Press && cfg.allowCursor) {
+                SetMode(m_mode == Mode::Navigation ? Mode::Cursor : Mode::Navigation);
+                // An accept already down when the mode flips must not click (or accept) when it is let go.
+                const Control accept = cfg.bindings[static_cast<std::size_t>(Action::Accept) - 1];
+                if (m_ledger.Held(accept)) m_ledger.Capture(accept);
+                return t.consume;
+            }
+            if (m_mode == Mode::Cursor && action == Action::Accept) {
+                if (t.phase == Phase::Press) { m_out.pointer.buttons.push_back(true); m_cursorDown = true; }
+                if (t.phase == Phase::Release) { m_out.pointer.buttons.push_back(false); m_cursorDown = false; }
+                return t.consume;
+            }
+            if (cfg.style == Style::Navigation) {
+                Emit({ c, action, t.phase, value, value, 0.0f });
+            } else if (t.phase == Phase::Press) {
+                if (action == Action::Accept) m_out.keys.push_back(kVkReturn);
+                else if (action == Action::Cancel) m_out.keys.push_back(kVkEscape);
+            }
+            return t.consume;
+        }
+
+        bool Stick(Control c, float x, float y)
+        {
+            const Transition t = m_ledger.Stick(c, x, y);
+            if (t.phase != Phase::None) {
+                m_axesChanged = true;
+                if (m_ledger.X(c) != 0.0f || m_ledger.Y(c) != 0.0f) NoteGamepadDevice();
+            }
+            return t.consume;
+        }
+
+        // The mouse moved or a key was pressed: the mouse and keyboard are the device again.
+        void OtherDeviceActivity()
+        {
+            if (!m_gamepadDevice) return;
+            m_gamepadDevice = false;
+            m_out.stateChanged = true;
+            m_out.pointer.buttons.clear();
+            ReleaseCursorPress();
+        }
+
+        BatchOut End()
+        {
+            const ViewConfig& cfg = m_in.config;
+            if (m_ledger.Owner() != 0) {
+                const Control dir = m_ledger.Repeat(m_in.now, m_mode == Mode::Navigation, &cfg);
+                if (dir != Control::None) {
+                    const auto action = static_cast<Action>(Index(dir));
+                    const Control bound = cfg.bindings[Index(dir) - 1];
+                    const Control source = m_ledger.Held(bound) ? bound : Control::LeftStick;
+                    if (cfg.style == Style::Navigation)
+                        Emit({ source, action, m_ledger.InitialRepeat() ? Phase::Press : Phase::Repeat, 1.0f });
+                    else
+                        m_out.keys.push_back(ArrowKey(action));
+                }
+                if (cfg.style == Style::Navigation) {
+                    for (const Control c : { Control::LeftStick, Control::RightStick }) {
+                        const float x = m_ledger.X(c), y = m_ledger.Y(c);
+                        if (m_axesChanged || x != 0.0f || y != 0.0f) Emit({ c, Action::None, Phase::Change, x, x, y });
+                    }
+                }
+                if (m_mode == Mode::Cursor && m_gamepadDevice) {
+                    const auto step = static_cast<float>(tuning.cursorSpeed * m_dt);
+                    m_out.pointer.dx = m_ledger.X(Control::LeftStick) * step;
+                    m_out.pointer.dy = -m_ledger.Y(Control::LeftStick) * step;
+                }
+            }
+            if (m_out.events.size() + m_out.keys.size() > kMaxEvents) {
+                m_out.events.clear();
+                m_out.keys.clear();
+                m_ledger.RequireNeutral();
+                m_ledger.Seed(m_in.pad);
+                m_out.pointer = {};
+                ReleaseCursorPress();
+                m_out.reset = true;
+            }
+            m_axesChanged = false;
+            m_out.generation = m_ledger.Generation();
+            m_out.mode = m_mode;
+            m_out.gamepadDevice = m_gamepadDevice;
+            m_out.dt = m_dt;
+            return std::move(m_out);
+        }
+
+    private:
+        static int ArrowKey(Action a)
+        {
+            switch (a) {
+            case Action::Up: return kVkUp;
+            case Action::Down: return kVkDown;
+            case Action::Left: return kVkLeft;
+            default: return kVkRight;
+            }
+        }
+        void Emit(const Event& e) { m_out.events.push_back(e); }
+        void NoteGamepadDevice()
+        {
+            if (m_gamepadDevice) return;
+            m_gamepadDevice = true;
+            m_out.stateChanged = true;
+        }
+        void SetMode(Mode m)
+        {
+            m_mode = m;
+            m_out.stateChanged = true;
+            m_out.pointer.buttons.clear();
+            m_out.pointer.release = true;
+            m_cursorDown = false;
+        }
+        void ReleaseCursorPress()
+        {
+            if (!m_cursorDown) return;
+            m_cursorDown = false;
+            m_out.pointer.release = true;
+        }
+
+        Ledger m_ledger;
+        BatchIn m_in;
+        BatchOut m_out;
+        Mode m_mode = Mode::Navigation;
+        bool m_connected = false;
+        bool m_gamepadDevice = false;
+        bool m_cursorDown = false;
+        bool m_axesChanged = false;
+        bool m_haveTime = false;
+        std::uint64_t m_epoch = 0;
+        double m_lastTime = 0.0, m_dt = 0.0;
+    };
+
+    // A page id the helper made up: 1 to 80 letters, digits, '-' or '_'. Packets embed it unescaped because of this.
+    inline bool ValidPageId(std::string_view id)
+    {
+        if (id.empty() || id.size() > 80) return false;
+        for (const char ch : id) {
+            const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                            ch == '-' || ch == '_';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    struct PacketIn {
+        std::string_view page;           // ValidPageId
+        std::uint64_t generation = 0, sequence = 0;
+        bool active = false, reset = false, enabled = false, connected = false;
+        Style style = Style::Keys;
+        Mode mode = Mode::Navigation;
+        bool gamepadDevice = false;
+        Glyphs glyphs = Glyphs::Xbox;
+        const ViewConfig* config = nullptr;
+        double dt = 0.0;
+        const std::vector<Event>* events = nullptr;
+    };
+
+    // The '__gamepad' message the page core's helper reads: Meridian.Input/1's packet plus the view's style.
+    inline std::string PacketJson(const PacketIn& p)
+    {
+        const auto num = [](double v) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.6g", std::isfinite(v) ? v : 0.0);
+            return std::string(buf);
+        };
+        const auto flag = [](bool b) { return b ? "true" : "false"; };
+        static constexpr const char* glyphNames[] = { "xbox", "playstation", "generic" };
+        std::string s;
+        s.reserve(512);
+        s += "{\"version\":1,\"page\":\"";
+        s += p.page;
+        s += "\",\"generation\":" + std::to_string(p.generation) + ",\"sequence\":" + std::to_string(p.sequence);
+        s += std::string(",\"active\":") + flag(p.active) + ",\"reset\":" + flag(p.reset) + ",\"enabled\":" +
+             flag(p.enabled) + ",\"connected\":" + flag(p.connected);
+        s += std::string(",\"style\":\"") + (p.style == Style::Navigation ? "navigation" : "keys") + "\"";
+        s += std::string(",\"mode\":\"") + (p.mode == Mode::Cursor ? "cursor" : "navigation") + "\"";
+        s += std::string(",\"device\":\"") + (p.gamepadDevice ? "gamepad" : "keyboardMouse") + "\"";
+        s += std::string(",\"glyphFamily\":\"") + glyphNames[std::min<std::size_t>(static_cast<std::size_t>(p.glyphs), 2)] + "\"";
+        s += ",\"bindings\":{";
+        const ViewConfig cfg = p.config ? *p.config : ViewConfig{};
+        for (std::size_t i = 0; i < kBindingCount; ++i) {
+            if (i) s += ',';
+            s += std::string("\"") + ActionName(static_cast<Action>(i + 1)) + "\":\"" + ControlName(cfg.bindings[i]) + "\"";
+        }
+        s += "},\"dt\":" + num(std::clamp(p.dt, 0.0, 0.05)) + ",\"events\":[";
+        if (p.events) {
+            for (std::size_t i = 0; i < p.events->size(); ++i) {
+                const Event& e = (*p.events)[i];
+                if (i) s += ',';
+                s += std::string("{\"control\":\"") + ControlName(e.control) + "\",\"action\":\"" + ActionName(e.action) +
+                     "\",\"phase\":\"" + PhaseName(e.phase) + "\",\"value\":" + num(e.value) + ",\"x\":" + num(e.x) +
+                     ",\"y\":" + num(e.y) + "}";
+            }
+        }
+        s += "]}";
+        return s;
+    }
 
 }  // namespace Magelight::Gamepad
