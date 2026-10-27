@@ -1,0 +1,154 @@
+// The page thread's handoff (src/PageThreadCore.h, 1.7.0), on the desktop: whether the page thread may run, and how a
+// page frame reaches the game thread. build.bat builds and runs this; exit 0 when every check passes.
+
+#include "PageThreadCore.h"
+
+#include <d3d11.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <random>
+#include <vector>
+
+using namespace Magelight::PageThread;
+using Clock = std::chrono::steady_clock;
+
+static int s_failed = 0;
+
+static void Check(bool ok, const char* what)
+{
+    std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) ++s_failed;
+}
+
+static bool Same(const char* a, const char* b) { return a && b && std::strcmp(a, b) == 0; }
+
+static double MsSince(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
+
+struct Packet {
+    int serial = 0;
+};
+
+// One frame per Go, each costing 0..30 ms, as a page of uneven weight.
+struct Producer {
+    Handoff<Packet>* handoff = nullptr;
+    HANDLE           stop = nullptr;
+    bool             stuck = false;   // never comes back from its first frame
+    int              made = 0;
+};
+
+static DWORD WINAPI ProducerMain(void* p)
+{
+    auto& pr = *static_cast<Producer*>(p);
+    std::mt19937 rng(1187);
+    while (pr.handoff->WaitGo(pr.stop, INFINITE)) {
+        if (pr.stuck) WaitForSingleObject(pr.stop, INFINITE);   // a page in a script loop
+        if (WaitForSingleObject(pr.stop, 0) == WAIT_OBJECT_0) break;
+        Sleep(rng() % 31);
+        auto packet = std::make_unique<Packet>();
+        packet->serial = pr.made++;
+        pr.handoff->Push(std::move(packet));
+    }
+    return 0;
+}
+
+int main()
+{
+    // ---- Decide -----------------------------------------------------------------------------------------------------
+    const Refusal ok = Decide(false, 0, true);
+    Check(!ok.refused && ok.why == nullptr, "decide: flat, a free-threaded device and a deferred context: the thread runs");
+    Check(Decide(true, 0, true).refused && Same(Decide(true, 0, true).why, "Skyrim VR"), "decide: Skyrim VR refuses");
+    Check(Same(Decide(false, D3D11_CREATE_DEVICE_SINGLETHREADED, true).why, "the game's device is single-threaded"),
+          "decide: a single-threaded device refuses");
+    Check(Same(Decide(false, 0, false).why, "the device refused a deferred context"),
+          "decide: a refused deferred context refuses");
+    Check(Same(Decide(true, D3D11_CREATE_DEVICE_SINGLETHREADED, false).why, "Skyrim VR"),
+          "decide: VR is named first when everything refuses");
+    Check(Same(Decide(false, D3D11_CREATE_DEVICE_SINGLETHREADED, false).why, "the game's device is single-threaded"),
+          "decide: the device's threading is named before the deferred context");
+    Check(!Decide(false, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, true).refused,
+          "decide: other creation flags do not refuse");
+
+    // ---- Handoff: a page of uneven weight ---------------------------------------------------------------------------
+    {
+        Handoff<Packet> handoff;
+        Producer pr;
+        pr.handoff = &handoff;
+        pr.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE t = StartThread(&ProducerMain, &pr, 8, L"pagethread_test producer");
+        Check(t != nullptr, "start: the thread starts");
+        std::vector<int> seen;
+        std::size_t maxPending = 0;
+        double worstTake = 0;
+        for (int round = 0; round < 600; ++round) {
+            maxPending = std::max(maxPending, handoff.Pending());
+            const auto t0 = Clock::now();
+            handoff.Go();
+            auto got = handoff.TakeAll();
+            worstTake = std::max(worstTake, MsSince(t0));
+            for (auto& p : got) seen.push_back(p->serial);
+            Sleep(16);
+        }
+        SetEvent(pr.stop);
+        handoff.Go();   // wakes a producer waiting for its next frame
+        WaitForSingleObject(t, INFINITE);
+        for (auto& p : handoff.TakeAll()) seen.push_back(p->serial);
+        bool inOrder = static_cast<int>(seen.size()) == pr.made;
+        for (std::size_t i = 0; inOrder && i < seen.size(); ++i) inOrder = seen[i] == static_cast<int>(i);
+        std::printf("      %d frames made, %zu taken, at most %zu waiting, the slowest Go+TakeAll %.3f ms\n", pr.made,
+                    seen.size(), maxPending, worstTake);
+        Check(pr.made > 100, "handoff: the page thread made frames");
+        Check(inOrder, "handoff: every frame reaches the game thread exactly once, in order (none dropped)");
+        Check(maxPending <= 2, "handoff: at most two frames ever wait");
+        Check(worstTake < 1.0, "handoff: the game thread's Go and TakeAll never take a millisecond");
+        CloseHandle(t);
+        CloseHandle(pr.stop);
+    }
+
+    // ---- Handoff: a page that never comes back ---------------------------------------------------------------------
+    {
+        Handoff<Packet> handoff;
+        Producer pr;
+        pr.handoff = &handoff;
+        pr.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        pr.stuck = true;
+        HANDLE t = StartThread(&ProducerMain, &pr, 8, L"pagethread_test stuck producer");
+        double worst = 0;
+        std::size_t taken = 0;
+        for (int round = 0; round < 100; ++round) {
+            const auto t0 = Clock::now();
+            handoff.Go();
+            taken += handoff.TakeAll().size();
+            worst = std::max(worst, MsSince(t0));
+            Sleep(5);
+        }
+        Check(worst < 1.0 && taken == 0, "handoff: a stuck page thread never holds the game thread up");
+        SetEvent(pr.stop);
+        WaitForSingleObject(t, INFINITE);
+        CloseHandle(t);
+        CloseHandle(pr.stop);
+    }
+
+    // ---- WaitGo: the stop event and the timeout ----------------------------------------------------------------------
+    {
+        Handoff<Packet> handoff;
+        HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        Check(!handoff.WaitGo(stop, 0), "wait: no Go yet is a false after the timeout");
+        handoff.Go();
+        handoff.Go();
+        Check(handoff.WaitGo(stop, 0), "wait: a Go wakes the page thread");
+        Check(!handoff.WaitGo(stop, 0), "wait: two Gos before a wait are one frame, not two");
+        handoff.Go();
+        SetEvent(stop);
+        Check(!handoff.WaitGo(stop, INFINITE), "wait: a set stop event wins over a pending Go");
+        Check(handoff.WaitGo(nullptr, 0), "wait: with no stop event, the pending Go still wakes it");
+        CloseHandle(stop);
+    }
+
+    std::printf("%d check(s) failed\n", s_failed);
+    return s_failed ? 1 : 0;
+}
