@@ -3,15 +3,20 @@
 //
 //   --mode immediate  Ultralight and the driver on the main thread, the driver on the immediate context (in-frame).
 //   --mode thread     Ultralight on a page thread of its own (8 MB stack) that owns Renderer::Create; the driver on a
-//                     deferred context there; each frame's FinishCommandList goes to the main thread, which executes
-//                     it on the immediate context and keeps an AddRef on the frame's target SRV (the host's model).
+//                     deferred context there; each frame's lists (the parts split off at flushes, then its own) go to
+//                     the main thread, which runs them on the immediate context the way the host does
+//                     (PageThread::RunRecordedList, a flush between parts, the next page frame already started) and
+//                     keeps an AddRef on the frame's target SRV.
 //
-// --case release: at frame 60 the View is released and made again on the same page while the main thread still
-// holds the old target's SRV and copies from it for a few frames (a texture Ultralight freed while a frame that drew
-// it waits). --warp runs on WARP, which prints its DriverCommandLists (0 exercises the emulated path).
+// --case release: at frame 60 the View is released and made again on the same page; frame 59's lists run only after
+// that, and the main thread still copies from the old target's SRV for a few frames (what Ultralight frees while a
+// frame that drew it waits). --case upload: the driver alone, a texture updated in a box away from its origin, checked
+// against what was sent. --case state: objects bound on the immediate context in slots the driver never uses, as the
+// game leaves them, must still be bound after every page frame. --warp runs on WARP, which prints its
+// DriverCommandLists (0 exercises the emulated path).
 //
 //   deferred_test.exe <sdkDir> <page.html> --gpu <dir> --mode immediate|thread --out <file.raw> [--msaa N] [--warp]
-//                     [--case release] [--frames N]
+//                     [--case release|upload|state] [--frames N]
 //   deferred_test.exe --compare a.raw b.raw     exit 0 when every byte matches
 
 #define NOMINMAX
@@ -32,6 +37,9 @@
 #include <AppCore/Platform.h>
 #include <Ultralight/Ultralight.h>
 
+#include "MagelightGpuApi.h"
+#include "PageThreadCore.h"
+
 using namespace ultralight;
 
 namespace
@@ -47,12 +55,17 @@ namespace
     using MgDrawFn = void (*)(void*);
     using MgSrvFn = void* (*)(void*, std::uint32_t);
     using MgSamplesFn = int (*)(void*, int);
+    using MgTakeFn = ID3D11CommandList* (*)(void*);
+    using MgStatsFn = int (*)(void*, MgGpuStats*);
+    using MgInfoFn = const MgGpuInfo* (*)();
     MgCreateFn  g_mgCreate = nullptr;
     MgGetDrvFn  g_mgDrv = nullptr;
     MgHasFn     g_mgHas = nullptr;
     MgDrawFn    g_mgDraw = nullptr;
     MgSrvFn     g_mgSrv = nullptr;
     MgSamplesFn g_mgSamples = nullptr;
+    MgTakeFn    g_mgTake = nullptr;
+    MgStatsFn   g_mgStats = nullptr;
     void*       g_mg = nullptr;
 
     ID3D11Device*        g_dev = nullptr;
@@ -83,13 +96,22 @@ namespace
         const std::string dll = g_gpuDir + "\\MagelightGPU.dll";
         HMODULE gpu = LoadLibraryA(dll.c_str());
         if (!gpu) { std::printf("cannot load %s (%lu)\n", dll.c_str(), GetLastError()); return false; }
+        const auto info = reinterpret_cast<MgInfoFn>(GetProcAddress(gpu, "MgGpu_GetInfo"));
+        const MgGpuInfo* i = info ? info() : nullptr;
+        if (!i || i->contract != MGGPU_CONTRACT) {
+            std::printf("%s speaks contract %u, this test needs %u (set MG_BUILD_DIR to this branch's build)\n",
+                        dll.c_str(), i ? i->contract : 0u, MGGPU_CONTRACT);
+            return false;
+        }
         g_mgCreate = reinterpret_cast<MgCreateFn>(GetProcAddress(gpu, "MgGpu_Create"));
         g_mgDrv = reinterpret_cast<MgGetDrvFn>(GetProcAddress(gpu, "MgGpu_GetGPUDriver"));
         g_mgHas = reinterpret_cast<MgHasFn>(GetProcAddress(gpu, "MgGpu_HasCommandsPending"));
         g_mgDraw = reinterpret_cast<MgDrawFn>(GetProcAddress(gpu, "MgGpu_DrawCommandList"));
         g_mgSrv = reinterpret_cast<MgSrvFn>(GetProcAddress(gpu, "MgGpu_GetTextureSRV"));
         g_mgSamples = reinterpret_cast<MgSamplesFn>(GetProcAddress(gpu, "MgGpu_SetSampleCount"));
-        if (!g_mgCreate || !g_mgDrv || !g_mgHas || !g_mgDraw || !g_mgSrv || !g_mgSamples) {
+        g_mgTake = reinterpret_cast<MgTakeFn>(GetProcAddress(gpu, "MgGpu_TakeCommandList"));
+        g_mgStats = reinterpret_cast<MgStatsFn>(GetProcAddress(gpu, "MgGpu_GetStats"));
+        if (!g_mgCreate || !g_mgDrv || !g_mgHas || !g_mgDraw || !g_mgSrv || !g_mgSamples || !g_mgTake || !g_mgStats) {
             std::printf("MagelightGPU.dll lacks an export\n");
             return false;
         }
@@ -274,6 +296,84 @@ namespace
         return true;
     }
 
+    // ---- --case state: the game's pipeline state around the page work -------------------------------------------
+    // Objects bound in slots the driver never touches, as the game's renderer leaves them bound and rebinds only what it
+    // believes changed: running a page frame (its lists, or in the frame its draws) must leave every one in place.
+    ID3D11ShaderResourceView* g_sentinelSrv = nullptr;
+    ID3D11SamplerState*       g_sentinelSampler = nullptr;
+    ID3D11Buffer*             g_sentinelCb = nullptr;
+    ID3D11Buffer*             g_sentinelVb = nullptr;
+    int                       g_stateChecks = 0, g_stateLost = 0;
+
+    bool MakeSentinels()
+    {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = 4;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ID3D11Texture2D* tex = nullptr;
+        if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &tex))) return false;
+        const HRESULT hr = g_dev->CreateShaderResourceView(tex, nullptr, &g_sentinelSrv);
+        tex->Release();
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        D3D11_BUFFER_DESC cb{};
+        cb.ByteWidth = 64;
+        cb.Usage = D3D11_USAGE_DEFAULT;
+        cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_BUFFER_DESC vb = cb;
+        vb.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        return SUCCEEDED(hr) && SUCCEEDED(g_dev->CreateSamplerState(&sd, &g_sentinelSampler))
+            && SUCCEEDED(g_dev->CreateBuffer(&cb, nullptr, &g_sentinelCb)) && SUCCEEDED(g_dev->CreateBuffer(&vb, nullptr, &g_sentinelVb));
+    }
+
+    void BindSentinels()
+    {
+        g_imm->PSSetShaderResources(9, 1, &g_sentinelSrv);
+        g_imm->VSSetShaderResources(9, 1, &g_sentinelSrv);
+        g_imm->CSSetShaderResources(0, 1, &g_sentinelSrv);
+        g_imm->PSSetSamplers(5, 1, &g_sentinelSampler);
+        g_imm->PSSetConstantBuffers(3, 1, &g_sentinelCb);
+        const UINT stride = 16, offset = 0;
+        g_imm->IASetVertexBuffers(2, 1, &g_sentinelVb, &stride, &offset);
+    }
+
+    void CheckSentinels()
+    {
+        ID3D11ShaderResourceView* ps = nullptr;
+        ID3D11ShaderResourceView* vs = nullptr;
+        ID3D11ShaderResourceView* cs = nullptr;
+        ID3D11SamplerState* smp = nullptr;
+        ID3D11Buffer* cb = nullptr;
+        ID3D11Buffer* vb = nullptr;
+        UINT stride = 0, offset = 0;
+        g_imm->PSGetShaderResources(9, 1, &ps);
+        g_imm->VSGetShaderResources(9, 1, &vs);
+        g_imm->CSGetShaderResources(0, 1, &cs);
+        g_imm->PSGetSamplers(5, 1, &smp);
+        g_imm->PSGetConstantBuffers(3, 1, &cb);
+        g_imm->IAGetVertexBuffers(2, 1, &vb, &stride, &offset);
+        const bool intact = ps == g_sentinelSrv && vs == g_sentinelSrv && cs == g_sentinelSrv && smp == g_sentinelSampler
+                         && cb == g_sentinelCb && vb == g_sentinelVb;
+        for (IUnknown* u : { static_cast<IUnknown*>(ps), static_cast<IUnknown*>(vs), static_cast<IUnknown*>(cs),
+                             static_cast<IUnknown*>(smp), static_cast<IUnknown*>(cb), static_cast<IUnknown*>(vb) })
+            if (u) u->Release();
+        ++g_stateChecks;
+        if (!intact) ++g_stateLost;
+    }
+
+    int StateVerdict(int r)
+    {
+        if (g_case != "state") return r;
+        std::printf("state: %d page frame(s) checked, %d left the game's bindings changed\n", g_stateChecks, g_stateLost);
+        return g_stateLost || !g_stateChecks ? 1 : r;
+    }
+
     int RunImmediate()
     {
         if (g_case == "upload") {
@@ -281,26 +381,37 @@ namespace
             ID3D11ShaderResourceView* srv = UploadCase();
             return srv && Dump(srv) ? CheckUpload() : 2;
         }
+        if (g_case == "state" && !MakeSentinels()) return 2;
         if (!InitPage(g_imm)) return 2;
         ID3D11ShaderResourceView* held = nullptr;
         for (int f = 0; f < g_frames; ++f) {
+            if (g_case == "state") BindSentinels();
             ID3D11ShaderResourceView* srv = PageFrame(f);
+            if (g_case == "state") CheckSentinels();
             if (held && g_case == "release" && f >= 60 && f < 70) TouchTarget(held);
             if (srv) { if (held) held->Release(); held = srv; }
             Sleep(2);
         }
         if (!g_ready) { std::printf("the page never loaded\n"); return 2; }
-        return held && Dump(held) ? 0 : 2;
+        return StateVerdict(held && Dump(held) ? 0 : 2);
     }
 
-    // Thread mode: the handoff the host makes, reduced to one slot (the main thread waits for each frame here, so the
-    // dumps of the two modes come from the same frame number).
-    struct Packet { ID3D11CommandList* list = nullptr; ID3D11ShaderResourceView* srv = nullptr; bool ready = false; };
+    // Thread mode: the host's handoff (ThreadModeFrame), one frame in flight. The main thread lets page frame f start,
+    // then runs frame f-1's lists while the page thread works, as the host lets the next page frame go before it runs
+    // the lists it took. In the release case frame 60, which frees the old View, finishes first, so frame 59's lists
+    // run after Ultralight freed what they draw. A frame's lists are the parts the driver split off at each flush
+    // (MgGpu_TakeCommandList), with the immediate context flushed after each, then the frame's own.
+    struct Packet {
+        std::vector<ID3D11CommandList*> lists;
+        ID3D11ShaderResourceView*       srv = nullptr;
+        bool                            ready = false;
+    };
     std::mutex              g_mx;
     std::condition_variable g_cv;
     Packet                  g_packet;
     int                     g_go = -1;   // the frame the page thread may run
     bool                    g_pageFailed = false;
+    int                     g_parts = 0;   // lists split off at flushes
 
     DWORD WINAPI PageThread(void*)
     {
@@ -319,12 +430,19 @@ namespace
                 std::unique_lock<std::mutex> lk(g_mx);
                 g_cv.wait(lk, [&] { return g_go >= f; });
             }
-            ID3D11ShaderResourceView* srv = PageFrame(f);
+            Packet p;
+            p.srv = PageFrame(f);
+            while (ID3D11CommandList* part = g_mgTake(g_mg)) {
+                p.lists.push_back(part);
+                ++g_parts;
+            }
             ID3D11CommandList* list = nullptr;
             if (FAILED(g_def->FinishCommandList(FALSE, &list))) { std::printf("FinishCommandList failed\n"); return 2; }
+            p.lists.push_back(list);
+            p.ready = true;
             {
                 std::lock_guard<std::mutex> lk(g_mx);
-                g_packet = { list, srv, true };
+                g_packet = std::move(p);
             }
             g_cv.notify_all();
         }
@@ -335,7 +453,22 @@ namespace
     {
         if (!InitDriver(g_def)) return 2;
         g_packet.srv = UploadCase();
-        return SUCCEEDED(g_def->FinishCommandList(FALSE, &g_packet.list)) ? 0 : 2;
+        ID3D11CommandList* list = nullptr;
+        if (FAILED(g_def->FinishCommandList(FALSE, &list))) return 2;
+        g_packet.lists.push_back(list);
+        return 0;
+    }
+
+    void RunLists(Packet& p)
+    {
+        for (std::size_t i = 0; i < p.lists.size(); ++i) {
+            if (g_case == "state") BindSentinels();
+            Magelight::PageThread::RunRecordedList(g_imm, p.lists[i]);
+            if (g_case == "state") CheckSentinels();
+            if (i + 1 < p.lists.size()) g_imm->Flush();
+            p.lists[i]->Release();
+        }
+        p.lists.clear();
     }
 
     int RunThread()
@@ -347,33 +480,54 @@ namespace
             WaitForSingleObject(u, INFINITE);
             DWORD code = 2;
             GetExitCodeThread(u, &code);
-            if (code || !g_packet.list || !g_packet.srv) return 2;
-            g_imm->ExecuteCommandList(g_packet.list, FALSE);
-            return Dump(g_packet.srv) ? CheckUpload() : 2;
+            if (code || g_packet.lists.empty() || !g_packet.srv) return 2;
+            ID3D11ShaderResourceView* srv = g_packet.srv;
+            RunLists(g_packet);
+            return Dump(srv) ? CheckUpload() : 2;
         }
+        if (g_case == "state" && !MakeSentinels()) return 2;
         HANDLE t = CreateThread(nullptr, static_cast<SIZE_T>(8) << 20, PageThread, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
         if (!t) return 2;
         ID3D11ShaderResourceView* held = nullptr;
+        Packet pending;   // the previous frame's, not yet run
+        const auto adopt = [&](Packet& p) {
+            RunLists(p);
+            if (p.srv) { if (held) held->Release(); held = p.srv; p.srv = nullptr; }
+        };
         for (int f = 0; f < g_frames; ++f) {
-            Packet p;
+            {
+                std::lock_guard<std::mutex> lk(g_mx);
+                g_go = f;
+            }
+            g_cv.notify_all();
+            if (!(g_case == "release" && f == 60)) adopt(pending);
             {
                 std::unique_lock<std::mutex> lk(g_mx);
-                g_go = f;
-                g_cv.notify_all();
                 g_cv.wait(lk, [&] { return g_packet.ready || g_pageFailed; });
                 if (g_pageFailed) { std::printf("the page thread failed to start\n"); return 2; }
-                p = g_packet;
+                pending.ready = false;
+            }
+            adopt(pending);   // the release case's frame 59, after frame 60 freed the old View
+            {
+                std::lock_guard<std::mutex> lk(g_mx);
+                pending = std::move(g_packet);
                 g_packet = {};
             }
-            g_imm->ExecuteCommandList(p.list, FALSE);
-            p.list->Release();
             if (held && g_case == "release" && f >= 60 && f < 70) TouchTarget(held);
-            if (p.srv) { if (held) held->Release(); held = p.srv; }
             Sleep(2);
         }
+        adopt(pending);
         WaitForSingleObject(t, INFINITE);
         if (!g_ready) { std::printf("the page never loaded\n"); return 2; }
-        return held && Dump(held) ? 0 : 2;
+        MgGpuStats st{};
+        st.size = sizeof(st);
+        g_mgStats(g_mg, &st);
+        std::printf("  flushes %llu, lists split off at them %d\n", static_cast<unsigned long long>(st.flushes), g_parts);
+        if (static_cast<std::uint64_t>(g_parts) != st.flushes) {
+            std::printf("FAIL: every flush must split the recording (the host flushes between the parts)\n");
+            return 1;
+        }
+        return StateVerdict(held && Dump(held) ? 0 : 2);
     }
 
     int Compare(const std::string& a, const std::string& b)
@@ -407,7 +561,7 @@ int main(int argc, char** argv)
     if (argc == 4 && std::string(argv[1]) == "--compare") return Compare(argv[2], argv[3]);
     if (argc < 3) {
         std::printf("usage: deferred_test <sdkDir> <page.html> --gpu dir --mode immediate|thread --out file.raw "
-                    "[--msaa N] [--warp] [--case release] [--frames N]\n       deferred_test --compare a.raw b.raw\n");
+                    "[--msaa N] [--warp] [--case release|upload|state] [--frames N]\n       deferred_test --compare a.raw b.raw\n");
         return 2;
     }
     g_sdk = argv[1];

@@ -23,23 +23,17 @@
 namespace Magelight::PageThread {
 
     // Magelight.json "pageThread": Off (the in-frame path), Wanted (asked for, not yet checked against the device),
-    // On (running).
-    enum class Mode : int { Off = 0, Wanted = 1, On = 2 };
+    // On (running). VR never asks for it (the setting is ignored there when it is read).
+    enum class Mode { Off, Wanted, On };
 
-    struct Refusal {
-        bool        refused = false;
-        const char* why = nullptr;   // for the log line; null when not refused
-    };
-
-    // Whether the page thread can run on this game and device. VR keeps the in-frame path (its presenter is untested off
-    // the main thread); a single-threaded device may not be used from a second thread; a device (or a wrapper of one)
-    // that refuses a deferred context leaves the driver nothing to record into. Named in that order.
-    inline Refusal Decide(bool isVR, UINT deviceCreationFlags, bool deferredContextOk)
+    // Why the page thread cannot run on this device, for the log line, or null when it can. A single-threaded device
+    // may not be used from a second thread; a device (or a wrapper of one) that refuses a deferred context leaves the
+    // driver nothing to record into. Named in that order.
+    inline const char* Decide(UINT deviceCreationFlags, bool deferredContextOk)
     {
-        if (isVR) return { true, "Skyrim VR" };
-        if (deviceCreationFlags & D3D11_CREATE_DEVICE_SINGLETHREADED) return { true, "the game's device is single-threaded" };
-        if (!deferredContextOk) return { true, "the device refused a deferred context" };
-        return {};
+        if (deviceCreationFlags & D3D11_CREATE_DEVICE_SINGLETHREADED) return "the game's device is single-threaded";
+        if (!deferredContextOk) return "the device refused a deferred context";
+        return nullptr;
     }
 
     // A mutex that knows which thread holds it. The host is built /EHsc, so when the page thread's SEH guard catches a
@@ -91,6 +85,9 @@ namespace Magelight::PageThread {
         Handoff(const Handoff&) = delete;
         Handoff& operator=(const Handoff&) = delete;
 
+        // False when its event could not be made: nothing would pace the page thread, so it must not run.
+        bool Valid() const { return m_go != nullptr; }
+
         // Page thread: a finished frame.
         void Push(std::unique_ptr<Packet> packet)
         {
@@ -114,7 +111,8 @@ namespace Magelight::PageThread {
         }
 
         // Page thread: true once a Go came; false when `stop` (may be null) is set first or `ms` passed. A set stop
-        // wins over a pending Go, which stays pending.
+        // wins over a pending Go, which stays pending. The host waits with no stop and no timeout; the stop and the
+        // timeout serve tools/pagethread-test.
         bool WaitGo(HANDLE stop, DWORD ms)
         {
             if (!m_go) return false;
@@ -135,13 +133,27 @@ namespace Magelight::PageThread {
         std::vector<std::unique_ptr<Packet>> m_packets;
     };
 
+    // Game thread, at Present: run a page frame's recorded list on the game's immediate context. TRUE has Direct3D
+    // save the game's whole pipeline state first and put it back after: FALSE would leave the context cleared to its
+    // defaults, and the game's renderer, which binds again only what it thinks changed, would draw with its own
+    // bindings gone (tools/deferred-test, the state case). The list starts from the default state either way, so a
+    // predicate the game left set cannot drop one of its uploads.
+    inline void RunRecordedList(ID3D11DeviceContext* immediate, ID3D11CommandList* list)
+    {
+        immediate->ExecuteCommandList(list, TRUE);
+    }
+
     // A thread of Magelight's own: `stackMb` of reserved stack, named for crash logs and debuggers. The handle is the
-    // caller's to keep; the host never joins it (the process ends it at exit).
+    // caller's to keep; the host never joins it (the process ends it at exit). SetThreadDescription (Windows 10 1607)
+    // is looked up, not imported: an import would keep the host DLL from loading at all on an older Windows.
     inline HANDLE StartThread(LPTHREAD_START_ROUTINE fn, void* arg, int stackMb, const wchar_t* name)
     {
         HANDLE t = CreateThread(nullptr, static_cast<SIZE_T>(stackMb) << 20, fn, arg, STACK_SIZE_PARAM_IS_A_RESERVATION,
                                 nullptr);
-        if (t && name) SetThreadDescription(t, name);
+        using DescribeFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+        static const auto describe = reinterpret_cast<DescribeFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")));
+        if (t && name && describe) describe(t, name);
         return t;
     }
 

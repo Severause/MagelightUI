@@ -791,12 +791,7 @@ namespace mggpu {
             const uint8_t* src = static_cast<const uint8_t*>(pixels.data());
             if (!context_->deferred() || context_->native_lists())
                 src += static_cast<size_t>(rect.top) * bitmap->row_bytes() + static_cast<size_t>(rect.left) * bitmap->bpp();
-            if (context_->deferred()) {   // MG: a list starts from no predicate, so nothing can drop the upload
-                context_->immediate_context()->UpdateSubresource(entry.texture.Get(), 0, &box, src,
-                                                                 static_cast<UINT>(bitmap->row_bytes()), 0);
-                return;
-            }
-            const ScopedNoPredication no_predication(context_->immediate_context());
+            const ScopedNoPredication no_predication(context_->immediate_context());   // MG: a no-op on a deferred one
             context_->immediate_context()->UpdateSubresource(entry.texture.Get(), 0, &box, src,
                                                              static_cast<UINT>(bitmap->row_bytes()), 0);
         }
@@ -915,11 +910,33 @@ namespace mggpu {
         }
 
         // Some driver stacks reorder sampling draws against a following clear/draw of the same texture; submitting
-        // the pending work closes that window. MG: a deferred context has nothing to submit (a list cannot record a
-        // Flush); its commands run in order when the list does.
+        // the pending work closes that window. MG: a list cannot record a flush, so on a deferred context the
+        // recording is split here instead: the part so far becomes a list of its own (MgGpu_TakeCommandList), which
+        // the host runs and then flushes the immediate context after, as here. A part ends in the default state, so
+        // the next draw binds all of its own again.
         void Flush() override
         {
-            if (!context_->deferred()) context_->immediate_context()->Flush();
+            if (!context_->deferred()) {
+                context_->immediate_context()->Flush();
+                return;
+            }
+            ComPtr<ID3D11CommandList> part;
+            const HRESULT hr = context_->immediate_context()->FinishCommandList(FALSE, part.GetAddressOf());
+            if (FAILED(hr)) {
+                LogFailure("FinishCommandList (split at a flush)", hr, context_->device());
+                return;
+            }
+            parts_.push_back(std::move(part));
+            bound_.valid = false;
+        }
+
+        // MG: MgGpu_TakeCommandList: the oldest part a flush split off, with its reference, or null.
+        ID3D11CommandList* TakePart()
+        {
+            if (parts_.empty()) return nullptr;
+            ID3D11CommandList* part = parts_.front().Detach();
+            parts_.erase(parts_.begin());
+            return part;
         }
 
         void DrawGeometry(uint32_t geometry_id, uint32_t indices_count, uint32_t indices_offset,
@@ -1061,12 +1078,8 @@ namespace mggpu {
             auto i = textures_.find(texture_id);
             if (i == textures_.end()) return nullptr;
             if (i->second.msaa_texture && i->second.needs_resolve) {
-                if (context_->deferred()) {   // MG: recorded; a list starts from no predicate
-                    Resolve(i->second);
-                } else {
-                    const ScopedNoPredication no_predication(context_->immediate_context());
-                    Resolve(i->second);
-                }
+                const ScopedNoPredication no_predication(context_->immediate_context());
+                Resolve(i->second);
             }
             return i->second.texture_srv.Get();
         }
@@ -1568,6 +1581,7 @@ namespace mggpu {
 
         GPUContextD3D11* context_;
         PipelineBackup backup_;
+        std::vector<ComPtr<ID3D11CommandList>> parts_;   // MG: a deferred context's recording, split at each Flush
         bool shaders_loaded_ = false;
         ComPtr<ID3D11VertexShader> vs_path_;
         ComPtr<ID3D11VertexShader> vs_quad_;
@@ -1681,6 +1695,12 @@ extern "C" {
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
         if (h) h->driver->UnregisterExternal(texture_id);
+    }
+
+    ID3D11CommandList* MgGpu_TakeCommandList(void* handle)
+    {
+        auto* h = static_cast<MgGpuHandle*>(handle);
+        return h ? h->driver->TakePart() : nullptr;
     }
 
     int MgGpu_GetStats(void* handle, MgGpuStats* out)

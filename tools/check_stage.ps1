@@ -141,7 +141,7 @@ if (Test-Path $gpuDll) {
         $wanted = @("MgGpu_GetInfo", "MgGpu_Create", "MgGpu_Destroy", "MgGpu_GetGPUDriver", "MgGpu_HasCommandsPending",
                     "MgGpu_DrawCommandList", "MgGpu_GetTextureSRV", "MgGpu_SetSampleCount",
                     "MgGpu_RegisterExternalTexture", "MgGpu_SetExternalTextureSRV", "MgGpu_UnregisterExternalTexture",
-                    "MgGpu_GetStats")
+                    "MgGpu_GetStats", "MgGpu_TakeCommandList")
         $missing = @($wanted | Where-Object { $exports -notcontains $_ })
         if ($missing.Count -eq 0) { Pass ("GPU driver exports all {0} MgGpu_* functions the host resolves" -f $wanted.Count) }
         else { Fail ("MagelightGPU.dll lacks export(s): " + ($missing -join ", ") + " (stale driver build?)") }

@@ -14,8 +14,9 @@
 //
 // Delivery threads: GameThread mods get events as posted SKSE tasks (never
 // inside a lock). RenderThread mods are called inline on the EMITTING
-// thread (render thread for page/console/resize events; game thread for
-// UI-mode events; the requester's thread for FocusDenied) under a small SEH
+// thread (render thread for page/console/resize events, the page thread with
+// pageThread; game thread for UI-mode events; the requester's thread for
+// FocusDenied) under a small SEH
 // guard, so one mod's fault disables that mod's sink, not the overlay.
 
 #include <RE/Skyrim.h>
@@ -48,8 +49,6 @@
 namespace Magelight::Api4 {
 
     using namespace MAGELIGHT_API;
-
-    static std::string LastErrorText(ModId mod);   // fwd (beside GetLastErrorMessage)
 
     namespace {
 
@@ -416,8 +415,9 @@ namespace Magelight::Api4 {
                 });
         }
 
-        // The host's event sink (render thread for page/console/resize/render
-        // death, game thread for UI mode). Routes to the owning mod, the
+        // The host's event sink (render thread for page/console/resize, the page
+        // thread with pageThread; the present thread for render death; game thread
+        // for UI mode). Routes to the owning mod, the
         // UI-mode owner, or everyone.
         void HostSink(HostEvent type, ViewId view, int x, int y, const char* detail)
         {
@@ -1131,7 +1131,7 @@ namespace Magelight::Api4 {
 
     // The host's own reading of a mod's last error, copied under the lock: the pointer GetLastErrorMessage hands out
     // lives only until the mod's next failing call, which with pageThread can come from the page thread meanwhile.
-    static std::string LastErrorText(ModId mod)
+    std::string LastErrorText(ModId mod)
     {
         std::lock_guard<std::mutex> lk(s_mutex);
         Mod* m = FindLocked(mod);

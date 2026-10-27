@@ -116,23 +116,19 @@ static DWORD WINAPI HoldOwned(void* p)
 int main()
 {
     // ---- Decide -----------------------------------------------------------------------------------------------------
-    const Refusal ok = Decide(false, 0, true);
-    Check(!ok.refused && ok.why == nullptr, "decide: flat, a free-threaded device and a deferred context: the thread runs");
-    Check(Decide(true, 0, true).refused && Same(Decide(true, 0, true).why, "Skyrim VR"), "decide: Skyrim VR refuses");
-    Check(Same(Decide(false, D3D11_CREATE_DEVICE_SINGLETHREADED, true).why, "the game's device is single-threaded"),
+    Check(Decide(0, true) == nullptr, "decide: a free-threaded device with a deferred context: the thread runs");
+    Check(Same(Decide(D3D11_CREATE_DEVICE_SINGLETHREADED, true), "the game's device is single-threaded"),
           "decide: a single-threaded device refuses");
-    Check(Same(Decide(false, 0, false).why, "the device refused a deferred context"),
-          "decide: a refused deferred context refuses");
-    Check(Same(Decide(true, D3D11_CREATE_DEVICE_SINGLETHREADED, false).why, "Skyrim VR"),
-          "decide: VR is named first when everything refuses");
-    Check(Same(Decide(false, D3D11_CREATE_DEVICE_SINGLETHREADED, false).why, "the game's device is single-threaded"),
+    Check(Same(Decide(0, false), "the device refused a deferred context"), "decide: a refused deferred context refuses");
+    Check(Same(Decide(D3D11_CREATE_DEVICE_SINGLETHREADED, false), "the game's device is single-threaded"),
           "decide: the device's threading is named before the deferred context");
-    Check(!Decide(false, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, true).refused,
+    Check(Decide(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, true) == nullptr,
           "decide: other creation flags do not refuse");
 
     // ---- Handoff: a page of uneven weight ---------------------------------------------------------------------------
     {
         Handoff<Packet> handoff;
+        Check(handoff.Valid(), "handoff: it has the event that paces the page thread");
         Producer pr;
         pr.handoff = &handoff;
         pr.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);

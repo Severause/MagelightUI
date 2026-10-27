@@ -33,7 +33,8 @@ namespace Magelight::GameTask
     }
 
     /// Held by the host's main-thread entry points: HookPresent, the window proc, the input sink, the focus menu's
-    /// message handler, the SKSE message handler and the Papyrus natives that post.
+    /// message handler, the SKSE message handler and the Papyrus natives that post; and for its whole life by the page
+    /// thread (pageThread, PageThreadMain), where the callbacks that run inside Present otherwise run.
     struct Scope
     {
         Scope() noexcept { ++Depth(); }
