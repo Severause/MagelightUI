@@ -23,12 +23,16 @@
 //    what you need, then post the game-state work with PostGameTask (0.30.1+).
 //    The render thread is the game's main thread inside Present, or, when the
 //    player turned on Magelight.json "pageThread" (host 1.7.0+, flat only),
-//    Magelight's own page thread: never assume either, and never touch RE::
-//    state from a render-thread callback.
+//    Magelight's own page thread, running at the same time as the game
+//    thread: never assume either. Never touch RE:: state or the game's D3D11
+//    immediate context from a render-thread callback (render texture images
+//    on the game thread, then InvalidateImage), and guard any state such a
+//    callback shares with your game-thread code.
 //  - Never call SKSE's AddTask or AddUITask from a callback the host makes
 //    inside a frame: JS listeners, DOM ready, VR callbacks, and for a
 //    RenderThread mod its events and EvalJS results (and onLog for a call made
-//    from one of these). They run inside the game's Present, and on Skyrim VR
+//    from one of these). They run inside the game's Present (or on Magelight's
+//    page thread, where the same advice holds), and on Skyrim VR
 //    SKSE also drains its task queues on game job threads, holding a queue's
 //    lock until it is empty, so the post can wait forever on a job that waits
 //    for the frame. PostGameTask hands the post to a host thread instead (task
@@ -56,8 +60,10 @@
 //    THREAD, not always the render thread: page/console/resize events come
 //    from the render thread, UIModeEntered/Exited/Refused from the game
 //    thread, FocusDenied from the requesting mod's thread, RenderDead from
-//    whichever present thread saw the kill switch. Pick RenderThread only if
-//    your handler is thread-agnostic. A faulting handler disables that mod's
+//    whichever present thread saw the kill switch. With "pageThread" the
+//    page thread is the render thread, so the handler can be entered from two
+//    threads at once. Pick RenderThread only if your handler is thread-agnostic
+//    and reentrant. A faulting handler disables that mod's
 //    sink, never the overlay.
 //  - ModDesc.onLog fires synchronously on the thread of the failing API
 //    call, outside the host's locks (calling back into the API is allowed).

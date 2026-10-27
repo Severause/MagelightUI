@@ -25,7 +25,7 @@ src/MagelightVR.h           the VR presenter's interface to the host (docs/VR_PR
 src/MagelightVR/            the VR presenter: Runtime, Overlays, Laser, Input, Bindings, Lifecycle; State.h = the state they share and its rules
 src/GamepadCore.h           the gamepad layer's rules (1.6.0): who holds the pad, dead zones, repeat, held buttons, the keys style, the page packet; engine-free
 src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
-src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread
+src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -50,7 +50,7 @@ tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus
 tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it; --thread: pages on the page thread, which must pass without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1) or the page thread (MG_PAGE_THREAD=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
-tools/pagethread-test/      src/PageThreadCore.h: Decide, and the handoff (no page frame dropped, the game thread never waits, a stuck page included) (build.bat)
+tools/pagethread-test/      src/PageThreadCore.h: Decide, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
 build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <that>\stage (namespaced runtime patch)
@@ -60,7 +60,8 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
 
 1. **Ultralight lives on ONE thread**: created on the game's main thread (= in-game present
    thread) after `kPostLoadGame`/`kNewGame` (`s_worldReady`, `s_mainThreadId`); frames from any
-   other thread skip all Ultralight work (`s_ulThreadId`). Violations fastfail with no crashlog. Since 1.3.0
+   other thread skip all Ultralight work (the gate compares with `s_mainThreadId`, the thread that composites;
+   `s_ulThreadId` is the thread that owns Ultralight, the page thread with `pageThread`). Violations fastfail with no crashlog. Since 1.3.0
    the frame work runs on an 8 MB fiber of that thread (`UlFiberMain`, `"ulFiberMB"`; never less, `kMinFiberMb`:
    under about 6 MB JavaScriptCore's default 5 MB script limit lies past the fiber's end, so its error path commits
    into the fiber's own 64 KB stack guarantee and a page's first uncaught error is 0xC00000FD), and WebKit knows the
@@ -415,7 +416,11 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     `CollectView`, `TickMemoryReport`) runs there (`PageThreadFrame`) and nowhere else. `MagelightGPU.dll` gets a
     deferred context of the game's device (contract 3) and only the page thread calls it; the game's immediate
     context is used on the game thread alone, which at Present (`ThreadModeFrame`) runs every finished page frame's
-    command list in order (none is ever dropped: each carries uploads later frames build on), then draws the newest
+    command lists in order (none is ever dropped: each carries uploads later frames build on) with
+    `PageThread::RunRecordedList`, whose `ExecuteCommandList(list, TRUE)` saves and restores the game's whole state
+    (FALSE clears it, and the game's renderer rebinds only what it thinks changed: `deferred-test`'s state case), and
+    flushes the immediate context after each part the driver split off at a flush (`MgGpu_TakeCommandList`, where
+    the in-frame driver flushes); a page frame that rendered nothing hands over no list. It then draws the newest
     frame's views that are still wanted, then lets the next page frame start (`PageThread::Handoff`). The game
     thread never waits on the page thread: no join, no wait on its frames, and no lock held across page script (the
     host runs none under `s_viewsMutex`, invariant 16), so a page stuck in a script freezes only itself (the stall
@@ -427,8 +432,10 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     reference count is Ultralight's); a recorded list keeps every resource it uses alive until it is released, so
     a View Ultralight frees meanwhile needs no retire queue (`tools/deferred-test`). Engine work at Present
     (`GameBookkeeping`, the overlay menu, the UI pass, the cursor quad) stays on the game thread. The mode is decided
-    at render init (`StartPageThread`, `PageThread::Decide`): VR, a single-threaded device, a refused deferred
-    context or a failed thread turn it Off with a log line, and the next frame starts Ultralight on the fiber. With
+    once: VR never asks for it (the setting is ignored there when `Magelight.json` is read); at render init
+    (`StartPageThread`, `PageThread::Decide`) a single-threaded device, a refused deferred context or a failed thread
+    turn it Off with a log line, and the next frame starts Ultralight on the fiber. The page thread holds a
+    `GameTask::Scope` for its whole life, so its posts go through the pump as posts made inside Present do. With
     the setting off the frame is unchanged. Today's single thread no longer serializes the page parts against the
     input sink, the window procedure, game tasks, Papyrus natives and API calls on the game thread: state they share
     is atomic or under its mutex, and new shared state must be too. `tools/deferred-test`, `tools/pagethread-test`

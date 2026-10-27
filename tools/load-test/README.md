@@ -8,7 +8,7 @@ draws them).
 
 A manifest mod (`Data/Magelight/MgLoadTest/`). `F10` opens its panel at the top right and gives it the mouse
 (`"hotkeys": { "MgLoadTest/load": "Insert" }` in `Magelight.json` rebinds it). The game keeps running while it is
-open, unless `Magelight.json` asks UI mode to pause it. The panel picks:
+open (the manifest does not set `hotkeyPause`). The panel picks:
 
 - **Script**: 0, 2, 5, 10 or 20 ms of script every frame (a busy loop in `requestAnimationFrame`).
 - **Layout**: 300 boxes moved every frame (style, layout and paint).
@@ -31,13 +31,14 @@ log ties each cost line to the load that produced it.
 
 What the log shows:
 
-- Thread off: `present cost over N frames - ul.update ..., ul.render ..., composite(+mirror) ..., total avg ...`.
-  `ul.update` grows with the script load (the busy loop runs inside `Update`): that is time taken from the game's
-  frame.
-- Thread on: `present cost over N frames - prelude ..., execute ..., composite ..., total avg ...` is all the game
-  thread spends; `page thread over N frames - ul.update ..., ul.render ..., ... frames/s, presents without a new
-  frame P` is the page's own cost, off the game's frame. A page slower than the game shows as a lower frames/s and
-  a higher P, never as a slower game.
+- Thread off: `present cost over N frames - ul.update ..., ul.render ..., composite(+mirror) ..., vr.submit ...,
+  total avg ..., WORST ...`. The script load shows in `ul.render` (a page's `requestAnimationFrame` callbacks run
+  inside `Render`) and the layout load in `ul.update` and `ul.render`: all of it is time taken from the game's frame.
+- Thread on: `present cost over N frames - prelude ..., execute ..., composite ..., total avg ..., WORST ...
+  (uiMode=..., views=..., page thread: F frames, P presents without a new one)` is all the game thread spends, and
+  `page thread over N frames - page work ..., ul.update ..., ul.render ..., total avg ..., WORST ..., R frames/s` is
+  the page's own cost, off the game's frame (the script load again in `ul.render`). A page slower than the game shows
+  as fewer page frames (F, R) and more presents without a new one (P), never as a slower game.
 
 Remove the folder when done. `package.ps1` zips it for a mod manager (`MgLoadTest-<version>.zip`, holding
 `Magelight/MgLoadTest/...`; default output `dist\`, `-Out <folder>` for another).

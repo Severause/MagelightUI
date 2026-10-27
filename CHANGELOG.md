@@ -79,8 +79,10 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 ### For mod authors
 
 - No new API. With `pageThread` on, the render thread of the threading contract is Magelight's page thread: JS
-  listeners, DOM-ready and console callbacks, and a `RenderThread` mod's events and `EvalJS` results run there,
-  no longer inside the game's Present. The rules are the ones `MagelightUI_API.h` already states (copy the argument,
+  listeners, DOM-ready and console callbacks, and a `RenderThread` mod's page, console and resize events and
+  `EvalJS` results run there, no longer inside the game's Present, at the same time as the game thread. A
+  `RenderThread` mod's handler can then be entered from two threads at once (page events from the page thread,
+  UI-mode events from the game thread). Never use the game's Direct3D immediate context in these callbacks. The rules are the ones `MagelightUI_API.h` already states (copy the argument,
   post game work with `PostGameTask`, never touch `RE::` there). A mod that reached into `RE::` from a JS listener
   got away with it on the game's main thread; on the page thread it races the game.
 - Texture images (`RegisterTextureImage`) keep working unchanged: the page thread's recorded draws sample your SRV
@@ -90,11 +92,15 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 ### Packaging, licences and tools
 
 - `MagelightGPU.dll` contract 3: `MgGpu_Create` may be given a deferred context of the game's device. The driver
-  then records (no `Flush`, no pipeline backup), and offsets a boxed `UpdateSubresource` by the bitmap's origin
-  where Direct3D emulates command lists (`tools/deferred-test` proves the placement on WARP).
+  then records (no pipeline backup), splits its recording at each flush (new export `MgGpu_TakeCommandList`; the
+  host flushes between the parts, as the in-frame driver flushes there), and points a boxed `UpdateSubresource`'s
+  source at the bitmap's
+  origin, not the box's first texel, where Direct3D emulates command lists (`tools/deferred-test` proves the placement
+  on WARP).
 - New offline tests: `tools/deferred-test` (the driver on a deferred context driven from a page thread against the
   immediate context, byte for byte; a View freed while its target is held), `tools/pagethread-test` (the handoff:
-  no page frame dropped, the game thread never waits, a stuck page included). `tools/fiber-gc-test --thread` shows
+  no page frame dropped, the game thread never waits, a stuck page included; a page thread that faults gives back
+  the registry locks it held). `tools/fiber-gc-test --thread` shows
   pages on a real thread need no VM lock (its `build.bat` gates it), and `FiberRun.h`'s `MG_PAGE_THREAD=1` runs any
   page-facing tool there.
 - `tools/load-test/MgLoadTest`: the in-game load kit (`package.ps1` zips it).
