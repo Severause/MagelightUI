@@ -7431,7 +7431,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         return true;
     }
 
-    static void UploadSurfaceIfDirty(MlView& v)
+    // `ctx`: the game's immediate context in the frame, the page thread's deferred one with pageThread (a dynamic
+    // texture maps WRITE_DISCARD on either).
+    static void UploadSurfaceIfDirty(MlView& v, ID3D11DeviceContext* ctx)
     {
         auto* surface = static_cast<ultralight::BitmapSurface*>(v.ul->surface());
         if (!surface) return;
@@ -7443,7 +7445,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const void* px = bmp->LockPixels();
         if (px) {
             D3D11_MAPPED_SUBRESOURCE mapped{};
-            if (SUCCEEDED(s_context->Map(v.tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            if (SUCCEEDED(ctx->Map(v.tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
                 const auto rowBytes = bmp->row_bytes();
                 const auto rows = bmp->height();
                 const auto copyBytes = (rowBytes < mapped.RowPitch) ? rowBytes : mapped.RowPitch;
@@ -7452,7 +7454,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 for (std::uint32_t y = 0; y < rows; ++y) {
                     std::memcpy(dst + y * mapped.RowPitch, src + y * rowBytes, copyBytes);
                 }
-                s_context->Unmap(v.tex, 0);
+                ctx->Unmap(v.tex, 0);
             }
         }
         bmp->UnlockPixels();
@@ -8237,74 +8239,14 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     }
 
-    static void FrameWork(IDXGISwapChain* sc)
+    // ── FrameWork in parts ───────────────────────────────────────────────────
+    // In the frame (the default) FrameWork runs them in this order on the game's main thread, on the page fiber.
+
+    // Page work before the paint: fullscreen views follow the back buffer, then hibernation, rebuilds,
+    // materialization, resizes, hot reload, the inspector, lifecycle, listener shims, the first visibility sync and
+    // the input, edit-state, tooltip and bridge drains. Ultralight's thread.
+    static void PageWorkBegin(float bw, float bh)
     {
-        // Diagnostic: name every present-thread change (bounded — a session
-        // sees at most a couple). This is what proved the two-thread pattern.
-        const DWORD tid = GetCurrentThreadId();
-        static DWORD lastTid = 0;
-        static int tidLogs = 0;
-        if (tid != lastTid && tidLogs < 8) {
-            SKSE::log::info("Magelight: present thread now {} (was {})", tid, lastTid);
-            lastTid = tid;
-            ++tidLogs;
-        }
-
-        // Init on the MAIN thread only. Menus and loading screens present from
-        // a separate render thread; gameplay presents from the game's main
-        // loop — in both field runs the in-game present TID equals the TID
-        // that loaded the plugin (11664 in 0.3.6, 16452 in 0.3.7). Heuristics
-        // failed twice here: kPostLoadGame fires while the loading screen is
-        // still presenting (0.3.6), and that loading screen presents many
-        // SECONDS of stable frames, so a stability streak passes on the wrong
-        // thread too (0.3.7). Thread identity is the deterministic signal.
-        if (!s_renderInit) {
-            // World-ready FALLBACK (0.17.9): SKSEVR never delivered kNewGame for
-            // an Alternate Perspective new game (field 2026-09-03: SKSE dispatched
-            // 4 and 5 only; no 3, no 7), so the renderer never started and every
-            // hotkey suspended the controls over nothing. The player standing in
-            // a loaded cell with no main/loading menu up IS the world being
-            // ready; the thread-identity gate below still decides WHEN to init.
-            // Main-thread frames only (never the loading-screen thread), polled
-            // about twice a second.
-            if (!s_worldReady.load() && tid == s_mainThreadId) {
-                static int s_wrPolls = 0;
-                if ((++s_wrPolls % 30) == 0) {
-                    auto* pc = RE::PlayerCharacter::GetSingleton();
-                    auto* ui = RE::UI::GetSingleton();
-                    if (pc && ui && pc->GetParentCell() && pc->Is3DLoaded() &&
-                        !ui->IsMenuOpen(RE::MainMenu::MENU_NAME) && !ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)) {
-                        SKSE::log::info("Magelight: world ready (fallback: player in a loaded cell — no kPostLoadGame/kNewGame arrived)");
-                        NotifyWorldReady();
-                    }
-                }
-            }
-            if (!s_worldReady.load() || tid != s_mainThreadId) return;
-            EnsureRenderInit(sc);
-        }
-        if (s_renderDead.load()) return;
-        if (tid != s_ulThreadId) {
-            // A frame from a foreign thread (loading screens etc.): touching
-            // Ultralight here is the fastfail. Skip the whole frame.
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                SKSE::log::warn("Magelight: frame on foreign thread {} (owner {}) — skipping Ultralight work",
-                    tid, s_ulThreadId);
-            }
-            return;
-        }
-        DXGI_SWAP_CHAIN_DESC scd{};
-        float bw = 0, bh = 0;
-        if (SUCCEEDED(sc->GetDesc(&scd))) {
-            bw = static_cast<float>(scd.BufferDesc.Width);
-            bh = static_cast<float>(scd.BufferDesc.Height);
-            const int prevW = s_backbufferW.exchange(static_cast<int>(bw));  // for the cursor clamp (input sink)
-            const int prevH = s_backbufferH.exchange(static_cast<int>(bh));
-            if (prevW > 0 && prevH > 0 && (prevW != static_cast<int>(bw) || prevH != static_cast<int>(bh)))
-                Emit(HostEvent::DisplayResized, 0, static_cast<int>(bw), static_cast<int>(bh));
-        }
-
         // Fullscreen views track the backbuffer: sized here BEFORE
         // materialization (a 0x0 view never materializes), re-Resized via
         // the boundsDirty path if the backbuffer ever changes.
@@ -8357,6 +8299,13 @@ float4 ps_straight(VSOut i) : SV_Target {
         NoteEditorComposition();   // the Escape guard's view of the field's composition (window thread reads it)
         DrainTooltips(bh);
         DrainBridgeQueues();
+    }
+
+    // The game thread's bookkeeping each frame: the cursor confine, the focus menu's close check, the cursor re-hides
+    // and samples, the world-freeze reconcile, the controls hold's release and the page-cursor reset. Engine state is
+    // read on the game thread or reached through GameTask::Post.
+    static void GameBookkeeping()
+    {
         // The CursorMenu's kShow processes a frame or two after SetUIMode, and its movie only exists once it has:
         // hide the vanilla cursor again just after and once the menu has settled.
         // About 30 frames after an entry or exit, sample the Windows cursor (SampleCursorState).
@@ -8428,6 +8377,217 @@ float4 ps_straight(VSOut i) : SV_Target {
                 });
             }
         }
+    }
+
+    // How the composite draws a quad: over the back buffer now, queued for the UI pass, or both (FrameWork's `emit`).
+    using EmitFn = std::function<void(ID3D11ShaderResourceView*, float, float, float, float, float, float, float, float,
+                                      const float*)>;
+
+    // One view's reading for every presenter, under s_viewsMutex on Ultralight's thread: false when this frame does
+    // not draw it. Its SRV is resolved here (the GPU path) or its surface uploaded through `ctx` (the CPU path). With
+    // `addRef` (a page-thread packet) the SRV gets a reference of its own and `ul` stays empty (MagelightPresenter.h).
+    static bool CollectView(MlView& v, float bw, float bh, ID3D11DeviceContext* ctx, bool addRef, PresentedView& pv)
+    {
+        if (!v.visible || !v.ul || !v.ul->is_visible()) return false;   // what Render painted (FrameWork)
+        float ex = 0, ey = 0;
+        EffectivePos(v, bw, bh, ex, ey);
+        // Presenter seam: the same reading the VR submitter gets.
+        pv.id = v.id; pv.x = ex; pv.y = ey; pv.w = v.w; pv.h = v.h;
+        if (!addRef) pv.ul = v.ul;
+        pv.layer = v.layer; pv.isInspector = v.isInspector; pv.gpuPath = s_gpuActive;
+        pv.clickThrough = v.clickThrough;   // B3: the laser skips click-through views like hitTest does
+        pv.repainted = v.repaintedThisFrame;
+        // Cutout: view pixels -> this quad's uv range (the GPU
+        // target may be padded, so map through its uv rect).
+        float cut[4] = { 0, 0, 0, 0 };
+        const float* cutPtr = nullptr;
+        if (v.cutW > 0 && v.cutH > 0 && v.w > 0 && v.h > 0) cutPtr = cut;
+        auto mapCut = [&](float u0, float v0, float u1, float v1) {
+            const float fx0 = v.cutX / v.w, fy0 = v.cutY / v.h;
+            const float fx1 = (v.cutX + v.cutW) / v.w, fy1 = (v.cutY + v.cutH) / v.h;
+            cut[0] = u0 + fx0 * (u1 - u0); cut[1] = v0 + fy0 * (v1 - v0);
+            cut[2] = u0 + fx1 * (u1 - u0); cut[3] = v0 + fy1 * (v1 - v0);
+        };
+        // Mirror fit: a VR panel is sized for the headset, not
+        // for the desktop window, so scale it to FIT the mirror
+        // rather than drawing it 1:1 and cropping the right edge.
+        float mx = static_cast<float>(ex), my = static_cast<float>(ey);
+        float mw = static_cast<float>(v.w), mh = static_cast<float>(v.h);
+        if (VR::IsLive() && v.fullscreen && bw > 0 && bh > 0 && v.w > 0 && v.h > 0 &&
+            (v.w != static_cast<int>(bw) || v.h != static_cast<int>(bh))) {
+            const float s = std::min(static_cast<float>(bw) / v.w,
+                                     static_cast<float>(bh) / v.h);
+            mw = v.w * s; mh = v.h * s;
+            mx = (static_cast<float>(bw) - mw) * 0.5f;
+            my = (static_cast<float>(bh) - mh) * 0.5f;
+        }
+        pv.qx = mx; pv.qy = my; pv.qw = mw; pv.qh = mh;
+        if (s_gpuActive) {
+            const auto rt = v.ul->render_target();
+            // This call resolves the MSAA target, so it is what makes this frame visible:
+            // call it every frame after the draw, never cache the result.
+            auto* srv = static_cast<ID3D11ShaderResourceView*>(
+                s_gpuSrv(s_gpu, rt.texture_id));
+            if (cutPtr) mapCut(rt.uv_coords.left, rt.uv_coords.top, rt.uv_coords.right, rt.uv_coords.bottom);
+            pv.srv = srv;
+            pv.u0 = rt.uv_coords.left; pv.v0 = rt.uv_coords.top;
+            pv.u1 = rt.uv_coords.right; pv.v1 = rt.uv_coords.bottom;
+        } else {
+            UploadSurfaceIfDirty(v, ctx);
+            if (cutPtr) mapCut(0.0f, 0.0f, 1.0f, 1.0f);
+            pv.srv = v.srv;
+        }
+        if (cutPtr) { pv.hasCutout = true; std::memcpy(pv.cutUV, cut, sizeof(cut)); }
+        if (addRef && pv.srv) pv.srv->AddRef();
+        return true;
+    }
+
+    // A collected view's quad over the back buffer (the desktop mirror on VR).
+    static void EmitView(const PresentedView& pv, const EmitFn& emit)
+    {
+        if (VR::MirrorEnabled())
+            emit(pv.srv, pv.u0, pv.v0, pv.u1, pv.v1, pv.qx, pv.qy, pv.qw, pv.qh, pv.hasCutout ? pv.cutUV : nullptr);
+    }
+
+    // The host's cursor quad, over every view. Game thread.
+    static void EmitCursor(bool anyVisible, float bw, float bh, const EmitFn& emit)
+    {
+        // Our own cursor, topmost. The vanilla cursor sprite is hidden while
+        // UI mode is up (Hook_CursorAdvanceMovie), and its draw is skipped
+        // (skipGameCursor): at Present it would land under the overlay,
+        // but in the UI pass the CursorMenu draws after us.
+        // This quad tracks the same MenuCursor position, sized from
+        // cursorHeight at 1080p and scaled with the back buffer's height.
+        if (anyVisible && s_focused.load() && s_cursorSrv && bh > 0 && !VR::IsLive() &&   // never on a prepaint-only frame
+            !s_gamepadHidesCursor.load()) {
+            const float px = static_cast<float>(s_cursorPosX.load());
+            const float py = static_cast<float>(s_cursorPosY.load());
+            const int artHeight = static_cast<int>(std::lround(s_cursorHeight * (bh / 1080.0f)));
+            // The glow fades in over a clickable element (the drawn art) and a press shrinks the cursor about its
+            // hotspot (the drawn arrow, and a mod image that asked for it).
+            static float glow = 0.0f, press = 0.0f;
+            static auto last = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
+            last = now;
+            const auto approach = [dt](float v, float target, float seconds) {
+                const float step = dt / seconds;
+                return target > v ? std::min(target, v + step) : std::max(target, v - step);
+            };
+            const CursorPick pick = PickCursorAt(static_cast<int>(px), static_cast<int>(py), bw, bh);
+            const PageCursor kind = pick.kind;
+            glow  = approach(glow, kind == PageCursor::Clickable ? 1.0f : 0.0f, 0.12f);
+            press = approach(press, s_mouseDown.load() ? 1.0f : 0.0f, 0.06f);
+            ID3D11ShaderResourceView* modSrv = (!pick.hide && pick.image) ? CursorImageSrv(pick.image) : nullptr;
+            if (pick.hide) {
+                // The page under the pointer draws its own (CSS cursor: none, or its view's "none").
+            } else if (modSrv) {
+                // A mod's image: its height at 1080p (else its own) scaled with the backbuffer, aspect kept, the
+                // hotspot pixel on the cursor position.
+                const CursorImage& ci = *pick.image;
+                const float h = (ci.height > 0.0f ? ci.height : static_cast<float>(ci.h)) * (bh / 1080.0f);
+                const float w = h * (static_cast<float>(ci.w) / static_cast<float>(ci.h));
+                const float scale = ci.press ? 1.0f - 0.14f * press : 1.0f;
+                float x = px - ci.hotX * (w / ci.w) * scale, y = py - ci.hotY * (h / ci.h) * scale;
+                if (scale == 1.0f) { x = std::round(x); y = std::round(y); }
+                emit(modSrv, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w * scale, h * scale, nullptr);
+            } else if (const CursorArtSet* art = (s_cursorCustom && s_cursorImgH > 0) ? nullptr
+                                                      : EnsureCursorArt(artHeight, pick.tint)) {
+                // The drawn cursor, in the view's tint. At rest it sits on whole pixels (1:1 with its texture
+                // when the target is the back buffer).
+                const bool text = kind == PageCursor::Text;
+                const CursorArtTex& t = text ? art->ibeam
+                    : art->arrow[std::clamp(static_cast<int>(std::lround(glow * (kArtGlowSteps - 1))), 0, kArtGlowSteps - 1)];
+                const float scale = text ? 1.0f : 1.0f - 0.14f * press;
+                float x = px - t.hotX * scale, y = py - t.hotY * scale;
+                if (scale == 1.0f) { x = std::round(x); y = std::round(y); }
+                emit(t.srv, 0.0f, 0.0f, 1.0f, 1.0f, x, y, t.w * scale, t.h * scale, nullptr);
+            } else if (s_cursorCustom && s_cursorImgH > 0) {
+                // Custom art: configured height at 1080p scaled with the
+                // backbuffer, aspect preserved, drawn so the hotspot
+                // pixel sits exactly on the cursor position.
+                const float h = s_cursorHeight * (bh / 1080.0f);
+                const float w = h * (static_cast<float>(s_cursorImgW) / s_cursorImgH);
+                emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
+                     px - s_cursorHotX * w, py - s_cursorHotY * h, w, h, nullptr);
+            } else {
+                const float h = s_cursorHeight * (bh / 1080.0f);
+                emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
+                     px, py, h * (static_cast<float>(kCursorW) / kCursorH), h, nullptr);
+            }
+        }
+    }
+
+    static void FrameWork(IDXGISwapChain* sc)
+    {
+        // Diagnostic: name every present-thread change (bounded — a session
+        // sees at most a couple). This is what proved the two-thread pattern.
+        const DWORD tid = GetCurrentThreadId();
+        static DWORD lastTid = 0;
+        static int tidLogs = 0;
+        if (tid != lastTid && tidLogs < 8) {
+            SKSE::log::info("Magelight: present thread now {} (was {})", tid, lastTid);
+            lastTid = tid;
+            ++tidLogs;
+        }
+
+        // Init on the MAIN thread only. Menus and loading screens present from
+        // a separate render thread; gameplay presents from the game's main
+        // loop — in both field runs the in-game present TID equals the TID
+        // that loaded the plugin (11664 in 0.3.6, 16452 in 0.3.7). Heuristics
+        // failed twice here: kPostLoadGame fires while the loading screen is
+        // still presenting (0.3.6), and that loading screen presents many
+        // SECONDS of stable frames, so a stability streak passes on the wrong
+        // thread too (0.3.7). Thread identity is the deterministic signal.
+        if (!s_renderInit) {
+            // World-ready FALLBACK (0.17.9): SKSEVR never delivered kNewGame for
+            // an Alternate Perspective new game (field 2026-09-03: SKSE dispatched
+            // 4 and 5 only; no 3, no 7), so the renderer never started and every
+            // hotkey suspended the controls over nothing. The player standing in
+            // a loaded cell with no main/loading menu up IS the world being
+            // ready; the thread-identity gate below still decides WHEN to init.
+            // Main-thread frames only (never the loading-screen thread), polled
+            // about twice a second.
+            if (!s_worldReady.load() && tid == s_mainThreadId) {
+                static int s_wrPolls = 0;
+                if ((++s_wrPolls % 30) == 0) {
+                    auto* pc = RE::PlayerCharacter::GetSingleton();
+                    auto* ui = RE::UI::GetSingleton();
+                    if (pc && ui && pc->GetParentCell() && pc->Is3DLoaded() &&
+                        !ui->IsMenuOpen(RE::MainMenu::MENU_NAME) && !ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME)) {
+                        SKSE::log::info("Magelight: world ready (fallback: player in a loaded cell — no kPostLoadGame/kNewGame arrived)");
+                        NotifyWorldReady();
+                    }
+                }
+            }
+            if (!s_worldReady.load() || tid != s_mainThreadId) return;
+            EnsureRenderInit(sc);
+        }
+        if (s_renderDead.load()) return;
+        if (tid != s_ulThreadId) {
+            // A frame from a foreign thread (loading screens etc.): touching
+            // Ultralight here is the fastfail. Skip the whole frame.
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                SKSE::log::warn("Magelight: frame on foreign thread {} (owner {}) — skipping Ultralight work",
+                    tid, s_ulThreadId);
+            }
+            return;
+        }
+        DXGI_SWAP_CHAIN_DESC scd{};
+        float bw = 0, bh = 0;
+        if (SUCCEEDED(sc->GetDesc(&scd))) {
+            bw = static_cast<float>(scd.BufferDesc.Width);
+            bh = static_cast<float>(scd.BufferDesc.Height);
+            const int prevW = s_backbufferW.exchange(static_cast<int>(bw));  // for the cursor clamp (input sink)
+            const int prevH = s_backbufferH.exchange(static_cast<int>(bh));
+            if (prevW > 0 && prevH > 0 && (prevW != static_cast<int>(bw) || prevH != static_cast<int>(bh)))
+                Emit(HostEvent::DisplayResized, 0, static_cast<int>(bw), static_cast<int>(bh));
+        }
+
+        PageWorkBegin(bw, bh);
+        GameBookkeeping();
         // Texture images: repaint the probe (if on), then register/re-point/
         // invalidate — BEFORE Update() so this frame's Render() sees them.
         TickImageProbe();
@@ -8489,7 +8649,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool drawNow = !defer || (!s_deferredLast && !s_engineComposite.load());
         s_deferredLast = defer;
         std::vector<QueuedQuad> queued;
-        auto emit = [&](ID3D11ShaderResourceView* qsrv, float u0, float v0, float u1, float v1,
+        const EmitFn emit = [&](ID3D11ShaderResourceView* qsrv, float u0, float v0, float u1, float v1,
                         float x, float y, float w, float h, const float* cutUV) {
             if (drawNow) DrawOverlay(sc, qsrv, u0, v0, u1, v1, x, y, w, h, cutUV);
             if (!defer || !qsrv) return;
@@ -8544,128 +8704,13 @@ float4 ps_straight(VSOut i) : SV_Target {
                 std::lock_guard<std::mutex> lk(s_viewsMutex);
                 for (auto& vp : s_views) {
                     MlView& v = *vp;
-                    if (!v.visible || !v.ul || !v.ul->is_visible()) continue;   // what Render painted (above)
-                    float ex = 0, ey = 0;
-                    EffectivePos(v, bw, bh, ex, ey);
-                    // Presenter seam: the same reading the VR submitter gets.
                     PresentedView pv;
-                    pv.id = v.id; pv.ul = v.ul; pv.x = ex; pv.y = ey; pv.w = v.w; pv.h = v.h;
-                    pv.layer = v.layer; pv.isInspector = v.isInspector; pv.gpuPath = s_gpuActive;
-                    pv.clickThrough = v.clickThrough;   // B3: the laser skips click-through views like hitTest does
-                    pv.repainted = v.repaintedThisFrame;
-                    // Cutout: view pixels -> this quad's uv range (the GPU
-                    // target may be padded, so map through its uv rect).
-                    float cut[4] = { 0, 0, 0, 0 };
-                    const float* cutPtr = nullptr;
-                    if (v.cutW > 0 && v.cutH > 0 && v.w > 0 && v.h > 0) cutPtr = cut;
-                    auto mapCut = [&](float u0, float v0, float u1, float v1) {
-                        const float fx0 = v.cutX / v.w, fy0 = v.cutY / v.h;
-                        const float fx1 = (v.cutX + v.cutW) / v.w, fy1 = (v.cutY + v.cutH) / v.h;
-                        cut[0] = u0 + fx0 * (u1 - u0); cut[1] = v0 + fy0 * (v1 - v0);
-                        cut[2] = u0 + fx1 * (u1 - u0); cut[3] = v0 + fy1 * (v1 - v0);
-                    };
-                    // Mirror fit: a VR panel is sized for the headset, not
-                    // for the desktop window, so scale it to FIT the mirror
-                    // rather than drawing it 1:1 and cropping the right edge.
-                    float mx = static_cast<float>(ex), my = static_cast<float>(ey);
-                    float mw = static_cast<float>(v.w), mh = static_cast<float>(v.h);
-                    if (VR::IsLive() && v.fullscreen && bw > 0 && bh > 0 && v.w > 0 && v.h > 0 &&
-                        (v.w != static_cast<int>(bw) || v.h != static_cast<int>(bh))) {
-                        const float s = std::min(static_cast<float>(bw) / v.w,
-                                                 static_cast<float>(bh) / v.h);
-                        mw = v.w * s; mh = v.h * s;
-                        mx = (static_cast<float>(bw) - mw) * 0.5f;
-                        my = (static_cast<float>(bh) - mh) * 0.5f;
-                    }
-                    if (s_gpuActive) {
-                        const auto rt = v.ul->render_target();
-                        // This call resolves the MSAA target, so it is what makes this frame visible:
-                        // call it every frame after the draw, never cache the result.
-                        auto* srv = static_cast<ID3D11ShaderResourceView*>(
-                            s_gpuSrv(s_gpu, rt.texture_id));
-                        if (cutPtr) mapCut(rt.uv_coords.left, rt.uv_coords.top, rt.uv_coords.right, rt.uv_coords.bottom);
-                        if (VR::MirrorEnabled())
-                            emit(srv, rt.uv_coords.left, rt.uv_coords.top,
-                                 rt.uv_coords.right, rt.uv_coords.bottom,
-                                 mx, my, mw, mh, cutPtr);
-                        pv.srv = srv;
-                        pv.u0 = rt.uv_coords.left; pv.v0 = rt.uv_coords.top;
-                        pv.u1 = rt.uv_coords.right; pv.v1 = rt.uv_coords.bottom;
-                    } else {
-                        UploadSurfaceIfDirty(v);
-                        if (cutPtr) mapCut(0.0f, 0.0f, 1.0f, 1.0f);
-                        if (VR::MirrorEnabled())
-                            emit(v.srv, 0.0f, 0.0f, 1.0f, 1.0f, mx, my, mw, mh, cutPtr);
-                        pv.srv = v.srv;
-                    }
-                    if (cutPtr) { pv.hasCutout = true; std::memcpy(pv.cutUV, cut, sizeof(cut)); }
+                    if (!CollectView(v, bw, bh, s_context, false, pv)) continue;   // what Render painted (above)
+                    EmitView(pv, emit);
                     frame.push_back(std::move(pv));
                 }
             }
-            // Our own cursor, topmost. The vanilla cursor sprite is hidden while
-            // UI mode is up (Hook_CursorAdvanceMovie), and its draw is skipped
-            // (skipGameCursor): at Present it would land under the overlay,
-            // but in the UI pass the CursorMenu draws after us.
-            // This quad tracks the same MenuCursor position, sized from
-            // cursorHeight at 1080p and scaled with the back buffer's height.
-            if (anyVisible && s_focused.load() && s_cursorSrv && bh > 0 && !VR::IsLive() &&   // never on a prepaint-only frame
-                !s_gamepadHidesCursor.load()) {
-                const float px = static_cast<float>(s_cursorPosX.load());
-                const float py = static_cast<float>(s_cursorPosY.load());
-                const int artHeight = static_cast<int>(std::lround(s_cursorHeight * (bh / 1080.0f)));
-                // The glow fades in over a clickable element (the drawn art) and a press shrinks the cursor about its
-                // hotspot (the drawn arrow, and a mod image that asked for it).
-                static float glow = 0.0f, press = 0.0f;
-                static auto last = std::chrono::steady_clock::now();
-                const auto now = std::chrono::steady_clock::now();
-                const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
-                last = now;
-                const auto approach = [dt](float v, float target, float seconds) {
-                    const float step = dt / seconds;
-                    return target > v ? std::min(target, v + step) : std::max(target, v - step);
-                };
-                const CursorPick pick = PickCursorAt(static_cast<int>(px), static_cast<int>(py), bw, bh);
-                const PageCursor kind = pick.kind;
-                glow  = approach(glow, kind == PageCursor::Clickable ? 1.0f : 0.0f, 0.12f);
-                press = approach(press, s_mouseDown.load() ? 1.0f : 0.0f, 0.06f);
-                ID3D11ShaderResourceView* modSrv = (!pick.hide && pick.image) ? CursorImageSrv(pick.image) : nullptr;
-                if (pick.hide) {
-                    // The page under the pointer draws its own (CSS cursor: none, or its view's "none").
-                } else if (modSrv) {
-                    // A mod's image: its height at 1080p (else its own) scaled with the backbuffer, aspect kept, the
-                    // hotspot pixel on the cursor position.
-                    const CursorImage& ci = *pick.image;
-                    const float h = (ci.height > 0.0f ? ci.height : static_cast<float>(ci.h)) * (bh / 1080.0f);
-                    const float w = h * (static_cast<float>(ci.w) / static_cast<float>(ci.h));
-                    const float scale = ci.press ? 1.0f - 0.14f * press : 1.0f;
-                    float x = px - ci.hotX * (w / ci.w) * scale, y = py - ci.hotY * (h / ci.h) * scale;
-                    if (scale == 1.0f) { x = std::round(x); y = std::round(y); }
-                    emit(modSrv, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w * scale, h * scale, nullptr);
-                } else if (const CursorArtSet* art = (s_cursorCustom && s_cursorImgH > 0) ? nullptr
-                                                          : EnsureCursorArt(artHeight, pick.tint)) {
-                    // The drawn cursor, in the view's tint. At rest it sits on whole pixels (1:1 with its texture
-                    // when the target is the back buffer).
-                    const bool text = kind == PageCursor::Text;
-                    const CursorArtTex& t = text ? art->ibeam
-                        : art->arrow[std::clamp(static_cast<int>(std::lround(glow * (kArtGlowSteps - 1))), 0, kArtGlowSteps - 1)];
-                    const float scale = text ? 1.0f : 1.0f - 0.14f * press;
-                    float x = px - t.hotX * scale, y = py - t.hotY * scale;
-                    if (scale == 1.0f) { x = std::round(x); y = std::round(y); }
-                    emit(t.srv, 0.0f, 0.0f, 1.0f, 1.0f, x, y, t.w * scale, t.h * scale, nullptr);
-                } else if (s_cursorCustom && s_cursorImgH > 0) {
-                    // Custom art: configured height at 1080p scaled with the
-                    // backbuffer, aspect preserved, drawn so the hotspot
-                    // pixel sits exactly on the cursor position.
-                    const float h = s_cursorHeight * (bh / 1080.0f);
-                    const float w = h * (static_cast<float>(s_cursorImgW) / s_cursorImgH);
-                    emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
-                         px - s_cursorHotX * w, py - s_cursorHotY * h, w, h, nullptr);
-                } else {
-                    const float h = s_cursorHeight * (bh / 1080.0f);
-                    emit(s_cursorSrv, 0.0f, 0.0f, 1.0f, 1.0f,
-                         px, py, h * (static_cast<float>(kCursorW) / kCursorH), h, nullptr);
-                }
-            }
+            EmitCursor(anyVisible, bw, bh, emit);
             backup.Restore(s_context);
         } else {
             // Ultralight 2.0 creates and destroys GPU resources only inside Render (GPUDriver.h), so with nothing
