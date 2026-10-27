@@ -21,6 +21,7 @@
 #include <SKSE/SKSE.h>
 
 #include "MagelightGameTask.h"   // after CommonLib, which must precede windows.h
+#include "PageThreadCore.h"      // the same
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -93,6 +94,7 @@ namespace Magelight {
     //   "msaa": 4             // GPU path: MSAA samples for page targets Ultralight antialiases (1 = off, 2, 4, 8)
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
+    //   "pageThread": false   // 1.7.0: pages run on a thread of their own, not in the game's frame (flat only)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
     //            "suppressRuntimeLaser": true, "aimUseTip": true, "aimPitchDeg": -35,
@@ -163,6 +165,11 @@ namespace Magelight {
     // maxPerThreadStackUsage is 5 MB) fall to the fiber's end, so its error path commits into the 64 KB guarantee
     // UlFiberMain sets and a page's first uncaught error is 0xC00000FD. tools/fiber-gc-test checks 8 MB.
     static constexpr int kMinFiberMb = 8;
+    // Magelight.json "pageThread" (1.7.0): Ultralight on a thread of its own (PageThreadMain), the game thread only
+    // running its recorded GPU work and drawing its views. Wanted until render init asks the device
+    // (StartPageThread), then On or Off for the session. Its stack is ulFiberMB (8 when that is 0).
+    static std::atomic<int> s_pageThreadMode{ static_cast<int>(PageThread::Mode::Off) };
+    static bool PageThreadOn() { return s_pageThreadMode.load() == static_cast<int>(PageThread::Mode::On); }
     // Cursor art: the flat cursor is drawn in code (MagelightCursorArt.h) and follows the page's CSS cursor.
     // "cursorFile" (relative to the runtime dir, or absolute; default none) replaces it with a still image,
     // "cursorHeight" is the drawn height in px at 1080p (scaled with resolution) and "cursorHotspotX/Y"
@@ -536,6 +543,12 @@ namespace Magelight {
                     SKSE::log::warn("Magelight: ulFiberMB {} is outside {}..64 - using {}", asked, kMinFiberMb,
                                     s_ulFiberMb);
             }
+            if (auto it = j.find("pageThread"); it != j.end() && it->is_boolean() && it->get<bool>()) {
+                if (REL::Module::IsVR())
+                    SKSE::log::info("Magelight: pageThread is ignored on Skyrim VR - pages run in the game's frame");
+                else
+                    s_pageThreadMode.store(static_cast<int>(PageThread::Mode::Wanted));
+            }
             if (auto it = j.find("logLevel"); it != j.end() && it->is_string()) {
                 const std::string l = HotkeyNames::Lower(it->get<std::string>());
                 const auto lvl = l == "trace" ? spdlog::level::trace : l == "debug" ? spdlog::level::debug
@@ -652,11 +665,11 @@ namespace Magelight {
             static constexpr const char* kConsoleLogNames[] = { "none", "errors", "warnings", "all" };
             SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
                             "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={}, ulFiberMB={}, "
-                            "exceptionTelemetry={}, memoryLogMinutes={}, clipCursor={}, gamepad={})",
+                            "pageThread={}, exceptionTelemetry={}, memoryLogMinutes={}, clipCursor={}, gamepad={})",
                 s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
                 s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa,
-                s_ulFiberMb, s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_clipCursorCfg.load(),
-                s_gamepadTuning.enabled);
+                s_ulFiberMb, s_pageThreadMode.load() != static_cast<int>(PageThread::Mode::Off),
+                s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_clipCursorCfg.load(), s_gamepadTuning.enabled);
             if (s_gamepadTuning.enabled) {
                 static constexpr const char* kGlyphNames[] = { "xbox", "playstation", "generic" };
                 const Gamepad::Tuning& t = s_gamepadTuning;
@@ -2484,7 +2497,7 @@ namespace Magelight {
         s_engineEndNext(a);
         if (s_engineComposite.load()) {
             UiPassComposite();
-        } else if (s_endOfFrameFallback.load() && !s_carrierOpen.load() && GetCurrentThreadId() == s_ulThreadId &&
+        } else if (s_endOfFrameFallback.load() && !s_carrierOpen.load() && GetCurrentThreadId() == s_mainThreadId &&
                    s_lastUiPassFrame.load() != s_compositeFrames.load()) {
             // Only the thread FrameWork composites on (loading screens and the main menu present from another),
             // and only once a frame: Present bumps s_compositeFrames after this call.
@@ -4506,6 +4519,8 @@ namespace Magelight {
         SKSE::log::warn("Magelight stall: {} other thread(s) sampled", logged);
     }
 
+    static void CheckPageThreadStall();   // fwd (the page thread)
+
     static void StallWatchdogLoop()
     {
         using namespace std::chrono;
@@ -4519,6 +4534,7 @@ namespace Magelight {
             if (s_faultEvent) WaitForSingleObject(s_faultEvent, 250);
             else std::this_thread::sleep_for(milliseconds(250));
             DrainFaultReports();
+            if (s_stallWatchdog.load()) CheckPageThreadStall();
             if (!s_stallWatchdog.load() || reports >= 12) continue;
             const long long lastMs = s_lastPresentMs.load();
             if (!lastMs || !s_worldReady.load()) continue;   // nothing to watch yet
@@ -5942,8 +5958,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         return false;
     }
 
+    // Made once: a refused page thread (StartPageThread) brings render init back a frame later, on the page fiber.
+    static bool s_deviceResourcesReady = false;
+
     static bool CreateDeviceResources(IDXGISwapChain* sc)
     {
+        if (s_deviceResourcesReady) return true;
         // The swapchain first: on every setup that works it answers, and the device it gives is the one its
         // back buffer lives on. The engine's device only stands in when it refuses (a Streamline wrapper over a
         // Direct3D 12 frame-generation swapchain answers E_NOINTERFACE). Never Released: a wrapper may not AddRef.
@@ -6071,6 +6091,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         if (!CreateDotTexture()) SKSE::log::warn("Magelight: VR pointer dot texture failed — the arrow art stands in");
         TryLoadCustomCursor();  // optional; keeps the drawn cursor on any failure
+        s_deviceResourcesReady = true;
         return true;
     }
 
@@ -6129,7 +6150,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                         r.soft / 1024, r.hard, r.soft, r.maxUsage);
     }
 
-    static bool CreateUltralight()
+    // `ctx` is what the GPU driver draws through: the game's immediate context, or with pageThread the page thread's
+    // deferred one (MgGpu_Create, contract 3). Ultralight's thread: whichever thread calls this owns WebKit from here on.
+    static bool CreateUltralight(ID3D11DeviceContext* ctx)
     {
         ultralight::Config cfg;
         // resource_path_prefix defaults to "resources/" resolved against the
@@ -6191,13 +6214,13 @@ float4 ps_straight(VSOut i) : SV_Target {
         ultralight::Platform::instance().set_clipboard(&s_clipboard.value);
 
         // Milestone 2: GPU rasterization. The driver must be registered BEFORE
-        // Renderer::Create. Created against the GAME's device/context (both
-        // fetched from the swapchain in CreateDeviceResources). Any failure
+        // Renderer::Create. Created against the GAME's device (fetched from
+        // the swapchain in CreateDeviceResources) and `ctx`. Any failure
         // falls back to the CPU surface path.
         if (s_forceCpu.load()) {
             SKSE::log::info("Magelight: forceCpu set — GPU driver skipped, CPU rasterizer in use");
-        } else if (s_gpuCreate && s_device && s_context) {
-            s_gpu = s_gpuCreate(s_device, s_context, &GpuLogBridge);
+        } else if (s_gpuCreate && s_device && ctx) {
+            s_gpu = s_gpuCreate(s_device, ctx, &GpuLogBridge);
             if (s_gpu) {
                 if (auto* drv = static_cast<ultralight::GPUDriver*>(s_gpuGetDriver(s_gpu))) {
                     // The sample count applies to targets created from now on, so it is set before the renderer
@@ -6218,7 +6241,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
         }
 
-        if (!s_pagesOnFiber) ApplyGameStackReserve();
+        if (!s_pagesOnFiber && !PageThreadOn()) ApplyGameStackReserve();   // pages on the game's own stack only
         s_ulRenderer = ultralight::Renderer::Create();
         if (!s_ulRenderer) {
             SKSE::log::error("Magelight: the Ultralight renderer could not be created");
@@ -8016,12 +8039,26 @@ float4 ps_straight(VSOut i) : SV_Target {
         InvalidateImage(s_probeImage);
     }
 
+    static bool StartPageThread();   // fwd (the page thread, below)
+
     static void EnsureRenderInit(IDXGISwapChain* sc)
     {
         if (s_renderInit || s_renderDead.load()) return;
         s_renderInit = true;
         s_ulThreadId = GetCurrentThreadId();
-        if (!CreateDeviceResources(sc) || !CreateUltralight()) {
+        if (s_pageThreadMode.load() == static_cast<int>(PageThread::Mode::Wanted)) {
+            if (!CreateDeviceResources(sc)) {
+                NoteRenderFailure("render-thread init failed");
+                s_renderDead.store(true);
+                SKSE::log::error("Magelight: render-thread init failed — overlay disabled");
+                return;
+            }
+            // Started: the page thread makes the renderer itself and raises s_rendererUp. Refused: the mode is Off and
+            // the next frame starts Ultralight here, on the page fiber (FrameWork).
+            if (!StartPageThread()) s_renderInit = false;
+            return;
+        }
+        if (!CreateDeviceResources(sc) || !CreateUltralight(s_context)) {
             NoteRenderFailure("render-thread init failed");   // a no-op when a step already said why
             s_renderDead.store(true);
             SKSE::log::error("Magelight: render-thread init failed — overlay disabled");
@@ -8518,6 +8555,84 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     }
 
+    // Where this frame's quads go. Opens or closes the UI pass's carrier for an interactive view, then: while the UI
+    // pass is live the composite records its quads for it (defer) instead of drawing them over the back buffer
+    // (drawNow). Game thread.
+    struct CompositeTarget {
+        bool defer = false;
+        bool drawNow = true;
+    };
+    static CompositeTarget ChooseCompositeTarget(bool interactiveVisible)
+    {
+        SyncOverlayMenu(interactiveVisible);
+        s_compositeFrames.fetch_add(1);
+        const bool defer = s_engineComposite.load() || (s_overlayMenuRegistered && UiPassActive());
+        if (!s_engineComposite.load()) NoteUiPassState(defer, interactiveVisible);
+        // The first deferred frame also draws here: the UI pass already ran this frame with nothing queued. Never in
+        // engine mode, where Present is not ours to draw into.
+        static bool s_deferredLast = false;
+        const bool drawNow = !defer || (!s_deferredLast && !s_engineComposite.load());
+        s_deferredLast = defer;
+        return { defer, drawNow };
+    }
+
+    // This frame's emit: a quad over the back buffer when the target says draw, and queued (with a reference of its
+    // own) for the UI pass when it says defer. Game thread.
+    static EmitFn MakeEmit(IDXGISwapChain* sc, CompositeTarget target, std::vector<QueuedQuad>& queued)
+    {
+        return [sc, target, &queued](ID3D11ShaderResourceView* qsrv, float u0, float v0, float u1, float v1,
+                                     float x, float y, float w, float h, const float* cutUV) {
+            if (target.drawNow) DrawOverlay(sc, qsrv, u0, v0, u1, v1, x, y, w, h, cutUV);
+            if (!target.defer || !qsrv) return;
+            QueuedQuad q;
+            q.srv = qsrv; qsrv->AddRef();
+            q.u0 = u0; q.v0 = v0; q.u1 = u1; q.v1 = v1; q.x = x; q.y = y; q.w = w; q.h = h;
+            if (cutUV) { q.hasCut = true; std::memcpy(q.cut, cutUV, sizeof(q.cut)); }
+            queued.push_back(q);
+        };
+    }
+
+    // The UI pass's quads for this frame, an empty set included, so a hidden view leaves no trace. Game thread.
+    static void PublishUiPass(bool defer, std::vector<QueuedQuad>& queued, float bw, float bh)
+    {
+        std::lock_guard<std::mutex> lk(s_uiPassMutex);
+        ReleaseQuads(s_uiPassQuads);
+        if (defer) {
+            s_uiPassQuads = std::move(queued);
+            s_uiPassBackW = bw;
+            s_uiPassBackH = bh;
+            s_uiPassPublished = std::chrono::steady_clock::now();
+        }
+    }
+
+    // Before Render, on Ultralight's thread: a view this frame draws is wanted (visible) and visible to Ultralight
+    // since the second sync: Render paints only those, so one shown since waits for the next frame instead of
+    // compositing a texture Render did not paint, and one hidden since is not drawn. needs_paint is sampled first, as
+    // rendering clears it.
+    static void SampleDrawnViews()
+    {
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        for (auto& vp : s_views) {
+            MlView& v = *vp;
+            const bool drawn = v.visible && v.ul && v.ul->is_visible();
+            v.repaintedThisFrame = drawn && v.ul->needs_paint();
+            if (drawn) {
+                v.prepainted = true;
+                v.settleRepaint = false;   // this frame's Render paints it
+            }
+        }
+    }
+
+    static void NotePrepaint(ViewId preId, bool preAgain, double renderMs)
+    {
+        static std::atomic<int> s_preLog{ 0 };
+        if (s_preLog.fetch_add(1) < 32)
+            SKSE::log::info("Magelight: view {} prepainted while hidden{} (this frame's render {:.1f} ms)", preId,
+                            preAgain ? " again, its page settled" : "", renderMs);
+    }
+
+    static void ThreadModeFrame(IDXGISwapChain* sc, float bw, float bh);   // fwd (the page thread, below)
+
     static void FrameWork(IDXGISwapChain* sc)
     {
         // Diagnostic: name every present-thread change (bounded — a session
@@ -8562,16 +8677,20 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             if (!s_worldReady.load() || tid != s_mainThreadId) return;
             EnsureRenderInit(sc);
+            // The page thread was refused (StartPageThread said why): the next frame starts Ultralight here, on the
+            // page fiber, as without pageThread.
+            if (!s_renderInit) return;
         }
         if (s_renderDead.load()) return;
-        if (tid != s_ulThreadId) {
+        if (tid != s_mainThreadId) {
             // A frame from a foreign thread (loading screens etc.): touching
-            // Ultralight here is the fastfail. Skip the whole frame.
+            // Ultralight here is the fastfail. Skip the whole frame. (The main
+            // thread is the one that composites, with or without the page thread.)
             static bool warned = false;
             if (!warned) {
                 warned = true;
                 SKSE::log::warn("Magelight: frame on foreign thread {} (owner {}) — skipping Ultralight work",
-                    tid, s_ulThreadId);
+                    tid, s_mainThreadId);
             }
             return;
         }
@@ -8584,6 +8703,11 @@ float4 ps_straight(VSOut i) : SV_Target {
             const int prevH = s_backbufferH.exchange(static_cast<int>(bh));
             if (prevW > 0 && prevH > 0 && (prevW != static_cast<int>(bw) || prevH != static_cast<int>(bh)))
                 Emit(HostEvent::DisplayResized, 0, static_cast<int>(bw), static_cast<int>(bh));
+        }
+        // pageThread: the page thread does the page work; this thread runs what it recorded and draws it.
+        if (PageThreadOn()) {
+            ThreadModeFrame(sc, bw, bh);
+            return;
         }
 
         PageWorkBegin(bw, bh);
@@ -8639,42 +8763,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         // While the UI pass is live the composite records its quads for it instead of drawing them over the
         // back buffer; published below every frame, an empty set included, so a hidden view leaves no trace.
         const bool interactiveVisible = AnyInteractiveViewVisible();
-        SyncOverlayMenu(interactiveVisible);
-        s_compositeFrames.fetch_add(1);
-        const bool defer = s_engineComposite.load() || (s_overlayMenuRegistered && UiPassActive());
-        if (!s_engineComposite.load()) NoteUiPassState(defer, interactiveVisible);
-        // The first deferred frame also draws here: the UI pass already ran this frame with nothing queued. Never in
-        // engine mode, where Present is not ours to draw into.
-        static bool s_deferredLast = false;
-        const bool drawNow = !defer || (!s_deferredLast && !s_engineComposite.load());
-        s_deferredLast = defer;
+        const CompositeTarget target = ChooseCompositeTarget(interactiveVisible);
+        const bool defer = target.defer;
         std::vector<QueuedQuad> queued;
-        const EmitFn emit = [&](ID3D11ShaderResourceView* qsrv, float u0, float v0, float u1, float v1,
-                        float x, float y, float w, float h, const float* cutUV) {
-            if (drawNow) DrawOverlay(sc, qsrv, u0, v0, u1, v1, x, y, w, h, cutUV);
-            if (!defer || !qsrv) return;
-            QueuedQuad q;
-            q.srv = qsrv; qsrv->AddRef();
-            q.u0 = u0; q.v0 = v0; q.u1 = u1; q.v1 = v1; q.x = x; q.y = y; q.w = w; q.h = h;
-            if (cutUV) { q.hasCut = true; std::memcpy(q.cut, cutUV, sizeof(q.cut)); }
-            queued.push_back(q);
-        };
+        const EmitFn emit = MakeEmit(sc, target, queued);
         if (anyVisible || pre) {
-            // A view this frame draws is wanted (visible) and visible to Ultralight since the sync above: Render paints
-            // only those, so one shown since waits for the next frame instead of compositing a texture Render did not
-            // paint, and one hidden since is not drawn. needs_paint is sampled first, as rendering clears it.
-            {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
-                for (auto& vp : s_views) {
-                    MlView& v = *vp;
-                    const bool drawn = v.visible && v.ul && v.ul->is_visible();
-                    v.repaintedThisFrame = drawn && v.ul->needs_paint();
-                    if (drawn) {
-                        v.prepainted = true;
-                        v.settleRepaint = false;   // this frame's Render paints it
-                    }
-                }
-            }
+            SampleDrawnViews();
             // One state capture brackets everything we do to the pipeline this
             // frame — Render (the driver's uploads run inside it), its command
             // list (which freely rebinds RTs/shaders/scissor) and every
@@ -8688,12 +8782,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (pre) pre->set_visible(false);
             frameUlRender = stageMs(stageAfterUpdate, ClockT::now());
             s_acc.ulRender += frameUlRender;
-            if (pre) {
-                static std::atomic<int> s_preLog{ 0 };
-                if (s_preLog.fetch_add(1) < 32)
-                    SKSE::log::info("Magelight: view {} prepainted while hidden{} (this frame's render {:.1f} ms)", preId,
-                                    preAgain ? " again, its page settled" : "", frameUlRender);
-            }
+            if (pre) NotePrepaint(preId, preAgain, frameUlRender);
             StateBackup::Neutralize(s_context);
             if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
             // Composite visible views in z-order ((layer, order) — the
@@ -8732,16 +8821,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 backup.Restore(s_context);
             }
         }
-        {
-            std::lock_guard<std::mutex> lk(s_uiPassMutex);
-            ReleaseQuads(s_uiPassQuads);
-            if (defer) {
-                s_uiPassQuads = std::move(queued);
-                s_uiPassBackW = bw;
-                s_uiPassBackH = bh;
-                s_uiPassPublished = std::chrono::steady_clock::now();
-            }
-        }
+        PublishUiPass(defer, queued, bw, bh);
         // VR presenter: runs every frame (an empty frame HIDES stale overlays);
         // no-op unless the runtime is live. Same thread as everything above.
         const auto stageBeforeVR = ClockT::now();
@@ -8891,8 +8971,9 @@ float4 ps_straight(VSOut i) : SV_Target {
     // garbage: 82-125 MB against 44-90, flat in both).
     // While it is held, a collection the collector starts waits for the thread to stop at a safepoint, which it
     // reaches only inside the frame work. Touched only on the fiber: WebKit keeps its per-thread state in fiber-local
-    // storage, so off the fiber the holder is a different thread to it. constinit and trivially destroyed: nothing
-    // runs at exit (invariant 3).
+    // storage, so off the fiber the holder is a different thread to it. With pageThread it is the page thread's
+    // instead (PageThreadMain), held between its frames for the speed alone; never both, as the mode is decided before
+    // the renderer exists. constinit and trivially destroyed: nothing runs at exit (invariant 3).
     static constinit PageStack::VmLock s_vmLock;
 
     // 0 no VM yet, 1 held, 2 taken now (the first VM, or WebKit made a new one), -1 the attempt faulted.
@@ -8937,6 +9018,335 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (auto* sessions = new (std::nothrow) std::map<std::string, ultralight::RefPtr<ultralight::Session>>())
             sessions->swap(s_sessions);
         if (auto* images = new (std::nothrow) std::vector<std::unique_ptr<MlImage>>()) images->swap(s_images);
+    }
+
+    // ── The page thread (1.7.0, "pageThread") ────────────────────────────────
+    // With it on, a thread of Magelight's own (PageThreadMain) owns Ultralight from Renderer::Create on: script,
+    // layout, Update, Render, and the GPU driver recording into a deferred context of the game's device. Each page
+    // frame ends in a PagePacket: its command list and what it drew. At Present the game thread (ThreadModeFrame)
+    // takes every finished packet, runs their lists in order on the immediate context, draws the newest packet's
+    // views and lets the page thread start its next frame. It never waits on the page thread, so a page stuck in a
+    // script freezes only itself (the watchdog names it). A recorded list keeps every resource it uses alive until it
+    // is released, and a packet's SRVs hold references of their own, so a View Ultralight frees meanwhile cannot pull
+    // a texture from under the game thread (tools/deferred-test). No fiber here: the thread's stack is WebKit's own,
+    // in a frame and between frames (tools/fiber-gc-test --thread passes without the VM lock); it holds the lock
+    // between frames for speed only (an idle frame about 13 us against 235). Flat only (PageThread::Decide).
+    struct PagePacket {
+        ID3D11CommandList* list = nullptr;     // the frame's recorded GPU work
+        PresentedFrame     views;              // what it drew: each srv holds a reference, `ul` stays empty
+        PagePacket() = default;
+        PagePacket(const PagePacket&) = delete;
+        PagePacket& operator=(const PagePacket&) = delete;
+        ~PagePacket()   // game thread; D3D references only
+        {
+            if (list) list->Release();
+            for (auto& pv : views)
+                if (pv.srv) pv.srv->Release();
+        }
+    };
+    static ID3D11DeviceContext*             s_pageContext = nullptr;   // the page thread's deferred context
+    static PageThread::Handoff<PagePacket>* s_pageHandoff = nullptr;   // made once and never freed (invariant 3)
+    static std::atomic<long long>           s_pageFrameSinceMs{ 0 };   // when the running page frame began; 0 = waiting
+    static std::atomic<const char*>         s_pageStage{ "" };         // where the running page frame is
+    static std::atomic<std::uint64_t>       s_pageFrames{ 0 };         // page frames made (the game thread's cost line)
+
+    static long long SteadyNowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // One page frame, on the page thread: FrameWork's page parts in their order, every drawn view collected with an
+    // SRV reference of its own, then the frame's list. Its own cost line every 2 s.
+    static void PageThreadFrame()
+    {
+        using ClockT = std::chrono::steady_clock;
+        const auto ms = [](ClockT::time_point a, ClockT::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const auto t0 = ClockT::now();
+        s_pageFrameSinceMs.store(SteadyNowMs());
+        const float bw = static_cast<float>(s_backbufferW.load());
+        const float bh = static_cast<float>(s_backbufferH.load());
+        s_pageStage.store("its page work (input, bridge, lifecycle)");
+        PageWorkBegin(bw, bh);
+        MaterializeImages();
+        s_pageStage.store("Renderer::Update");
+        s_ulRenderer->Update();
+        // The second sync and the prepaint as FrameWork has them (invariant 23).
+        SyncViewVisibility();
+        ViewId preId = 0;
+        bool preAgain = false;
+        ultralight::View* pre = TakePrepaintView(preId, preAgain, ms(t0, ClockT::now()));
+        if (pre) pre->set_visible(true);
+        s_ulRenderer->RefreshDisplay(0);
+        const auto tUpdated = ClockT::now();
+        s_lastUlUpdateMs = ms(t0, tUpdated);   // the next frame's load-queue budget (MaterializeViews)
+        auto packet = std::make_unique<PagePacket>();
+        s_pageStage.store("Renderer::Render");
+        if (AnyViewVisible() || pre) {
+            SampleDrawnViews();
+            s_ulRenderer->Render();
+            if (pre) pre->set_visible(false);
+            if (pre) NotePrepaint(preId, preAgain, ms(tUpdated, ClockT::now()));
+            if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (auto& vp : s_views) {
+                PresentedView pv;
+                if (CollectView(*vp, bw, bh, s_pageContext, true, pv)) packet->views.push_back(std::move(pv));
+            }
+        } else {
+            // Nothing shown: Render at least once a second all the same (invariant 22), as FrameWork does.
+            static ClockT::time_point s_lastIdleRender{};
+            if (tUpdated - s_lastIdleRender >= std::chrono::seconds(1)) {
+                s_lastIdleRender = tUpdated;
+                s_ulRenderer->Render();
+                if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
+            }
+        }
+        s_pageStage.store("FinishCommandList");
+        if (const HRESULT hr = s_pageContext->FinishCommandList(FALSE, &packet->list); FAILED(hr)) {
+            packet->list = nullptr;
+            static std::atomic<int> s_finishLogs{ 0 };
+            if (s_finishLogs.fetch_add(1) < 4)
+                SKSE::log::error("Magelight: FinishCommandList failed (0x{:08X}) - this page frame's GPU work is lost",
+                                 static_cast<unsigned>(hr));
+        }
+        const auto tEnd = ClockT::now();
+        s_pageStage.store("its memory report");
+        TickMemoryReport();
+        s_pageHandoff->Push(std::move(packet));
+        s_pageFrames.fetch_add(1);
+        s_pageFrameSinceMs.store(0);
+        s_pageStage.store("");
+
+        struct Acc {
+            double update = 0, render = 0, worst = 0;
+            int    frames = 0;
+            ClockT::time_point last{};
+        };
+        static Acc acc;
+        acc.update += ms(t0, tUpdated);
+        acc.render += ms(tUpdated, tEnd);
+        acc.worst = (std::max)(acc.worst, ms(t0, tEnd));
+        ++acc.frames;
+        if (acc.last == ClockT::time_point{}) acc.last = tEnd;
+        if (tEnd - acc.last >= std::chrono::seconds(2)) {
+            const double n = static_cast<double>(acc.frames);
+            SKSE::log::info("Magelight: page thread over {} frames - ul.update {:.2f}ms, ul.render {:.2f}ms, total avg "
+                            "{:.2f}ms, WORST {:.2f}ms, {:.0f} frames/s",
+                            acc.frames, acc.update / n, acc.render / n, (acc.update + acc.render) / n, acc.worst,
+                            n * 1000.0 / ms(acc.last, tEnd));
+            acc = Acc{};
+            acc.last = tEnd;
+        }
+    }
+
+    // The stall watchdog's look at the page thread: a page frame running 5 s or more is named once, with the thread's
+    // stack (a script that never returns, a page stuck in layout). The game is not stalled by it; nothing is done.
+    static void CheckPageThreadStall()
+    {
+        static long long s_reported = 0;   // the start of the page frame last reported
+        if (!PageThreadOn()) return;
+        const long long since = s_pageFrameSinceMs.load();
+        if (!since || since == s_reported) return;
+        const long long running = SteadyNowMs() - since;
+        if (running < 5000) return;
+        s_reported = since;
+        SKSE::log::warn("Magelight: the page thread has been in {} for {} s - its pages are frozen; the game goes on",
+                        s_pageStage.load(), running / 1000);
+        LogThreadStack(s_ulThreadId, "page", running);
+    }
+
+    // SEH wrappers — no locals with destructors allowed in here.
+    static bool GuardedPageInit()
+    {
+        __try {
+            return CreateUltralight(s_pageContext);
+        } __except (LogSehAndDisable("the page thread's start", GetExceptionCode(),
+                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+            return false;
+        }
+    }
+
+    static void GuardedPageFrame()
+    {
+        __try {
+            PageThreadFrame();
+        } __except (LogSehAndDisable("page frame work", GetExceptionCode(),
+                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        }
+    }
+
+    static DWORD WINAPI PageThreadMain(void*)
+    {
+        // Room on this stack for the overflow handler's own work (a guarantee is per thread), as on the page fiber.
+        ULONG guarantee = 64 * 1024;
+        SetThreadStackGuarantee(&guarantee);
+        // Posts made here go through the pump, in order, as posts made inside Present do (MagelightGameTask.h).
+        GameTask::Scope scope;
+        if (GuardedPageInit()) {
+            std::atexit(&LeaveUltralightAtExit);
+            SKSE::log::info("Magelight: render-thread init complete (the page thread {} owns Ultralight)",
+                            GetCurrentThreadId());
+            s_rendererUp.store(true);
+            for (;;) {
+                s_pageHandoff->WaitGo(nullptr, INFINITE);
+                if (s_renderDead.load()) break;
+                GuardedPageFrame();
+                // After every frame (one an exception ended included), near the top of this thread's stack, where
+                // WebKit counts script depth from: the page VM's lock, held from the first frame with a VM on. For speed
+                // (WebKit's own locks become recursive): nothing depends on it here, unlike on the page fiber.
+                if (!s_renderDead.load() && GuardedHoldVmLock() == 2)
+                    SKSE::log::info("Magelight: WebKit's VM is up ({}); the page thread holds its lock between frames",
+                                    s_vmLock.Vm());
+            }
+        } else {
+            NoteRenderFailure("the page thread could not start Ultralight");   // a no-op when a step already said why
+            s_renderDead.store(true);
+            SKSE::log::error("Magelight: render-thread init failed on the page thread — overlay disabled");
+        }
+        // The overlay is off: the thread never touches Ultralight again, and never returns (WebKit's per-thread state
+        // would be torn down on the way out).
+        for (;;) Sleep(INFINITE);
+    }
+
+    // Render init, game thread, with the device resources made: whether this game and device can carry the page
+    // thread and, if so, its deferred context, its handoff and the thread. False: the mode is Off (the log line says
+    // why) and render init runs again next frame, on the page fiber.
+    static bool StartPageThread()
+    {
+        ID3D11DeviceContext* deferred = nullptr;
+        const bool deferredOk = SUCCEEDED(s_device->CreateDeferredContext(0, &deferred)) && deferred;
+        PageThread::Refusal r = PageThread::Decide(REL::Module::IsVR(), s_device->GetCreationFlags(), deferredOk);
+        const int stackMb = s_ulFiberMb > 0 ? s_ulFiberMb : kMinFiberMb;
+        HANDLE thread = nullptr;
+        if (!r.refused) {
+            s_pageContext = deferred;
+            if (!s_pageHandoff) s_pageHandoff = new (std::nothrow) PageThread::Handoff<PagePacket>();
+            s_pageThreadMode.store(static_cast<int>(PageThread::Mode::On));   // before the thread: CreateUltralight reads it
+            if (s_pageHandoff)
+                thread = PageThread::StartThread(&PageThreadMain, nullptr, stackMb, L"Magelight page thread");
+            if (!thread) {
+                r = { true, "the page thread could not be created" };
+                s_pageContext = nullptr;
+            }
+        }
+        if (r.refused) {
+            if (deferred) deferred->Release();
+            s_pageThreadMode.store(static_cast<int>(PageThread::Mode::Off));
+            SKSE::log::warn("Magelight: the page thread is off - {}; pages run in the game's frame", r.why);
+            return false;
+        }
+        s_ulThreadId = GetThreadId(thread);
+        CloseHandle(thread);   // the thread runs on; the host never joins it
+        D3D11_FEATURE_DATA_THREADING threading{};
+        const bool known = SUCCEEDED(s_device->CheckFeatureSupport(D3D11_FEATURE_THREADING, &threading, sizeof(threading)));
+        SKSE::log::info("Magelight: pages run on a thread of their own ({}, {} MB stack); the graphics driver's command "
+                        "lists are {}", s_ulThreadId, stackMb,
+                        !known ? "unknown" : threading.DriverCommandLists ? "native" : "emulated by Direct3D");
+        return true;
+    }
+
+    // The frame at Present with the page thread: the game thread's bookkeeping, every page frame finished since the
+    // last Present run in order, the newest one's views drawn, the next page frame let go. Never waits on the page
+    // thread: until it has finished a frame there is simply nothing new to draw.
+    static void ThreadModeFrame(IDXGISwapChain* sc, float bw, float bh)
+    {
+        using ClockT = std::chrono::steady_clock;
+        const auto ms = [](ClockT::time_point a, ClockT::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        const auto t0 = ClockT::now();
+        GameBookkeeping();
+        TickImageProbe();
+        std::vector<std::unique_ptr<PagePacket>> packets;
+        if (s_pageHandoff) {
+            packets = s_pageHandoff->TakeAll();
+            s_pageHandoff->Go();   // the next page frame overlaps this frame's execute and draws
+        }
+        // The newest page frame's views, drawn until a newer frame comes. Never freed at exit: its references are
+        // Direct3D's, which may be gone by then.
+        static PagePacket* s_held = nullptr;
+        const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
+        // The views wanted now, read here rather than from the page frame: one hidden since (Escape, a mod's hide) is
+        // not drawn even when the page thread is slow or stuck in a script. The page thread never runs script under
+        // the registry's lock (invariant 16), so this short walk never waits on a page.
+        static std::vector<ViewId> s_wanted;
+        s_wanted.clear();
+        bool anyVisible = false, interactiveVisible = false;
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            for (const auto& v : s_views) {
+                if (!v->visible) continue;
+                anyVisible = true;
+                interactiveVisible = interactiveVisible || !v->clickThrough;
+                s_wanted.push_back(v->id);
+            }
+        }
+        const CompositeTarget target = ChooseCompositeTarget(interactiveVisible);
+        std::vector<QueuedQuad> queued;
+        const EmitFn emit = MakeEmit(sc, target, queued);
+        bool lists = false;
+        for (const auto& p : packets) lists = lists || p->list;
+        const auto tPrelude = ClockT::now();
+        auto tExecuted = tPrelude;
+        if (lists || anyVisible) {
+            // One state capture brackets the lists (they start from default state and leave it, so a predicate the
+            // game set cannot drop an upload) and every composite draw.
+            StateBackup backup;
+            backup.Capture(s_context);
+            for (auto& p : packets) {
+                if (!p->list) continue;
+                s_context->ExecuteCommandList(p->list, FALSE);
+                p->list->Release();
+                p->list = nullptr;
+            }
+            tExecuted = ClockT::now();
+            StateBackup::Neutralize(s_context);
+            if (newest)
+                for (const auto& pv : newest->views)
+                    if (std::find(s_wanted.begin(), s_wanted.end(), pv.id) != s_wanted.end()) EmitView(pv, emit);
+            EmitCursor(anyVisible, bw, bh, emit);
+            backup.Restore(s_context);
+        }
+        PublishUiPass(target.defer, queued, bw, bh);
+        if (!packets.empty()) {
+            delete s_held;
+            s_held = packets.back().release();
+        }
+        const auto tEnd = ClockT::now();
+
+        struct Acc {
+            double prelude = 0, execute = 0, composite = 0, worst = 0;
+            int    frames = 0, withoutNew = 0;
+            std::uint64_t pageFramesAtLast = 0;
+            ClockT::time_point last{};
+        };
+        static Acc acc;
+        acc.prelude += ms(t0, tPrelude);
+        acc.execute += ms(tPrelude, tExecuted);
+        acc.composite += ms(tExecuted, tEnd);
+        acc.worst = (std::max)(acc.worst, ms(t0, tEnd));
+        ++acc.frames;
+        if (packets.empty()) ++acc.withoutNew;
+        if (acc.last == ClockT::time_point{}) {
+            acc.last = tEnd;
+            acc.pageFramesAtLast = s_pageFrames.load();
+        }
+        if (tEnd - acc.last >= std::chrono::seconds(2)) {
+            const double n = static_cast<double>(acc.frames);
+            const std::uint64_t pageFrames = s_pageFrames.load();
+            SKSE::log::info("Magelight: present cost over {} frames - prelude {:.2f}ms, execute {:.2f}ms, composite "
+                            "{:.2f}ms, total avg {:.2f}ms, WORST {:.2f}ms (uiMode={}, views={}, page thread: {} frames, "
+                            "{} presents without a new one)",
+                            acc.frames, acc.prelude / n, acc.execute / n, acc.composite / n,
+                            (acc.prelude + acc.execute + acc.composite) / n, acc.worst, s_focused.load(),
+                            s_held ? s_held->views.size() : 0, pageFrames - acc.pageFramesAtLast, acc.withoutNew);
+            acc = Acc{};
+            acc.last = tEnd;
+            acc.pageFramesAtLast = pageFrames;
+        }
     }
 
     // False: the frame work runs on the caller's stack, as before 1.3.0. Decided once, before the renderer exists.
@@ -9013,7 +9423,9 @@ float4 ps_straight(VSOut i) : SV_Target {
     static void GuardedFrameWork(IDXGISwapChain* sc)
     {
         // Before the world is ready the frame work returns before any Ultralight call, so the fiber can start here.
-        if (GetCurrentThreadId() == s_mainThreadId) {
+        // With the page thread asked for or running, this thread makes no Ultralight call at all: no fiber (a refusal
+        // turns the mode Off before the renderer exists, so the fiber can still start then).
+        if (GetCurrentThreadId() == s_mainThreadId && s_pageThreadMode.load() == static_cast<int>(PageThread::Mode::Off)) {
             // Called from inside the frame work itself (no path does today): the frame is already being worked.
             if (s_ulFiber && IsThreadAFiber() && GetCurrentFiber() == s_ulFiber) return;
             const bool fiber = EnsureUlFiber();
