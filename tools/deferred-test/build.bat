@@ -20,6 +20,8 @@ if not exist "%OUT%" mkdir "%OUT%"
 cl /nologo /std:c++20 /Zc:char8_t- /EHsc /W4 /WX /O2 /MD /utf-8 /external:W0 /external:I "%UL%\include" "%~dp0deferred_test.cpp" /Fo"%OUT%\\" /Fe"%OUT%\deferred_test.exe" /link /LIBPATH:"%UL%\lib" Ultralight.lib UltralightCore.lib WebCore.lib AppCore.lib d3d11.lib user32.lib || exit /b 1
 copy /y "%UL%\bin\*.dll" "%OUT%" >nul
 set "EXE=%OUT%\deferred_test.exe"
+rem Ultralight writes its log into the working folder: keep it in OUT.
+pushd "%OUT%"
 set FAILS=0
 for %%P in ("%~dp0pages\mixed.html" "%ROOT%\tools\desktop-harness\pages\translucent-borders.html") do (
   for %%M in (1 4) do (
@@ -49,5 +51,6 @@ echo == release case, mixed.html, msaa 4
 "%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode thread --msaa 4 --case release --out "%OUT%\b.raw" || (echo FAIL: release thread run& set /a FAILS+=1)
 "%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: release case differs& set /a FAILS+=1)
 echo.
+popd
 if %FAILS% EQU 0 (echo ALL MATCH) else (echo FAILED: %FAILS%)
 exit /b %FAILS%
