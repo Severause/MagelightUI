@@ -472,8 +472,11 @@ namespace MAGELIGHT_API {
         bool startInCursorMode;          // needs allowCursor
         // One control per action, 0 = the default; actions in this order: up, down, left, right (default the
         // d-pad), accept (south), cancel (east), previousTab (left shoulder), nextTab (right shoulder), secondary
-        // (west), tertiary (north), toggleCursor (right-stick click). Each control on one action at most.
+        // (west), tertiary (north), toggleCursor (right-stick click). Each control on one action at most, and a
+        // slot left 0 keeps its default control, which counts: moving a control to another action means
+        // rebinding the action that had it. No action can be left unbound.
         std::uint8_t bindings[11];
+        // 1.6.0 ends here (size 28); fields a later host adds start at offset 28.
     };
     struct GamepadState {
         std::uint32_t size;              // = sizeof(GamepadState), set by the caller
@@ -845,9 +848,9 @@ namespace MAGELIGHT_API {
         // ── appended in 1.6.0 — gate on hostVersionNumber >= 10600 and QueryCapability("gamepad") ──
         // Opt a view in to the gamepad layer (see GamepadConfig), or out with
         // nullptr or enabled false. Kept across reloads and hibernation, ended by
-        // DestroyView. The view holds the pad only while it holds UI mode, its
-        // page has loaded, the game window has focus and no engine menu that
-        // takes menu input is open above it. Flat only: QueryCapability("gamepad")
+        // DestroyView. The view holds the pad only while it holds UI mode, the
+        // page core of its current document has started, the game window has
+        // focus and no engine menu that takes menu input is open above it. Flat only: QueryCapability("gamepad")
         // is 0 on VR (the laser) and when the player switched the layer off.
         // A mod with its own gamepad bridge steps it aside where the capability
         // is 1: opt the view in with kGamepadStyleKeys and stop the bridge for
@@ -858,7 +861,9 @@ namespace MAGELIGHT_API {
         // which). Nothing changes on a failure.
         Result (*SetViewGamepad)(ViewId view, const GamepadConfig* config);
         // The view's opt-in and the pad as the host last saw it (*out filled;
-        // out->size set by the caller). Any thread.
+        // out->size set by the caller). Any thread. InvalidArgument for a null
+        // out or a size below the 1.6.0 struct; InvalidView for a view that is
+        // gone or an inspector.
         Result (*GetViewGamepadState)(ViewId view, GamepadState* out);
     };
 

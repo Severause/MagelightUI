@@ -53,7 +53,8 @@ export interface GamepadState {
   /** the device in use, also on `<html data-ml-input>` */
   device: 'gamepad' | 'keyboardMouse';
   glyphFamily: 'xbox' | 'playstation' | 'generic';
-  bindings: Readonly<Record<GamepadAction, GamepadControl>>;
+  /** empty until the host's first packet (a view that never opted in keeps it empty) */
+  bindings: Readonly<Partial<Record<Exclude<GamepadAction, 'none'>, GamepadControl>>>;
   generation: number;
 }
 

@@ -198,14 +198,17 @@ if (pad) {
 - **Scopes.** `attachNavigation({ root, initialFocus, onBack, onAction, wrap, getCandidates })` returns a
   dispose. The newest scope moves focus; a modal attaches its own and disposes it when it closes, which gives the
   page under it back its selection. Candidates are the visible, enabled buttons, inputs, selects, textareas,
-  links, `[tabindex]` elements and `[data-ml-focusable]` elements inside `root` (`getCandidates` for a custom or
+  links, `[tabindex]` elements and `[data-ml-focusable]` elements inside `root` (a marked element with no `tabindex`
+  gets `tabindex="-1"` when it is focused, so it stays out of the Tab order; `getCandidates` for a custom or
   virtualised list). Directions move by geometry, as drawn (CSS `zoom` included); `data-ml-up`, `-down`, `-left`
   and `-right` on a control name the control (by id or `data-ml-id`) that direction goes to. A control removed or
-  re-rendered keeps the selection when its id or `data-ml-id` is the same.
+  re-rendered keeps the selection when its id or `data-ml-id` is the same. The helper moves DOM focus only while the
+  pad is in use; otherwise it only tracks and marks its selection, so keyboard and mouse use is as without it.
 - **What the defaults do.** Accept clicks; on a range, a select or a text field it enters edit mode, where
   directions step the range or the select (`input` and `change` fire) and leave a text field alone (free text needs
-  a keyboard). Cancel leaves edit mode first, then calls `onBack`. The shoulders cycle `role="tab"` buttons by
-  clicking the next one. The right stick scrolls the nearest scrollable container.
+  a keyboard). Cancel leaves edit mode first, then calls `onBack`. The shoulders click the `role="tab"` button
+  before or after the one with `aria-selected="true"`, stopping at the ends, so the page keeps `aria-selected` up to
+  date. The right stick scrolls the nearest scrollable container.
 - **B and Escape.** B follows Escape's rule: it closes the view unless the page holds Escape
   (`magelight.send('__escapecapture', '1')`, or the plugin's `SetEscapeCapture`), and only then does the page get
   `cancel`. A page that takes Escape for B handles keyboard Escape too, as above. The helper never takes Escape
@@ -217,7 +220,8 @@ if (pad) {
   says when it changes. Both work in the keys style too.
 - **Events.** `onAction` sees every input first: `{ control, action, phase, value, x, y, dt }`, phase `press`,
   `release`, `repeat` (a held direction), `change` (a stick, every batch while off centre, with `x` and `y`) or
-  `cancel` (the pad changed hands or the page reloaded: stop anything a held button was doing). Controls are
+  `cancel` (the pad changed hands, the view lost it, or the host dropped a flooded batch: stop anything a held button
+  was doing). Controls are
   positional (`south`, `east`, `leftShoulder`, `rightStick`); triggers, start and back arrive with action `none`.
 - **Cursor mode.** Where the view allows it, a right-stick click (or `setMode('cursor')`) switches to a cursor the
   left stick moves; A clicks there. A direction press, or `setMode('navigation')`, goes back.

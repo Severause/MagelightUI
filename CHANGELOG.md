@@ -82,7 +82,7 @@ when the player switched the layer off).
   and needs no script (`"gamepad": true` in a manifest). `navigation` hands the page actions (up, down, left, right,
   accept, cancel, previous and next tab, secondary, tertiary, the cursor toggle) through `window.magelight.gamepad`,
   which moves focus between the controls of the scopes the page attaches (`attachNavigation`, newest scope first, a
-  modal's dispose restoring the page's selection), cycles `role=tab` buttons on the shoulders, edits range and select
+  modal's dispose restoring the page's selection), steps through `role=tab` buttons on the shoulders, edits range and select
   controls in place, scrolls with the right stick and labels buttons for prompts (`getPrompt`). The focused control
   carries `data-ml-focused`; `<html>` carries `data-ml-input` (`gamepad` | `keyboardMouse`) for styling. B follows
   Escape's rule in both styles: it closes the view unless the page holds Escape (`SetEscapeCapture` /

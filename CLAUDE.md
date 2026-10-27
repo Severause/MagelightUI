@@ -253,7 +253,8 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     (`src/GamepadCore.h`, decided in the input sink on the game thread), every
     pad event ends at the sink, unlinked like a typed key, and each release
     goes where its press went (a press the game saw keeps its release; one the
-    page owned never reaches the game). Every engine pad event passes the
+    page owned ends at the sink, and the controls hold of invariant 7 keeps the
+    engine's own handlers, which run first, off it). Every engine pad event passes the
     router whether or not a view holds the pad, or that bookkeeping breaks. A plugin that polls
     user32 `GetAsyncKeyState` / `GetKeyState` itself gets keyboard keys as up
     (the Polled keys block in Magelight.cpp), except the UI-mode owner's DLL,

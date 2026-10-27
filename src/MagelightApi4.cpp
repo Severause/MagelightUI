@@ -1653,15 +1653,31 @@ namespace Magelight::Api4 {
         return Result::Ok;
     }
 
-    // 1.6.0 (Magelight::SetViewGamepad, GamepadCore.h).
+    // 1.6.0 (Magelight::SetViewGamepad, GamepadCore.h). The public numbers are GamepadCore's enums cast straight
+    // across: these pin them, so reordering an enum cannot silently remap every shipped consumer's config.
+    namespace Gp = Magelight::Gamepad;
+    static constexpr std::uint32_t kGamepadConfigSize = 28, kGamepadStateSize = 24;   // as released in 1.6.0
+    static_assert(sizeof(MAGELIGHT_API::GamepadConfig) == kGamepadConfigSize, "GamepadConfig grew: read the new fields");
+    static_assert(sizeof(MAGELIGHT_API::GamepadState) == kGamepadStateSize, "GamepadState grew: fill the new fields");
+    static_assert(std::size(MAGELIGHT_API::GamepadConfig{}.bindings) == Gp::kBindingCount);
+    static_assert(Gp::Index(Gp::Control::DpadUp) == 1 && Gp::Index(Gp::Control::DpadRight) == 4 &&
+                  Gp::Index(Gp::Control::Start) == 5 && Gp::Index(Gp::Control::RightShoulder) == 10 &&
+                  Gp::Index(Gp::Control::South) == 11 && Gp::Index(Gp::Control::North) == 14);
+    static_assert(static_cast<std::uint32_t>(Gp::Style::Keys) == MAGELIGHT_API::kGamepadStyleKeys &&
+                  static_cast<std::uint32_t>(Gp::Style::Navigation) == MAGELIGHT_API::kGamepadStyleNavigation);
+    static_assert(static_cast<std::uint32_t>(Gp::Mode::Navigation) == MAGELIGHT_API::kGamepadModeNavigation &&
+                  static_cast<std::uint32_t>(Gp::Mode::Cursor) == MAGELIGHT_API::kGamepadModeCursor);
+    static_assert(static_cast<std::uint32_t>(Gp::Glyphs::Xbox) == MAGELIGHT_API::kGamepadGlyphsXbox &&
+                  static_cast<std::uint32_t>(Gp::Glyphs::PlayStation) == MAGELIGHT_API::kGamepadGlyphsPlayStation &&
+                  static_cast<std::uint32_t>(Gp::Glyphs::Generic) == MAGELIGHT_API::kGamepadGlyphsGeneric);
+
     Result SetViewGamepad(ViewId view, const MAGELIGHT_API::GamepadConfig* config)
     {
         if (const Result g = GateView(view, "SetViewGamepad"); g != Result::Ok) return g;
-        namespace Gp = Magelight::Gamepad;
         Gp::ViewConfig cfg;   // enabled false: the pad is the game's
         if (config) {
             const ModId owner = OwnerOf(view);
-            if (config->size < sizeof(MAGELIGHT_API::GamepadConfig))
+            if (config->size < kGamepadConfigSize)
                 return Fail(owner, Result::InvalidArgument, "SetViewGamepad: config->size is below the 1.6.0 GamepadConfig");
             if (config->style > MAGELIGHT_API::kGamepadStyleNavigation)
                 return Fail(owner, Result::InvalidArgument, "SetViewGamepad: unknown style " + std::to_string(config->style));
@@ -1687,10 +1703,10 @@ namespace Magelight::Api4 {
     Result GetViewGamepadState(ViewId view, MAGELIGHT_API::GamepadState* out)
     {
         if (const Result g = GateView(view, "GetViewGamepadState"); g != Result::Ok) return g;
-        if (!out || out->size < sizeof(MAGELIGHT_API::GamepadState))
+        if (!out || out->size < kGamepadStateSize)
             return Fail(OwnerOf(view), Result::InvalidArgument, "GetViewGamepadState: out->size is below the 1.6.0 GamepadState");
-        Magelight::Gamepad::ViewConfig cfg;
-        Magelight::Gamepad::Mode mode = Magelight::Gamepad::Mode::Navigation;
+        Gp::ViewConfig cfg;
+        Gp::Mode mode = Gp::Mode::Navigation;
         bool capturing = false;
         std::uint64_t generation = 0;
         if (!Magelight::GetViewGamepad(view, &cfg, &capturing, &mode, &generation))

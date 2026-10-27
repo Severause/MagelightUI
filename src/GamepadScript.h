@@ -3,7 +3,7 @@
 // idle until the host sends a packet for an opted-in view on the reserved '__gamepad' channel (GamepadCore.h
 // PacketJson). In the navigation style it moves focus between the controls of the scopes the page attaches, by
 // geometry; in the keys style the host types the pad as keys and the helper only keeps the state (device, glyphs) for
-// the page's prompts. Ported from Meridian UI's MeridianInput; tools/gamepad-page-test runs it in Ultralight's WebKit.
+// the page's prompts. tools/gamepad-page-test runs it in Ultralight's WebKit.
 
 namespace Magelight::Gamepad {
 
@@ -21,8 +21,9 @@ function isText(e){return !!e&&(e.isContentEditable||e.tagName==='TEXTAREA'||(e.
   ['button','checkbox','radio','submit','reset','file','image','hidden','range','color'].indexOf(e.type)<0));}
 function identity(e){return (e&&e.getAttribute&&(e.getAttribute('data-ml-id')||e.id))||'';}
 function top(){return scopes[scopes.length-1];}
+function marked(e){return e.hasAttribute('data-ml-focusable');}
 function visible(e){
-  if(!e||!e.isConnected||e.tabIndex<0||e.matches(':disabled,[aria-disabled=true]')||e.closest('[hidden],[inert],[aria-hidden=true]'))return false;
+  if(!e||!e.isConnected||(e.tabIndex<0&&!marked(e))||e.matches(':disabled,[aria-disabled=true]')||e.closest('[hidden],[inert],[aria-hidden=true]'))return false;
   var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.visibility!=='collapse'&&e.getClientRects().length>0;}
 function candidates(scope){
   if(!scope||!scope.root.isConnected)return [];
@@ -35,6 +36,10 @@ function focus(scope,e){
   if(!e||!visible(e))return;
   if(editing&&editing!==e)editing=null;
   mark(e);scope.selected=e;scope.selectedId=identity(e);
+  // DOM focus only while the pad is in use: a scope that recovers from a DOM change must not pull focus out of a
+  // field the player is typing in with the keyboard.
+  if(!state.active||state.device!=='gamepad')return;
+  if(marked(e)&&!e.hasAttribute('tabindex'))e.setAttribute('tabindex','-1');   // focusable by script, still out of Tab order
   e.focus({preventScroll:true});
   if(e.scrollIntoView)e.scrollIntoView({block:'nearest',inline:'nearest'});}
 function recover(scope){
@@ -74,7 +79,7 @@ function adjust(e,dir){
   if(e.matches('select')){
     var d=dir==='up'||dir==='left'?-1:1,n=e.selectedIndex+d;
     while(n>=0&&n<e.options.length&&e.options[n].disabled)n+=d;
-    if(n>=0&&n<e.options.length){e.selectedIndex=n;fire(e,'change');}}}
+    if(n>=0&&n<e.options.length){e.selectedIndex=n;fire(e,'input');fire(e,'change');}}}
 function scroll(scope,ev){
   if(!ev.x&&!ev.y)return;
   var t=state.mode==='cursor'?document.elementFromPoint(lastX,lastY):scope.selected;

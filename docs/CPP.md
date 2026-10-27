@@ -746,8 +746,8 @@ if (v4()->QueryCapability("auxbuttons") == 1) {
 
 ## A gamepad (1.6.0)
 
-`SetViewGamepad` opts a view in to the gamepad layer: while the view holds UI mode on flat, the pad is its page's and
-the game, and the input sinks registered after Magelight's, get none of it. Gate on `hostVersionNumber >= 10600`
+`SetViewGamepad` opts a view in to the gamepad layer: while the view holds UI mode on flat, the pad is its page's: the
+input sinks registered after Magelight's get none of it, and UI mode's menu context keeps the game's own controls off it. Gate on `hostVersionNumber >= 10600`
 and `QueryCapability("gamepad") == 1` (0 on VR, where the laser is, and when the player switched the layer off).
 
 ```cpp

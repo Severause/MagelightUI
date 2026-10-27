@@ -1,8 +1,8 @@
 #pragma once
 // The gamepad layer (1.6.0): who owns the pad, dead zones, repeat, and the held-button rules that keep a press from
 // acting twice (on the page and in the game). Engine-free, so tools/gamepad-test runs it on the desktop; the input
-// sink feeds it the engine's gamepad events on the game thread. Ported from Meridian UI's Meridian.Input/1, whose
-// control, action and phase names pages see unchanged.
+// sink feeds it the engine's gamepad events on the game thread. Pages see the control, action and phase names below:
+// renaming one breaks them.
 
 #include <algorithm>
 #include <array>
@@ -92,7 +92,7 @@ namespace Magelight::Gamepad {
         bool trace = false;
         float deadZone = 0.25f;
         float exitDeadZone = 0.18f;
-        float cursorSpeed = 900.0f;      // reference px/s at a view height of 1080
+        float cursorSpeed = 900.0f;      // px/s on a 1080-high back buffer, scaled with its height
         double repeatDelay = 0.35;
         double repeatInterval = 0.09;
         Glyphs glyphs = Glyphs::Xbox;
@@ -155,13 +155,15 @@ namespace Magelight::Gamepad {
     };
 
     struct Transition {
-        bool consume = false;    // the host unlinks the event: no later sink, and not the game, sees it
+        bool consume = false;    // the host unlinks the event: no sink registered after Magelight's sees it
         Phase phase = Phase::None;
     };
 
     // Per-control physical state and who owns each press. A control that is off neutral when the owner changes is
     // blocked until it returns to neutral, so the button that opened or closed a page never acts in the next owner.
-    // A release goes where its press went: to the game if the game saw the press, nowhere if a page owned it.
+    // A release goes where its press went: on down the event chain if the game saw the press, ended at the sink if a
+    // page owned it (the engine's own handlers, which run first, are kept off by UI mode's menu context and the
+    // controls hold).
     class Ledger {
     public:
         Tuning tuning;
@@ -363,7 +365,7 @@ namespace Magelight::Gamepad {
     };
 
     struct PointerOut {
-        float dx = 0.0f, dy = 0.0f;      // reference px; the host scales by the view's height / 1080
+        float dx = 0.0f, dy = 0.0f;      // px on a 1080-high back buffer; the host scales by its height / 1080
         std::vector<bool> buttons;       // left button: true down, false up, in order
         bool release = false;            // release a left press the cursor still holds
     };
@@ -420,7 +422,7 @@ namespace Magelight::Gamepad {
         bool Button(Control c, float value)
         {
             const bool active = m_ledger.Owner() != 0;
-            if (c == Control::None) return active;   // a pad control we do not name stays out of the game too
+            if (c == Control::None) return active;   // a pad control we do not name ends at the sink too
             const Transition t = m_ledger.Button(c, value);
             if (t.phase == Phase::Press) NoteGamepadDevice();
             if (!active || t.phase == Phase::None) return t.consume;
@@ -592,7 +594,7 @@ namespace Magelight::Gamepad {
         const std::vector<Event>* events = nullptr;
     };
 
-    // The '__gamepad' message the page core's helper reads: Meridian.Input/1's packet plus the view's style.
+    // The '__gamepad' message the page core's helper reads (GamepadScript.h receive).
     inline std::string PacketJson(const PacketIn& p)
     {
         const auto num = [](double v) {

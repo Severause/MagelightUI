@@ -51,6 +51,24 @@
   function done() { if (dispose) dispose(); dispose = null; }
 
   var cases = [
+    // Before any packet (no pad in use) the helper marks its selection but takes no DOM focus, and a DOM change in
+    // its scope does not pull focus out of a text field the player is typing in.
+    { name: 'no_focus_taken_without_pad', steps: [
+      function () {
+        stage('<input type="text" id="q" style="left:600px;top:100px">' +
+              '<div id="cards"><button id="c0" style="left:100px;top:100px">0</button>' +
+              '<button id="c1" style="left:100px;top:160px">1</button></div>');
+        document.getElementById('q').focus();
+        attach({ root: document.getElementById('cards'), initialFocus: 'c1' });
+        document.getElementById('c1').remove();   // the selected card filtered out while typing
+      },
+      function () {
+        var active = document.activeElement && document.activeElement.id, marked = focusedId();
+        done();
+        return result(active === 'q' && marked === 'c0', 'active=' + active + ' marked=' + marked);
+      }
+    ] },
+
     { name: 'ready_sent_once', steps: [function () {
       var ready = sent.filter(function (m) { return m.ch === '__gamepad'; })
                       .map(function (m) { return JSON.parse(m.p); })
@@ -168,6 +186,31 @@
                     valueAfter === '6' && sel === 1 && backs === 1,
                     'value=' + value + ' inputs=' + inputs + ' changes=' + changes + ' backs=' + backsAfterLeave + '/' +
                     backs + ' next=' + next + ' sel=' + sel);
+    }] },
+
+    // A div marked data-ml-focusable, with no tabindex, is a control the pad can reach and focus.
+    { name: 'focusable_marker_without_tabindex', steps: [function () {
+      stage('<button id="f0" style="left:100px;top:100px">a</button>' +
+            '<div id="f1" data-ml-focusable style="position:absolute;left:300px;top:100px;width:80px;height:40px">b</div>');
+      attach({ root: document.getElementById('stage'), initialFocus: 'f0' });
+      press('right');
+      var to = focusedId(), active = document.activeElement && document.activeElement.id;
+      done();
+      return result(to === 'f1' && active === 'f1', to + ' active=' + active);
+    }] },
+
+    // A select edited with the pad fires input before change, as a browser does.
+    { name: 'select_edit_fires_input', steps: [function () {
+      stage('<select id="se" style="left:100px;top:100px"><option>a</option><option>b</option></select>');
+      var s = document.getElementById('se'), events = [];
+      s.addEventListener('input', function () { events.push('input'); });
+      s.addEventListener('change', function () { events.push('change'); });
+      attach({ root: document.getElementById('stage'), initialFocus: 'se' });
+      press('accept');
+      press('down');
+      press('cancel');
+      done();
+      return result(events.join(',') === 'input,change' && s.selectedIndex === 1, events.join(',') + ' sel=' + s.selectedIndex);
     }] },
 
     { name: 'text_field_ignores_directions', steps: [function () {

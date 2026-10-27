@@ -6,7 +6,7 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v1.1.0 loading`); the lines after it name the game (SE, AE or VR, its version and
+version (`Magelight v1.6.0 loading`); the lines after it name the game (SE, AE or VR, its version and
 SKSE's), Windows (or the Wine under Proton), the CPU and RAM, and, once the game's data has loaded,
 every graphics adapter with its driver version, the one the game renders on marked. Paths in the
 log show your user folder as `%USERPROFILE%`. Each line starts with the date and time, a level
@@ -115,15 +115,17 @@ does nothing in it. Check, in `Magelight.log`:
 
 - `view N gamepad on (keys)` or `on (navigation)`: the mod opted the view in. Without it, the mod has its own gamepad
   handling or none.
-- `settings loaded (... gamepad=true)`: `false` means `Magelight.json` turned the layer off.
+- `settings loaded (... gamepad=true)`: `false` means `Magelight.json` turned the layer off. The next line,
+  `gamepad layer: deadZone ...`, gives the tuning in effect, after any value outside its range was brought inside it.
 - `"gamepad": { "trace": true }` logs, once a second, `gamepad batches N (empty N) connected true owner N`: `owner 0`
   while the page is open means one of the conditions above is not met. It also logs each pad button with its value.
 
-The `Magelight.json` `"gamepad"` block: `enabled` (`true`; `false` turns the layer off for every page),
+The `Magelight.json` `"gamepad"` block (or `"gamepad": false`): `enabled` (`true`; `false` turns the layer off for every page),
 `glyphs` (`"xbox"`; `"playstation"` or `"generic"` labels the buttons a page shows for another pad), `deadZone`
 (0.25) and `exitDeadZone` (0.18) for the sticks, `repeatDelay` (0.35 s) and `repeatInterval` (0.09 s) for a held
 direction, `cursorSpeed` (900: pixels a second at 1080p in a page's cursor mode), and `trace` (`false`). Values outside
-their range are brought inside it.
+their range are brought inside it: `deadZone` 0.05-0.90, `exitDeadZone` 0 up to just under `deadZone` (0.89 at most),
+`cursorSpeed` 100-3000, `repeatDelay` 0.1-2 s, `repeatInterval` 0.03-0.5 s; an unknown `glyphs` reads as `xbox`.
 
 ## I can move but the page stays / I cannot move
 
