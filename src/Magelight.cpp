@@ -931,7 +931,8 @@ namespace Magelight {
         ID3D11ShaderResourceView* srv = nullptr;
         int texW = 0, texH = 0;
     };
-    static std::mutex s_viewsMutex;
+    // An OwnedMutex (PageThreadCore.h): a page thread that faults while holding it gives it back before it parks.
+    static PageThread::OwnedMutex s_viewsMutex;
     static std::vector<std::unique_ptr<MlView>> s_views;  // z-order = (layer, order), see SortViewsLocked
     static std::atomic<std::uint64_t> s_nextViewId{ 1 };
     static std::atomic<std::uint64_t> s_uiModeView{ 0 };  // UI mode's show/focus target
@@ -1079,7 +1080,7 @@ namespace Magelight {
         std::uint32_t texId = 0;
         ultralight::RefPtr<ultralight::ImageSource> src;
     };
-    static std::mutex s_imagesMutex;
+    static PageThread::OwnedMutex s_imagesMutex;   // an OwnedMutex for the same reason as s_viewsMutex
     static std::vector<std::unique_ptr<MlImage>> s_images;
     static std::atomic<std::uint32_t> s_nextImageId{ 1 };
 
@@ -1100,7 +1101,7 @@ namespace Magelight {
     // True when any view wants pixels this frame.
     static bool AnyViewVisible()
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         for (const auto& v : s_views)
             if (v->visible) return true;
         return false;
@@ -1110,7 +1111,7 @@ namespace Magelight {
     // MagelightOverlayMenu), so a HUD view that stays up never holds it open over gameplay.
     static bool AnyInteractiveViewVisible()
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         for (const auto& v : s_views)
             if (v->visible && !v->clickThrough) return true;
         return false;
@@ -1220,7 +1221,7 @@ namespace Magelight {
             EnsureKeyboardView();
         }
         // The visibility and the message that says so change together (QueueKeyboardThemeLocked).
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* kb = FindViewLocked(static_cast<ViewId>(s_kbViewId.load()));
         if (!kb || (!on && !kb->visible)) return;   // already down: the page was told then
         ShowViewLocked(*kb, on);
@@ -1295,7 +1296,7 @@ namespace Magelight {
         if (op == req.end() || !op->is_string() || page == req.end() || !page->is_string()) return;
         const std::string pageId = page->get<std::string>();
         if (!Gamepad::ValidPageId(pageId)) return;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(id);
         if (!v) return;
         if (op->get<std::string>() == "ready") {
@@ -1373,7 +1374,7 @@ namespace Magelight {
 
         MlView::Listener l;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(id)) {
                 auto it = v->listeners.find(name);
                 if (it != v->listeners.end()) l = it->second;
@@ -1396,7 +1397,7 @@ namespace Magelight {
         if (name.rfind("hover:", 0) == 0) { hover = true; name.erase(0, 6); }
         if (name.empty() || name.size() > 128) return;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(id);
             if (!v || !v->visible || v->dormant) return;
         }
@@ -1425,7 +1426,7 @@ namespace Magelight {
     {
         std::uint32_t n = 0;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(id)) n = ++v->themeLog.refusals;
         }
         if (n && n <= kThemeRefusalsLogged)
@@ -1526,7 +1527,7 @@ namespace Magelight {
         std::string line;
         bool logIt = false;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(id);
             if (!v || v->destroyPending) return;
             bool kbChanged = false, cursorChanged = false;
@@ -1813,7 +1814,7 @@ namespace Magelight {
             "}";
         std::size_t count = 0;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             const std::string idStr = idStr0;
             for (const auto& [n, l] : v.listeners) {
                 (void)l;
@@ -1921,7 +1922,7 @@ namespace Magelight {
             if (!newDoc && !local) return;
             MlView* v = nullptr;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 v = FindViewByUlLocked(caller);
                 if (v && newDoc) {
                     ForgetEditStateLocked(*v);
@@ -1942,7 +1943,7 @@ namespace Magelight {
             ViewId id = 0;
             DomReadyFn cb = nullptr;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 if (MlView* v = FindViewByUlLocked(caller)) {
                     id = v->id;
                     cb = v->onDomReady;
@@ -1960,7 +1961,7 @@ namespace Magelight {
             Emit(HostEvent::ViewDomReady, id);
             bool reloaded = false;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 if (MlView* v = FindViewLocked(id)) { reloaded = v->reloadedFlag; v->reloadedFlag = false; }
             }
             if (reloaded) Emit(HostEvent::ViewReloaded, id);
@@ -1977,7 +1978,7 @@ namespace Magelight {
             ViewId id = 0;
             bool kept = false, flowing = false;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 if (MlView* v = FindViewByUlLocked(caller)) {
                     id = v->id;
                     v->loadFailed = true;
@@ -2026,7 +2027,7 @@ namespace Magelight {
             bool repaint = false;
             const bool vr = VR::IsLive();
             {
-                std::unique_lock<std::mutex> lk(s_viewsMutex, std::try_to_lock);
+                std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock);
                 if (!lk) {
                     if (s_busyLogged.fetch_add(1) < 64)
                         SKSE::log::info("Magelight: a page settled while the view registry was busy - no settle "
@@ -2062,7 +2063,7 @@ namespace Magelight {
         struct EvalWork { ultralight::RefPtr<ultralight::View> ul; ViewId id; std::vector<PendingEval> evals; };
         std::vector<EvalWork> evalWork;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto& v : s_views) {
                 if (!v->ul || !v->domReady) continue;   // held until the page can take them
                 if (!v->outbound.empty()) {
@@ -3335,7 +3336,7 @@ namespace Magelight {
     static bool UiViewWantsFreeze()
     {
         if (!FreezeWorldAvailable() || !s_focused.load()) return false;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
         return v && v->freezeWorld;
     }
@@ -3534,7 +3535,7 @@ namespace Magelight {
             // half of the screen with nothing focused (field log 2026-09-02).
             std::vector<ViewId> inspectors;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 for (auto& vp : s_views) if (vp->isInspector && vp->visible) inspectors.push_back(vp->id);
             }
             for (ViewId i : inspectors) ShowView(i, false);
@@ -3634,7 +3635,7 @@ namespace Magelight {
         {
             std::string snd;
             {
-                std::lock_guard<std::mutex> lock(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lock(s_viewsMutex);
                 if (MlView* v = FindViewLocked(uiView)) snd = on ? v->soundOpen : v->soundClose;
             }
             if (!snd.empty()) Sound::Play(snd, uiView);
@@ -3886,7 +3887,7 @@ namespace Magelight {
     // itself instead of the whole UI.)
     static bool EscapeCapturedByUiView()
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
         return v && v->escapeCapture;
     }
@@ -4802,7 +4803,7 @@ namespace Magelight {
             NetLevel level = NetLevel::File;
             ViewId id = 0;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 if (const MlView* v = FindViewByUlLocked(caller)) { level = v->netLevel; id = v->id; }
             }
             if (level == NetLevel::Any) return true;
@@ -5139,7 +5140,7 @@ namespace Magelight {
             "d.__t=setTimeout(function(){d.remove();},12000);})();";
         // quiet: a banner that throws (a document with no root yet) must not report itself, and so queue another
         // banner, every frame.
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) QueueOutboundLocked(*v, { std::move(script), {}, true, true });
     }
 
@@ -5155,7 +5156,7 @@ namespace Magelight {
         bool logIt = false;
         std::uint32_t dropped = 0;
         if (ConsoleLogLevel() != kConsoleLogNone) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(id)) logIt = v->consoleRate.Admit(GetTickCount64(), dropped);
         }
         if (dropped)
@@ -5200,7 +5201,7 @@ namespace Magelight {
             default:
                 break;
             }
-            std::unique_lock<std::mutex> lk(s_viewsMutex, std::try_to_lock);
+            std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock);
             if (!lk) return;
             if (MlView* v = FindViewByUlLocked(caller)) v->pageCursor = static_cast<int>(kind);
         }
@@ -5230,7 +5231,7 @@ namespace Magelight {
             bool logIt = false;
             std::uint32_t dropped = 0;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 MlView* v = FindViewByUlLocked(caller);
                 if (v) id = v->id;
                 if (wanted) {
@@ -5646,7 +5647,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             return fail("the path must stay inside the mod folder (relative, no '..')");
         std::filesystem::path root;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             const MlView* v = FindViewLocked(view);
             if (!v) return fail("the view is gone");
             root = v->root;
@@ -5659,7 +5660,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     bool SetViewCursorSet(ViewId view, bool modDefault, const CursorSet& set)
     {
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending) return false;
             (modDefault ? v->cursorMod : v->cursorOwn) = set;
@@ -5673,7 +5674,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (state < 0 || state >= kCursorStates) return false;
         std::string desc;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending) return false;
             if (image || state == 0) v->cursorOwn.none = false;   // "none" is set through the arrow state
@@ -5697,7 +5698,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         std::string desc;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending) return false;
             v->cursorTint = tint;
@@ -5713,7 +5714,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const std::optional<HostTheme::KbTheme> next = theme ? std::optional(*theme) : std::nullopt;
         std::string desc;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending) return false;
             if (v->kbTheme == next) return true;   // unchanged: no message, no line
@@ -5769,17 +5770,17 @@ float4 ps_straight(VSOut i) : SV_Target {
         return pick;
     }
 
-    // Game thread. With the page thread, its registry walks can hold the lock across a page's load or resize
-    // (MaterializeViews, ApplyPendingResizes): the cursor keeps the last frame's pick for this frame rather than wait
-    // (invariant 27). The pick owns its image (shared_ptr), so a view freed meanwhile takes nothing from under it.
+    // Game thread. With the page thread, its registry walks can hold the lock across Ultralight work (a page's load or
+    // resize, MaterializeViews and ApplyPendingResizes, or the views it collects): the cursor keeps the last frame's
+    // pick for this frame rather than wait (invariant 27). The pick owns its image (shared_ptr), so a view freed meanwhile takes nothing from under it.
     static CursorPick PickCursorAt(int x, int y, float bw, float bh)
     {
         if (!PageThreadOn()) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             return PickCursorAtLocked(x, y, bw, bh);
         }
         static CursorPick* const s_last = new CursorPick();   // never freed: no D3D release at exit
-        std::unique_lock<std::mutex> lk(s_viewsMutex, std::try_to_lock);
+        std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock);
         if (lk.owns_lock()) *s_last = PickCursorAtLocked(x, y, bw, bh);
         return *s_last;
     }
@@ -5789,7 +5790,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     static std::shared_ptr<CursorImage> VrCursorImageFor(ViewId id)
     {
         if (s_cursorForce.load() || !s_modCursors.load()) return nullptr;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const MlView* v = FindViewLocked(id);
         if (!v) return nullptr;
         const CursorSet& set = v->cursorOwn.Empty() ? v->cursorMod : v->cursorOwn;
@@ -5802,7 +5803,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     static CursorTintSet VrCursorTintFor(ViewId id)
     {
         if (s_cursorForce.load() || !s_modCursors.load()) return {};
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const MlView* v = FindViewLocked(id);
         return v ? v->cursorTint : CursorTintSet{};
     }
@@ -6419,7 +6420,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (VR::IsLive()) return nullptr;
         if (updateMs > static_cast<double>(s_loadBudgetMs.load())) return nullptr;
         const std::uint64_t now = GetTickCount64();
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         for (auto& vp : s_views) {
             MlView& v = *vp;
             if (!v.prepaint || v.visible || !v.ul || !v.domReady) continue;
@@ -6448,7 +6449,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // are delivered after its DOM ready, exactly as for a view created before the world loaded.
     static void MaterializeViews()
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const bool stagger = s_loadStagger.load();
         const ViewId uiView = s_focused.load() ? static_cast<ViewId>(s_uiModeView.load()) : 0;
         const auto nowT = std::chrono::steady_clock::now();
@@ -6553,7 +6554,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const std::uint64_t now = GetTickCount64();
         std::vector<ultralight::RefPtr<ultralight::View>> released;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             const ViewId uiView = static_cast<ViewId>(s_uiModeView.load());
             for (auto& vp : s_views) {
                 MlView& v = *vp;
@@ -6577,7 +6578,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         std::vector<ultralight::RefPtr<ultralight::View>> released;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto& vp : s_views) {
                 MlView& v = *vp;
                 if (!v.rebuildPending) continue;
@@ -6613,7 +6614,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // ApplyPendingLifecycle does if it ever changes.
     static void ApplyPendingResizes()
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         for (auto& vp : s_views) {
             MlView& v = *vp;
             if (!v.ul || !v.boundsDirty) continue;
@@ -6682,7 +6683,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // OUTSIDE the lock (review 2026-09-05, finding 2).
         std::vector<std::pair<ViewId, PendingEval>> orphanEvals;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto it = s_views.begin(); it != s_views.end();) {
                 MlView& v = **it;
                 if (v.destroyPending) {
@@ -6758,7 +6759,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             kept.push_back(&w);
         }
         if (!began.empty()) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (const Work* w : began) {
                 MlView* v = FindViewLocked(w->id);
                 if (!v || v->ul.get() != w->ul.get()) continue;
@@ -6771,7 +6772,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
         }
         if (!kept.empty()) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (const Work* w : kept) {
                 MlView* v = FindViewLocked(w->id);
                 if (!v || v->ul.get() != w->ul.get()) continue;
@@ -6808,7 +6809,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         std::vector<std::pair<ultralight::RefPtr<ultralight::View>, bool>> changes;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto& vp : s_views)
                 if (vp->ul && vp->ul->is_visible() != vp->visible) changes.emplace_back(vp->ul, vp->visible);
         }
@@ -6829,7 +6830,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         const bool leaveAll = s_tooltipLeaveAll.exchange(false);
         if (changes.empty() && !leaveAll) return;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         for (auto& [ul, text] : changes) {
             MlView* v = FindViewByUlLocked(ul);
             if (!v || (text.empty() && !v->tooltipText)) continue;
@@ -6884,7 +6885,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         ultralight::RefPtr<ultralight::View> ul;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()))) ul = v->ul;
         }
         s_imeEditorComposing.store(ul && ul->editor()->HasComposition());
@@ -6941,7 +6942,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         int uiX = 0, uiY = 0;
         float uiDs = 1.f;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()))) {
                 uiUl = v->ul;
                 uiId = v->id;
@@ -6986,7 +6987,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         };
         // The topmost visible interactive view containing (mx, my), else the UI-mode view.
         auto hitTest = [&](int mx, int my) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
                 const MlView& v = **it;
                 if (!v.ul || !v.visible || v.clickThrough) continue;
@@ -7006,7 +7007,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             const ViewId id = s_pointer.Captured(src);
             if (!id) return PointerTarget{};
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 const MlView* v = FindViewLocked(id);
                 if (v && v->ul && !v->destroyPending) return targetOf(*v);
             }
@@ -7024,7 +7025,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (!gone.tooltip) return;
             ultralight::RefPtr<ultralight::View> left;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 if (MlView* prev = FindViewLocked(gone.tooltip)) {
                     QueueTooltipLeaveLocked(*prev);
                     if (gone.leave && !prev->destroyPending) left = prev->ul;
@@ -7083,7 +7084,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_sentKeys = static_cast<std::uint16_t>(s_sentKeys & ~Input::kKbModifiers);
             ultralight::RefPtr<ultralight::View> ul;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 if (MlView* v = s_sentKeyView ? FindViewLocked(s_sentKeyView) : nullptr) ul = v->ul;
             }
             if (!ul) return;
@@ -7177,7 +7178,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 // it when UI mode moves. The reports these calls fire are marked (s_hostFocusCall): never a raise.
                 ultralight::RefPtr<ultralight::View> before;
                 if (s_focusedView && (s_focusedView != uiId || !e.wparam)) {
-                    std::lock_guard<std::mutex> lk(s_viewsMutex);
+                    std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                     if (MlView* v = FindViewLocked(s_focusedView); v && v->ul && v->ul != uiUl) before = v->ul;
                 }
                 s_hostFocusCall = true;
@@ -7341,7 +7342,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         ultralight::RefPtr<ultralight::View> uiUl;
         bool uiReported = false;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (const EditChange& c : raw) {
                 MlView* v = FindViewByUlLocked(c.ul);
                 if (!v) continue;
@@ -7393,13 +7394,13 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
                 asked = true;
             }
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* u = FindViewLocked(ui)) {
                 if (asked) u->editNumber = number;
                 else number = u->editNumber;
             }
         } else if (uiUl) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* u = FindViewLocked(ui)) u->editNumber = false;
         }
         const EditState::Verdict vd = s_tracker.Step(ui, changes, st, clicks, resync, fieldNow, number);
@@ -7420,7 +7421,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_kbClaim = 0;
             ShowOwnKeyboard(false);
         } else {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             QueueKeyboardThemeLocked();   // the field changed under a keyboard that stays as it is: its layout follows
         }
         // A line for each change the player can see, the keyboard in VR and the IME on flat (32 a session).
@@ -7946,7 +7947,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     static void MaterializeImages()
     {
         if (!s_gpuActive || !s_gpuRegExt) return;
-        std::lock_guard<std::mutex> lk(s_imagesMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_imagesMutex);
         for (auto& ip : s_images) {
             MlImage& im = *ip;
             if (im.removed) continue;
@@ -8111,7 +8112,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         ViewId page = 0;
         std::filesystem::path pageRoot;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto& vp : s_views) if (vp->ul && vp->ul.get() == caller) { page = vp->id; pageRoot = vp->root; break; }
         }
         int bw = 0, bh = 0;
@@ -8141,7 +8142,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         v->ul = ul;
         const ViewId id = v->id;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             s_views.push_back(std::move(v));
             SortViewsLocked();
         }
@@ -8184,7 +8185,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         ultralight::RefPtr<ultralight::View> ul;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(target)) ul = v->ul;
         }
         if (!ul) return;
@@ -8249,7 +8250,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
         int live = 0, dormant = 0, notLoaded = 0;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (const auto& vp : s_views) {
                 if (vp->ul) ++live;
                 else if (vp->dormant) ++dormant;
@@ -8311,7 +8312,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             int ibw = static_cast<int>(bw), ibh = static_cast<int>(bh);
             int panelW = 0, panelH = 0;
             if (VR::PanelSizeForFullscreen(panelW, panelH)) { ibw = panelW; ibh = panelH; }
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto& vp : s_views) {
                 MlView& v = *vp;
                 if (!v.fullscreen || (v.w == ibw && v.h == ibh)) continue;
@@ -8339,7 +8340,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         {
             std::vector<MlView*> dirty;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 for (auto& vp : s_views)
                     if (vp->ul && vp->shimsDirty) dirty.push_back(vp.get());
             }
@@ -8421,7 +8422,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 offFrames = 0;
                 // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
                 // every page's cursor; each reports again on the first mouse move (the core re-sends it per move).
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 for (auto& vp : s_views) vp->pageCursor = 0;
             }
             uiFrames = 0;
@@ -8629,7 +8630,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // rendering clears it.
     static void SampleDrawnViews()
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         for (auto& vp : s_views) {
             MlView& v = *vp;
             const bool drawn = v.visible && v.ul && v.ul->is_visible();
@@ -8808,7 +8809,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             // mutation only happens on our own threads — the brief lock walks
             // are safe against the API surface.
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 for (auto& vp : s_views) {
                     MlView& v = *vp;
                     PresentedView pv;
@@ -9108,7 +9109,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (pre) pre->set_visible(false);
             if (pre) NotePrepaint(preId, preAgain, ms(tUpdated, ClockT::now()));
             if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto& vp : s_views) {
                 PresentedView pv;
                 if (CollectView(*vp, bw, bh, s_pageContext, true, pv)) packet->views.push_back(std::move(pv));
@@ -9176,6 +9177,18 @@ float4 ps_straight(VSOut i) : SV_Target {
         LogThreadStack(s_ulThreadId, "page", running);
     }
 
+    // After a fault on the page thread: the host is built /EHsc, so no lock_guard between the fault and the guard
+    // unlocked on the way out. The locks the page work holds across Ultralight and driver calls are given back if this
+    // thread still holds them, or the parked page thread would hang the game's next lock (tools/pagethread-test).
+    static void ReleasePageLocksAfterFault()
+    {
+        const bool views = s_viewsMutex.ReleaseIfHeldByThisThread();
+        const bool images = s_imagesMutex.ReleaseIfHeldByThisThread();
+        if (views || images)
+            SKSE::log::warn("Magelight: the page thread faulted holding {}{}{}; given back", views ? "the view registry" : "",
+                            views && images ? " and " : "", images ? "the image registry" : "");
+    }
+
     // SEH wrappers — no locals with destructors allowed in here.
     static bool GuardedPageInit()
     {
@@ -9183,6 +9196,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             return CreateUltralight(s_pageContext);
         } __except (LogSehAndDisable("the page thread's start", GetExceptionCode(),
                         (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+            ReleasePageLocksAfterFault();
             return false;
         }
     }
@@ -9193,6 +9207,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             PageThreadFrame();
         } __except (LogSehAndDisable("page frame work", GetExceptionCode(),
                         (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+            ReleasePageLocksAfterFault();
         }
     }
 
@@ -9290,11 +9305,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         // The views wanted now, read here rather than from the page frame: one hidden since (Escape, a mod's hide) is
         // not drawn even when the page thread is slow or stuck in a script (it never runs script under the registry's
         // lock, invariant 16).
-        // While a page load or resize holds the registry's lock (MaterializeViews, ApplyPendingResizes), this frame
+        // While the page thread holds the registry's lock (a page's load or resize, the views it collects), this frame
         // keeps the last frame's reading rather than wait.
         static std::vector<ViewId> s_wanted;
         static bool s_anyVisible = false, s_interactiveVisible = false;
-        if (std::unique_lock<std::mutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock()) {
+        if (std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock()) {
             s_wanted.clear();
             s_anyVisible = s_interactiveVisible = false;
             for (const auto& v : s_views) {
@@ -10245,7 +10260,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // Queues the packet for `view` (GamepadCore.h PacketJson); active false tells a view it no longer holds the pad.
     static void SendGamepadPacket(ViewId view, bool active, const Gamepad::BatchOut& out)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->gamepadPage.empty()) return;
         // Calls wait for DOM ready (DrainBridgeQueues), and the page's own InteropCalls share their cap: input made
@@ -10303,7 +10318,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_gamepadHostDirty = false;
         if (in.connected && s_focused.load() && !s_renderDead.load() && ForegroundIsGame() && !MenuInputAboveFocusMenu()) {
             const auto uiView = static_cast<ViewId>(s_uiModeView.load());
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(uiView);
             if (v && !v->destroyPending && v->gamepad.enabled && !v->gamepadPage.empty()) {
                 in.owner = uiView;
@@ -10390,7 +10405,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_gamepadPacketView = owner;
         }
         if (out.mode != s_gamepadIn.mode) {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             // Unless SetViewGamepad (any thread) set it since BeginGamepadBatch read it: the API's mode wins.
             if (MlView* v = FindViewLocked(owner); v && v->gamepadMode == s_gamepadIn.mode) v->gamepadMode = out.mode;
         }
@@ -10871,7 +10886,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             s_uiModeView.store(target);
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 QueueKeyboardThemeLocked();   // the hidden keyboard page takes this view's theme ahead of a show (0.31.9)
             }
             SetUIMode(true);
@@ -10937,7 +10952,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             const char* refusal = nullptr;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 MlView* v = FindViewLocked(view);
                 if (!v || v->destroyPending) refusal = "no such view";
                 else if (v->clickThrough) refusal = "click-through views cannot take UI mode";
@@ -10949,7 +10964,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             s_uiModeView.store(view);
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 QueueKeyboardThemeLocked();   // the hidden keyboard page takes this view's theme ahead of a show (0.31.9)
             }
             SetUIMode(true, true, pauseGame, noTextEntry);
@@ -11082,7 +11097,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             const char* refusal = nullptr;
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 MlView* v = FindViewLocked(view);
                 if (!v || v->destroyPending) refusal = "switch: no such view";
                 else if (v->clickThrough) refusal = "switch: click-through views cannot take UI mode";
@@ -11096,7 +11111,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (old == view) { Emit(HostEvent::UIModeSwitched, view); return; }
             s_uiModeView.store(view);
             {
-                std::lock_guard<std::mutex> lk(s_viewsMutex);
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 QueueKeyboardThemeLocked();   // the keyboard page, up or not, follows the new view's theme (0.31.9)
             }
             ApplyFreezeWorld("view switch");   // follows the new view's preference (the inspector has none)
@@ -11155,7 +11170,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const ViewId id = v->id;
         v->order = s_nextViewOrder.fetch_add(1);
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             s_views.push_back(std::move(v));
             SortViewsLocked();
         }
@@ -11170,20 +11185,20 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     bool IsViewValid(ViewId view)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         return v && !v->destroyPending;
     }
 
     void ShowView(ViewId view, bool show)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) ShowViewLocked(*v, show);
     }
 
     void SetViewCutout(ViewId view, int x, int y, int w, int h)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             if (w <= 0 || h <= 0) { v->cutW = v->cutH = 0; return; }
             v->cutX = static_cast<float>(x); v->cutY = static_cast<float>(y);
@@ -11199,7 +11214,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (scale < 1.0f)
             SKSE::log::info("Magelight: view {} device scale {:.3f} raised to 1.000 (below 1 is not supported)", view, scale);
         scale = std::clamp(scale, 1.0f, 3.0f);
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return;
         v->deviceScale = scale;
@@ -11221,7 +11236,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (scale < 1.0f)
             SKSE::log::info("Magelight: view {} rebuild scale {:.3f} raised to 1.000 (below 1 is not supported)", view, scale);
         scale = std::clamp(scale, 1.0f, 3.0f);
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return false;
         v->deviceScale = scale;
@@ -11247,14 +11262,14 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void SetViewHibernate(ViewId view, std::uint32_t idleMs)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) v->hibernateMs = idleMs;
     }
 
     void SetViewBounds(ViewId view, int x, int y, int w, int h)
     {
         if (w <= 0 || h <= 0) return;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             v->fullscreen = false;  // explicit bounds end backbuffer tracking
             v->x = x; v->y = y;
@@ -11285,7 +11300,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         if (!name || !*name || !callback) return false;
         if (RefuseReservedListenerName(view, name)) return false;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             v->listeners[name] = MlView::Listener{ callback, nullptr, nullptr };
             // A registration after window-object-ready (SA's, from OnDomReady)
@@ -11300,7 +11315,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     void InteropCall(ViewId view, const char* functionName, const std::string& argument)
     {
         if (!functionName || !*functionName) return;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) QueueOutboundLocked(*v, { functionName, argument, false });
     }
 
@@ -11308,7 +11323,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         bool queued = false;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             if (MlView* v = FindViewLocked(view); v && !v->destroyPending && v->evals.size() < 64) {
                 v->evals.push_back({ script, fn, user });
                 queued = true;
@@ -11319,7 +11334,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void InvokeJS(ViewId view, const std::string& script)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) QueueOutboundLocked(*v, { script, {}, true });
     }
 
@@ -11335,7 +11350,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         if (!name || !*name || !callback) return false;
         if (RefuseReservedListenerName(view, name)) return false;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             v->listeners[name] = MlView::Listener{ nullptr, callback, user };
             v->shimsDirty = true;
@@ -11350,7 +11365,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // that lands after this point sees destroyPending and refuses, so
         // s_uiModeView can never name a destroyed id.
         if (s_focused.load() && s_uiModeView.load() == view) return false;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return false;
         v->visible = false;
@@ -11363,7 +11378,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     bool ReloadView(ViewId view)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return false;
         v->reloadPending = true;
@@ -11384,7 +11399,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             const bool absolute = u.size() > 1 && u[1] == ':';
             u = absolute ? PathToFileUrl(std::filesystem::path(u)) : ("file:///" + u);
         }
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return false;
         v->navigateUrl = u;
@@ -11399,7 +11414,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void SetViewLayer(ViewId view, int layer)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             v->layer = layer;
             v->order = s_nextViewOrder.fetch_add(1);
@@ -11410,7 +11425,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // ── 0.28.0 ──
     void SetViewEscapeCapture(ViewId view, bool capture)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) v->escapeCapture = capture;
     }
 
@@ -11427,7 +11442,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     void SetViewFreezeWorld(ViewId view, bool freeze)
     {
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->freezeWorld == freeze) return;
             v->freezeWorld = freeze;
@@ -11443,7 +11458,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     bool SetViewPrepaint(ViewId view, bool on)
     {
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending || v->isInspector) return false;
             if (v->prepaint == on) return true;
@@ -11458,7 +11473,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     bool SetViewGamepad(ViewId view, const Gamepad::ViewConfig& config)
     {
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending || v->isInspector) return false;
             v->gamepad = config;
@@ -11474,7 +11489,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     bool GetViewGamepad(ViewId view, Gamepad::ViewConfig* config, bool* capturing, Gamepad::Mode* mode,
                         std::uint64_t* generation)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const MlView* v = FindViewLocked(view);
         if (!v || v->isInspector) return false;
         if (config) *config = v->gamepad;
@@ -11505,7 +11520,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         bool started = false;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending) return false;
             if (v->loadOnShow == onShow) return true;
@@ -11525,7 +11540,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         std::filesystem::path root;
         {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v) return;
             v->netLevel = level;
@@ -11544,7 +11559,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void SetViewOrder(ViewId view, std::uint64_t order)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             v->order = order;
             // keep RaiseView's "above everything" promise
@@ -11556,20 +11571,20 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     std::uint64_t GetViewOrder(ViewId view)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const MlView* v = FindViewLocked(view);
         return v ? v->order : 0;
     }
 
     void SetViewScrollStep(ViewId view, int px)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) v->scrollStep = std::clamp(px, 1, 1000);
     }
 
     void SetViewSounds(ViewId view, const char* open, const char* close)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             v->soundOpen  = open  ? open  : "";
             v->soundClose = close ? close : "";
@@ -11578,7 +11593,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void RaiseView(ViewId view)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         if (MlView* v = FindViewLocked(view)) {
             v->order = s_nextViewOrder.fetch_add(1);
             SortViewsLocked();
@@ -11587,7 +11602,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     bool GetViewInfo(ViewId view, ViewInfo& out)
     {
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);
         if (!v || v->destroyPending) return false;
         out.x = v->x; out.y = v->y; out.w = v->w; out.h = v->h;
@@ -11687,7 +11702,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         im->url = PathToFileUrl(file);
         const ImageId id = im->id;
         {
-            std::lock_guard<std::mutex> lk(s_imagesMutex);
+            std::lock_guard<PageThread::OwnedMutex> lk(s_imagesMutex);
             s_images.push_back(std::move(im));
         }
         SKSE::log::info("Magelight: image '{}' queued as image {} ({}x{})", n, id, width, height);
@@ -11697,7 +11712,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     void UpdateTextureImage(ImageId image, ID3D11ShaderResourceView* srv)
     {
         if (!srv) return;
-        std::lock_guard<std::mutex> lk(s_imagesMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_imagesMutex);
         MlImage* im = FindImageLocked(image);
         if (!im || im->removed) return;
         srv->AddRef();
@@ -11707,19 +11722,19 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     void InvalidateImage(ImageId image)
     {
-        std::lock_guard<std::mutex> lk(s_imagesMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_imagesMutex);
         if (MlImage* im = FindImageLocked(image)) im->dirty = true;
     }
 
     void UnregisterImage(ImageId image)
     {
-        std::lock_guard<std::mutex> lk(s_imagesMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_imagesMutex);
         if (MlImage* im = FindImageLocked(image)) im->unregister = true;
     }
 
     const char* ImageUrl(ImageId image)
     {
-        std::lock_guard<std::mutex> lk(s_imagesMutex);
+        std::lock_guard<PageThread::OwnedMutex> lk(s_imagesMutex);
         MlImage* im = FindImageLocked(image);
         return im ? im->url.c_str() : "";
     }

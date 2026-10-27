@@ -56,6 +56,63 @@ static DWORD WINAPI ProducerMain(void* p)
     return 0;
 }
 
+// A fault inside a lock_guard on another thread, caught by an SEH guard further up the stack, as the page thread's
+// GuardedPageFrame catches one: built /EHsc like the host, no destructor runs on the way out, so the lock stays held
+// unless the guard gives it back. The lock_guard sits in its own function: __try may not share a frame with one.
+static std::mutex  g_plain;
+static OwnedMutex  g_owned;
+
+__declspec(noinline) static void FaultHoldingPlain()
+{
+    std::lock_guard<std::mutex> lk(g_plain);
+    *static_cast<volatile int*>(nullptr) = 1;
+}
+
+__declspec(noinline) static void FaultHoldingOwned()
+{
+    std::lock_guard<OwnedMutex> lk(g_owned);
+    *static_cast<volatile int*>(nullptr) = 1;
+}
+
+struct FaultRun {
+    void (*fn)();
+    bool release;     // the guard gives back what this thread still holds
+    bool faulted;
+    bool released;
+};
+
+static void GuardedFault(FaultRun& r)
+{
+    __try {
+        r.fn();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        r.faulted = true;
+        if (r.release) r.released = g_owned.ReleaseIfHeldByThisThread();
+    }
+}
+
+static DWORD WINAPI FaultThread(void* p)
+{
+    GuardedFault(*static_cast<FaultRun*>(p));
+    return 0;
+}
+
+static void RunOnThread(FaultRun& r)
+{
+    HANDLE t = CreateThread(nullptr, 0, &FaultThread, &r, 0, nullptr);
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+}
+
+static DWORD WINAPI HoldOwned(void* p)
+{
+    g_owned.lock();
+    SetEvent(static_cast<HANDLE>(p));
+    Sleep(200);
+    g_owned.unlock();
+    return 0;
+}
+
 int main()
 {
     // ---- Decide -----------------------------------------------------------------------------------------------------
@@ -147,6 +204,34 @@ int main()
         Check(!handoff.WaitGo(stop, INFINITE), "wait: a set stop event wins over a pending Go");
         Check(handoff.WaitGo(nullptr, 0), "wait: with no stop event, the pending Go still wakes it");
         CloseHandle(stop);
+    }
+
+    // ---- A fault inside a held lock -----------------------------------------------------------------------------
+    {
+        FaultRun plain{ &FaultHoldingPlain, false, false, false };
+        RunOnThread(plain);
+        const bool stillHeld = !g_plain.try_lock();
+        if (!stillHeld) g_plain.unlock();
+        Check(plain.faulted && stillHeld,
+              "fault: a plain mutex a faulting thread held stays held after its SEH guard (no destructor ran, /EHsc)");
+
+        FaultRun owned{ &FaultHoldingOwned, true, false, false };
+        RunOnThread(owned);
+        const bool free = g_owned.try_lock();
+        if (free) g_owned.unlock();
+        Check(owned.faulted && owned.released && free,
+              "fault: an OwnedMutex the faulting thread still held is given back by its guard");
+
+        HANDLE held = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE t = CreateThread(nullptr, 0, &HoldOwned, held, 0, nullptr);
+        WaitForSingleObject(held, INFINITE);
+        const bool releasedOther = g_owned.ReleaseIfHeldByThisThread();
+        const bool otherStillHolds = !g_owned.try_lock();
+        if (!otherStillHolds) g_owned.unlock();
+        Check(!releasedOther && otherStillHolds, "fault: another thread's hold is never released by mistake");
+        WaitForSingleObject(t, INFINITE);
+        CloseHandle(t);
+        CloseHandle(held);
     }
 
     std::printf("%d check(s) failed\n", s_failed);

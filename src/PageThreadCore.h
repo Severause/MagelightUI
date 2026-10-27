@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <d3d11.h>
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -40,6 +41,42 @@ namespace Magelight::PageThread {
         if (!deferredContextOk) return { true, "the device refused a deferred context" };
         return {};
     }
+
+    // A mutex that knows which thread holds it. The host is built /EHsc, so when the page thread's SEH guard catches a
+    // fault no C++ destructor runs on the way out: a lock_guard inside the page work never unlocks, and the page
+    // thread then parks holding it, where the next game-thread lock would wait forever (a hung game where the frame
+    // path only lost the overlay). The guard gives back what its thread still holds (ReleaseIfHeldByThisThread).
+    // Otherwise it is a std::mutex: lock_guard, unique_lock and try_to_lock all work on it.
+    class OwnedMutex {
+    public:
+        void lock()
+        {
+            m_.lock();
+            owner_.store(GetCurrentThreadId(), std::memory_order_relaxed);
+        }
+        bool try_lock()
+        {
+            if (!m_.try_lock()) return false;
+            owner_.store(GetCurrentThreadId(), std::memory_order_relaxed);
+            return true;
+        }
+        void unlock()
+        {
+            owner_.store(0, std::memory_order_relaxed);
+            m_.unlock();
+        }
+        // After a fault: unlocks it when the calling thread holds it (only the holder ever reads its own id here).
+        bool ReleaseIfHeldByThisThread()
+        {
+            if (owner_.load(std::memory_order_relaxed) != GetCurrentThreadId()) return false;
+            unlock();
+            return true;
+        }
+
+    private:
+        std::mutex         m_;
+        std::atomic<DWORD> owner_{ 0 };
+    };
 
     // Finished page frames, from the page thread to the game thread. Made once and never destroyed by the host (its
     // packets may hold D3D references at process exit).
