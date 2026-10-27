@@ -409,7 +409,9 @@ namespace Magelight::Gamepad {
                 m_out.stateChanged = true;
                 ReleaseCursorPress();
             }
-            m_mode = in.config.allowCursor ? in.mode : Mode::Navigation;
+            const Mode mode = in.config.allowCursor ? in.mode : Mode::Navigation;
+            if (mode != m_mode) ReleaseCursorPress();   // the page's setMode, or the cursor taken away
+            m_mode = mode;
             m_dt = m_haveTime ? std::clamp(in.now - m_lastTime, 0.0, 0.05) : 0.0;
             m_lastTime = in.now;
             m_haveTime = true;
@@ -463,6 +465,9 @@ namespace Magelight::Gamepad {
             }
             return t.consume;
         }
+
+        // The view that holds the pad this batch: BatchIn's owner, unless the pad is gone or the layer is off.
+        std::uint64_t Owner() const { return m_ledger.Owner(); }
 
         // The mouse moved or a key was pressed: the mouse and keyboard are the device again.
         void OtherDeviceActivity()

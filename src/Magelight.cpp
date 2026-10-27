@@ -12,6 +12,7 @@
 #include "MagelightSysInfo.h"
 #include "HotkeyNames.h"
 #include "TooltipCore.h"
+#include "GamepadScript.h"
 #include "ImeCore.h"
 #include "MemoryReportCore.h"
 #include "PageStackCore.h"
@@ -123,6 +124,11 @@ namespace Magelight {
     //   "cursorFile": "", "cursorHeight": 24, "cursorHotspotX": 0, "cursorHotspotY": 0   // the host cursor
     //   "cursorForce": false, "modCursors": true   // 0.31.0: the player's say over mod cursors (Per-view cursors)
     //   "hotkeys": { "ModId/viewName": "F7", "Other/hud": 0 }   // rebind (or 0 = disable) any mod's hotkey
+    //   "gamepad": { "enabled": true, "deadZone": 0.25, "exitDeadZone": 0.18, "cursorSpeed": 900,
+    //                "repeatDelay": 0.35, "repeatInterval": 0.09, "glyphs": "xbox", "trace": false }
+    //                         // 1.6.0: the gamepad layer for views that opt in, flat only (GamepadCore.h);
+    //                         // enabled false turns it off for every view; glyphs: xbox | playstation | generic;
+    //                         // trace logs the input batches once a second and each pad button
     // }
     // Toggle key default: PAGE UP (201). Moved off Home in 0.3.1: Home sits
     // in hotkey territory other UI mods use, and two systems doing their
@@ -292,6 +298,8 @@ namespace Magelight {
     static std::atomic<int>       s_loadBudgetMs{ 8 };
     // Magelight.json "memoryLogMinutes" (1.5.0): minutes between the periodic memory lines (TickMemoryReport).
     static std::atomic<int>       s_memLogMinutes{ 10 };
+    // Magelight.json "gamepad" (1.6.0): the gamepad layer's tuning (GamepadCore.h), read before the first input batch.
+    static Gamepad::Tuning        s_gamepadTuning;
     static std::atomic<bool> s_renderDead{ false };  // latched on any init failure
     static PresentFn         s_origPresent = nullptr;
 
@@ -620,13 +628,32 @@ namespace Magelight {
                 s_cursorForce.store(it->get<bool>());
             if (auto it = j.find("modCursors"); it != j.end() && it->is_boolean())
                 s_modCursors.store(it->get<bool>());
+            if (auto it = j.find("gamepad"); it != j.end() && it->is_object()) {
+                Gamepad::Tuning t;
+                if (auto v = it->find("enabled"); v != it->end() && v->is_boolean()) t.enabled = v->get<bool>();
+                if (auto v = it->find("trace"); v != it->end() && v->is_boolean()) t.trace = v->get<bool>();
+                if (auto v = it->find("deadZone"); v != it->end() && v->is_number()) t.deadZone = v->get<float>();
+                if (auto v = it->find("exitDeadZone"); v != it->end() && v->is_number()) t.exitDeadZone = v->get<float>();
+                if (auto v = it->find("cursorSpeed"); v != it->end() && v->is_number()) t.cursorSpeed = v->get<float>();
+                if (auto v = it->find("repeatDelay"); v != it->end() && v->is_number()) t.repeatDelay = v->get<double>();
+                if (auto v = it->find("repeatInterval"); v != it->end() && v->is_number())
+                    t.repeatInterval = v->get<double>();
+                if (auto v = it->find("glyphs"); v != it->end() && v->is_string()) {
+                    const std::string g = v->get<std::string>();
+                    t.glyphs = g == "playstation" ? Gamepad::Glyphs::PlayStation
+                             : g == "generic"     ? Gamepad::Glyphs::Generic
+                                                  : Gamepad::Glyphs::Xbox;
+                }
+                s_gamepadTuning = Gamepad::Clamped(t);
+            }
             static constexpr const char* kConsoleLogNames[] = { "none", "errors", "warnings", "all" };
             SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
                             "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={}, ulFiberMB={}, "
-                            "exceptionTelemetry={}, memoryLogMinutes={}, clipCursor={})",
+                            "exceptionTelemetry={}, memoryLogMinutes={}, clipCursor={}, gamepad={})",
                 s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
                 s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa,
-                s_ulFiberMb, s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_clipCursorCfg.load());
+                s_ulFiberMb, s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_clipCursorCfg.load(),
+                s_gamepadTuning.enabled);
         } catch (...) {
             SKSE::log::warn("Magelight: Magelight.json unreadable — defaults in effect");
         }
@@ -853,6 +880,14 @@ namespace Magelight {
         ThemeLogRate themeLog;          // 0.31.9: this page's hostTheme log lines (OnPageHostTheme)
         bool outboundDropLogged = false;   // the outbound cap's one warning for this view (QueueOutboundLocked)
         bool tooltipText = false;       // 1.2.0: the page was last sent a non-empty title (DrainTooltips)
+        // 1.6.0 gamepad layer (GamepadCore.h): the opt-in (SetViewGamepad, kept across reloads), the mode the input
+        // sink last left it in, and the page helper's id from its last 'ready' ("" = none yet: the view cannot own
+        // the pad). Each ready bumps the epoch, so a reloaded page re-arms the held-button rules like a new owner.
+        Gamepad::ViewConfig gamepad;
+        Gamepad::Mode gamepadMode = Gamepad::Mode::Navigation;
+        std::string gamepadPage;
+        std::uint64_t gamepadEpoch = 0;
+        bool gamepadDirty = false;      // the page has not seen the state since the opt-in or its ready changed
         bool destroyPending = false;
         bool reloadPending = false;
         bool reloadedFlag = false;      // tag the next DOM-ready as a ViewReloaded
@@ -1217,6 +1252,36 @@ namespace Magelight {
     static void PlayPageSound(ViewId id, const std::string& arg);   // fwd (defined after the dispatcher)
     static void OnPageHostTheme(ViewId id, const std::string& arg); // fwd (defined after the dispatcher)
 
+    // 1.6.0: the gamepad helper's requests ({op, page[, mode]}). 'ready' names the document's helper, which the
+    // input sink's packets carry; 'mode' asks for cursor or navigation mode, and cursor only where the view allows
+    // it. Anything else is dropped: the page decides nothing about who holds the pad.
+    static void OnPageGamepad(ViewId id, const std::string& arg)
+    {
+        if (arg.size() > 512) return;
+        const auto req = nlohmann::json::parse(arg, nullptr, false);
+        if (!req.is_object()) return;
+        const auto op = req.find("op"), page = req.find("page");
+        if (op == req.end() || !op->is_string() || page == req.end() || !page->is_string()) return;
+        const std::string pageId = page->get<std::string>();
+        if (!Gamepad::ValidPageId(pageId)) return;
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        MlView* v = FindViewLocked(id);
+        if (!v) return;
+        if (op->get<std::string>() == "ready") {
+            v->gamepadPage = pageId;
+            ++v->gamepadEpoch;
+            v->gamepadDirty = true;
+        } else if (op->get<std::string>() == "mode" && pageId == v->gamepadPage) {
+            const auto mode = req.find("mode");
+            if (mode == req.end() || !mode->is_string()) return;
+            const std::string m = mode->get<std::string>();
+            if (m == "cursor" && v->gamepad.allowCursor) v->gamepadMode = Gamepad::Mode::Cursor;
+            else if (m == "navigation") v->gamepadMode = Gamepad::Mode::Navigation;
+            else return;
+            v->gamepadDirty = true;
+        }
+    }
+
     // userData is the view id the page's own __mlNative was made with
     // (InstallBridgeShims). The id a page passes is only checked against it:
     // trusting it would let any page fire another view's listeners, sounds or
@@ -1253,6 +1318,10 @@ namespace Magelight {
         }
         if (name == "__prepaint") {   // 0.31.11: SetViewPrepaint from the page itself ('1' / '0')
             SetViewPrepaint(id, arg == "1");
+            return JSValueMakeUndefined(ctx);
+        }
+        if (name == "__gamepad") {   // 1.6.0: the page core's gamepad helper (GamepadScript.h)
+            OnPageGamepad(id, arg);
             return JSValueMakeUndefined(ctx);
         }
         // Retired: text focus comes from the EditorListener now. Pages may still send them (a mod's editor shim
@@ -1707,7 +1776,9 @@ namespace Magelight {
             "document.addEventListener('mouseover',function(ev){over=ev.target;},true);"
             "document.addEventListener('mousedown',quiet,true);document.addEventListener('keydown',quiet,true);"
             "document.addEventListener('wheel',quiet,true);document.addEventListener('scroll',hide,true);"
-            "})();"
+            "})();" +
+            // Gamepad (1.6.0): window.magelight.gamepad, idle until the host sends '__gamepad' (GamepadScript.h).
+            std::string(Gamepad::kPageScript) +
             "}";
         std::size_t count = 0;
         {
@@ -9541,6 +9612,143 @@ float4 ps_straight(VSOut i) : SV_Target {
         return MAKELPARAM(static_cast<WORD>(s_ownCursorX), static_cast<WORD>(s_ownCursorY));
     }
 
+    // ── Gamepad layer (1.6.0, GamepadCore.h) ─────────────────────────────────
+    // Every engine gamepad event of a batch goes through the router, with or without a view holding the pad: it
+    // keeps which presses the game saw, so each release goes where its press went. A view holds the pad while it
+    // holds UI mode, opted in, with its page's helper ready, the game in the foreground and no menu that takes menu
+    // input above the focus menu. Flat only. The router and the plain statics are the input sink's (game thread).
+    static Gamepad::Router            s_gamepadRouter;
+    static Gamepad::BatchIn           s_gamepadIn;              // this batch's, for EndGamepadBatch
+    static bool                       s_gamepadHostDirty = false;
+    static std::uint64_t              s_gamepadSequence = 0;
+    static ViewId                     s_gamepadPacketView = 0;  // the view the last packet went to
+    static int                        s_gamepadBatches = 0, s_gamepadEmpty = 0;   // "trace"
+    static double                     s_gamepadTraceAt = 0.0;
+    static std::atomic<std::uint64_t> s_gamepadOwner{ 0 };
+    static std::atomic<std::uint64_t> s_gamepadGeneration{ 0 };
+    static std::atomic<bool>          s_gamepadConnected{ false };
+
+    static bool ForegroundIsGame()
+    {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        return pid == GetCurrentProcessId();
+    }
+
+    // A message box or another mod's menu over the page takes the pad: it is the menu that gets menu input.
+    static bool MenuInputAboveFocusMenu()
+    {
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui) return false;
+        const RE::IMenu* focus = MenuNamed(ui, MagelightFocusMenu::MENU_NAME);
+        const RE::IMenu* cursor = MenuNamed(ui, RE::CursorMenu::MENU_NAME);
+        if (!focus) return false;
+        bool past = false;
+        for (const auto& menu : ui->menuStack) {
+            const RE::IMenu* m = menu.get();
+            if (!m) continue;
+            if (m == focus) { past = true; continue; }
+            if (past && m != cursor && m->UsesMenuContext()) return true;
+        }
+        return false;
+    }
+
+    // Queues the packet for `view` (GamepadCore.h PacketJson); active false tells a view it no longer holds the pad.
+    static void SendGamepadPacket(ViewId view, bool active, const Gamepad::BatchOut& out)
+    {
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        MlView* v = FindViewLocked(view);
+        if (!v || v->gamepadPage.empty()) return;
+        if (v->outbound.size() >= kOutboundCap) {   // a page that stopped reading: it gets the state once it reads again
+            v->gamepadDirty = true;
+            return;
+        }
+        Gamepad::PacketIn p;
+        p.page = v->gamepadPage;
+        p.generation = out.generation;
+        p.sequence = ++s_gamepadSequence;
+        p.active = active;
+        p.reset = out.reset || !active;
+        p.enabled = v->gamepad.enabled && s_gamepadTuning.enabled;
+        p.connected = s_gamepadConnected.load();
+        p.style = v->gamepad.style;
+        p.mode = active ? out.mode : v->gamepadMode;
+        p.gamepadDevice = out.gamepadDevice;
+        p.glyphs = s_gamepadTuning.glyphs;
+        p.config = &v->gamepad;
+        p.dt = out.dt;
+        p.events = active ? &out.events : nullptr;
+        QueueOutboundLocked(*v, { "__gamepad", Gamepad::PacketJson(p), false });
+    }
+
+    // False: no gamepad layer this batch (VR, or Magelight.json "gamepad" off), and the pad passes untouched.
+    static bool BeginGamepadBatch(bool empty)
+    {
+        if (REL::Module::IsVR() || !s_gamepadTuning.enabled) return false;
+        Gamepad::BatchIn in;
+        in.now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto* mgr = RE::BSInputDeviceManager::GetSingleton();
+        in.connected = mgr && mgr->IsGamepadConnected() && mgr->IsGamepadEnabled();
+        if (in.connected) {
+            if (auto* pad = skyrim_cast<RE::BSWin32GamepadDevice*>(mgr->GetGamepad())) {
+                const auto& g = pad->GetRuntimeData().currentState.gamepad;
+                in.pad = { g.buttons, g.leftTrigger, g.rightTrigger, g.thumbLX, g.thumbLY, g.thumbRX, g.thumbRY };
+            }
+        }
+        s_gamepadHostDirty = false;
+        if (in.connected && s_focused.load() && !s_renderDead.load() && ForegroundIsGame() && !MenuInputAboveFocusMenu()) {
+            const auto uiView = static_cast<ViewId>(s_uiModeView.load());
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(uiView);
+            if (v && !v->destroyPending && v->gamepad.enabled && !v->gamepadPage.empty()) {
+                in.owner = uiView;
+                in.ownerEpoch = v->gamepadEpoch;
+                in.config = v->gamepad;
+                in.mode = v->gamepadMode;
+                in.escapeCaptured = v->escapeCapture;
+                s_gamepadHostDirty = v->gamepadDirty;
+                v->gamepadDirty = false;
+            }
+        }
+        s_gamepadRouter.tuning = s_gamepadTuning;
+        s_gamepadRouter.Begin(in);
+        s_gamepadIn = in;
+        if (s_gamepadTuning.trace) {
+            ++s_gamepadBatches;
+            if (empty) ++s_gamepadEmpty;
+            if (in.now - s_gamepadTraceAt >= 1.0) {
+                SKSE::log::info("Magelight: gamepad batches {} (empty {}) connected {} owner {}", s_gamepadBatches,
+                    s_gamepadEmpty, in.connected, s_gamepadRouter.Owner());
+                s_gamepadBatches = s_gamepadEmpty = 0;
+                s_gamepadTraceAt = in.now;
+            }
+        }
+        return true;
+    }
+
+    static void EndGamepadBatch()
+    {
+        const Gamepad::BatchOut out = s_gamepadRouter.End();
+        const auto owner = static_cast<ViewId>(s_gamepadRouter.Owner());
+        s_gamepadOwner.store(owner);
+        s_gamepadGeneration.store(out.generation);
+        s_gamepadConnected.store(s_gamepadIn.connected);
+        if (s_gamepadPacketView && s_gamepadPacketView != owner) {   // its page cancels what it holds
+            SendGamepadPacket(s_gamepadPacketView, false, out);
+            s_gamepadPacketView = 0;
+        }
+        if (!owner) return;
+        for (const int vk : out.keys) QueueVirtualKey(vk);
+        if (!out.events.empty() || out.reset || out.stateChanged || s_gamepadHostDirty || s_gamepadPacketView != owner) {
+            SendGamepadPacket(owner, true, out);
+            s_gamepadPacketView = owner;
+        }
+        if (out.mode != s_gamepadIn.mode) {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            if (MlView* v = FindViewLocked(owner)) v->gamepadMode = out.mode;
+        }
+    }
+
     class InputSink final : public RE::BSTEventSink<RE::InputEvent*> {
     public:
         static InputSink* GetSingleton()
@@ -9554,6 +9762,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
             if (!a_events) return RE::BSEventNotifyControl::kContinue;
             const bool focused = s_focused.load() && !s_renderDead.load();
+            const bool pad = BeginGamepadBatch(*a_events == nullptr);
             // While UI mode is on, keyboard button events END here: the page
             // already received the key through the window proc, and every
             // sink registered after ours (other mods' hotkeys) would
@@ -9622,6 +9831,21 @@ float4 ps_straight(VSOut i) : SV_Target {
                         prev = e; e = next;
                         continue;
                     }
+                    // The gamepad (1.6.0): the router decides; a consumed event ends here, as a typed key does.
+                    if (pad && b->GetDevice() == RE::INPUT_DEVICE::kGamepad) {
+                        if (s_gamepadTuning.trace)
+                            SKSE::log::info("Magelight: gamepad button {} value {:.2f}", b->GetIDCode(), b->Value());
+                        const auto control = Gamepad::FromSkseKeycode(SKSE::InputMap::GamepadMaskToKeycode(b->GetIDCode()));
+                        if (s_gamepadRouter.Button(control, b->Value())) {
+                            if (prev) prev->next = next;
+                            else *const_cast<RE::InputEvent**>(a_events) = next;
+                            e = next;
+                            continue;
+                        }
+                        prev = e; e = next;
+                        continue;
+                    }
+                    if (pad && b->GetDevice() == RE::INPUT_DEVICE::kMouse && b->IsDown()) s_gamepadRouter.OtherDeviceActivity();
                     // VR controllers (kVivePrimary..kWMRSecondary): record the
                     // edge for the VR presenter's laser (VR-3) and give the
                     // headset a way OUT of UI mode — B/Y on either hand closes,
@@ -9706,10 +9930,19 @@ float4 ps_straight(VSOut i) : SV_Target {
                     }
                 } else if (focused && type == RE::INPUT_EVENT_TYPE::kMouseMove && !VR::IsLive()) {
                     const auto* mm = e->AsMouseMoveEvent();
+                    if (pad && mm && (mm->mouseInputX || mm->mouseInputY)) s_gamepadRouter.OtherDeviceActivity();
                     QueueInput(WM_MOUSEMOVE, 0,
                         PackCursorPos(mm ? mm->mouseInputX : 0, mm ? mm->mouseInputY : 0));
                 } else if (type == RE::INPUT_EVENT_TYPE::kThumbstick) {
                     if (const auto* ts = e->AsThumbstickEvent()) {
+                        if (pad && ts->GetDevice() == RE::INPUT_DEVICE::kGamepad &&
+                            s_gamepadRouter.Stick(ts->IsLeft() ? Gamepad::Control::LeftStick : Gamepad::Control::RightStick,
+                                                  ts->xValue, ts->yValue)) {
+                            if (prev) prev->next = next;
+                            else *const_cast<RE::InputEvent**>(a_events) = next;
+                            e = next;
+                            continue;
+                        }
                         const int dev = static_cast<int>(ts->GetDevice());
                         if (dev >= static_cast<int>(RE::INPUT_DEVICE::kVivePrimary) &&
                             dev <= static_cast<int>(RE::INPUT_DEVICE::kWMRSecondary)) {
@@ -9727,6 +9960,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
                 prev = e; e = next;
             }
+            if (pad) EndGamepadBatch();
             return RE::BSEventNotifyControl::kContinue;
         }
     };
@@ -10534,6 +10768,50 @@ float4 ps_straight(VSOut i) : SV_Target {
         SKSE::log::info("Magelight: view {} prepaint {}", view,
                         on ? "on - painted while hidden after it loads, and once more when its page settles" : "off");
         return true;
+    }
+
+    bool SetViewGamepad(ViewId view, const Gamepad::ViewConfig& config)
+    {
+        {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending || v->isInspector) return false;
+            v->gamepad = config;
+            v->gamepadMode = config.startInCursor && config.allowCursor ? Gamepad::Mode::Cursor : Gamepad::Mode::Navigation;
+            v->gamepadDirty = true;
+        }
+        SKSE::log::info("Magelight: view {} gamepad {}{}", view,
+                        !config.enabled ? "off" : config.style == Gamepad::Style::Navigation ? "on (navigation)" : "on (keys)",
+                        config.enabled && config.allowCursor ? ", cursor allowed" : "");
+        return true;
+    }
+
+    bool GetViewGamepad(ViewId view, Gamepad::ViewConfig* config, bool* capturing, Gamepad::Mode* mode,
+                        std::uint64_t* generation)
+    {
+        std::lock_guard<std::mutex> lk(s_viewsMutex);
+        const MlView* v = FindViewLocked(view);
+        if (!v || v->isInspector) return false;
+        if (config) *config = v->gamepad;
+        if (capturing) *capturing = s_gamepadOwner.load() == view;
+        if (mode) *mode = v->gamepadMode;
+        if (generation) *generation = s_gamepadGeneration.load();
+        return true;
+    }
+
+    bool GamepadAvailable()
+    {
+        return !REL::Module::IsVR() && s_gamepadTuning.enabled;
+    }
+
+    bool GamepadConnected()
+    {
+        return s_gamepadConnected.load();
+    }
+
+    Gamepad::Glyphs GamepadGlyphs()
+    {
+        return s_gamepadTuning.glyphs;
     }
 
     bool SetViewLoadOnShow(ViewId view, bool onShow)

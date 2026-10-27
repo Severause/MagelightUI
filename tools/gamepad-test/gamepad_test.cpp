@@ -201,6 +201,7 @@ int main()
     {
         Router r;
         r.Begin(Owned(0.0, Style::Navigation));
+        Check(r.Owner() == 7, "the opted-in view with the pad connected owns it");
         r.Button(Control::DpadDown, 1.0f);
         const BatchOut first = r.End();
         Check(HasEvent(first, Control::DpadDown, Action::Down, Phase::Press), "d-pad down sends down/press at once");
@@ -283,6 +284,7 @@ int main()
         BatchIn off = Owned(0.40, Style::Navigation);
         off.connected = false;
         r.Begin(off);
+        Check(r.Owner() == 0, "no view owns a disconnected pad");
         const BatchOut gone = r.End();
         Check(gone.events.empty(), "a disconnected pad repeats nothing");
         BatchIn back = Owned(0.50, Style::Navigation);
@@ -299,6 +301,7 @@ int main()
         BatchIn in = Owned(0.0, Style::Navigation);
         in.owner = 0;
         r.Begin(in);
+        Check(r.Owner() == 0, "with no owner, the router names none");
         Check(!r.Button(Control::South, 1.0f), "with no owner, A is not consumed");
         Check(r.End().events.empty(), "with no owner, nothing is sent");
     }
@@ -362,6 +365,22 @@ int main()
         r.OtherDeviceActivity();
         const BatchOut out = r.End();
         Check(out.pointer.release && !out.gamepadDevice, "a mouse move during a cursor press releases it and hands the device back");
+    }
+
+    // page_mode_change_releases_cursor_press: the page's setMode('navigation') during a cursor press releases it.
+    {
+        Router r;
+        BatchIn in = Owned(0.0, Style::Navigation);
+        in.config.allowCursor = true;
+        in.mode = Mode::Cursor;
+        r.Begin(in);
+        r.Button(Control::South, 1.0f);
+        r.End();
+        in.now = 0.02;
+        in.mode = Mode::Navigation;
+        r.Begin(in);
+        const BatchOut out = r.End();
+        Check(out.pointer.release && out.mode == Mode::Navigation, "a mode change from the page releases the cursor's press");
     }
 
     // overflow_resets: more than 128 events in a batch are dropped and the pad must return to neutral.
