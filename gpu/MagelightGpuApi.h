@@ -24,7 +24,7 @@ struct ID3D11ShaderResourceView;
 
 // The C ABI's revision: bump it whenever an MgGpu_* signature or meaning changes. The host refuses a backend built
 // with another revision. A backend exports every function below; the host treats a missing one as a broken build.
-#define MGGPU_CONTRACT 2u
+#define MGGPU_CONTRACT 3u
 
 extern "C" {
 
@@ -44,7 +44,10 @@ extern "C" {
 
     // Create a driver bound to the GAME's device/context (not owned). `log`
     // receives human-readable errors (may be null). Returns an opaque handle,
-    // or null on failure.
+    // or null on failure. Contract 3: the context may be a deferred context of
+    // that device (the host's page thread). Every call below then records into
+    // it, and the host runs the list on the immediate context; only the thread
+    // that owns Ultralight calls the driver, whichever context it was given.
     typedef void (*MgGpuLogFn)(const char* message);
     MGGPU_API void* MgGpu_Create(ID3D11Device* device, ID3D11DeviceContext* context, MgGpuLogFn log);
 
