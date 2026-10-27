@@ -670,6 +670,12 @@ namespace Magelight {
         }
     }
 
+    // Once, by the first thing that needs it: InstallHook at Magelight's kDataLoaded, or a plugin asking about the
+    // gamepad layer from its own kDataLoaded, which SKSE can deliver before Magelight's (QueryCapability("gamepad")
+    // would answer from the defaults, and a bridge stepping aside on it would leave a player who turned it off with none).
+    static std::once_flag s_hostSettingsOnce;
+    static void EnsureHostSettings() { std::call_once(s_hostSettingsOnce, LoadHostSettings); }
+
     // ── GPU backend (MagelightGPU.dll — optional; CPU surface is the fallback)
     // Resolved via GetProcAddress after the runtime preload. See
     // gpu/MagelightGpuApi.h for the contract.
@@ -9536,7 +9542,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
         // Host settings (toggle key, demo views) — s_runtimeDir is set by
         // PreloadRuntime, well before kDataLoaded lands here.
-        LoadHostSettings();
+        EnsureHostSettings();
         ApplyExceptionTelemetrySetting();
         InstallPolledKeyFilter();
         InstallGameCursorSkip();
@@ -9756,6 +9762,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // False: no gamepad layer this batch (VR, or Magelight.json "gamepad" off), and the pad passes untouched.
     static bool BeginGamepadBatch(bool empty)
     {
+        EnsureHostSettings();   // the sink runs from kInputLoaded, before Magelight's kDataLoaded reads them
         if (REL::Module::IsVR() || !s_gamepadTuning.enabled) return false;
         Gamepad::BatchIn in;
         in.now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -10902,6 +10909,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     bool GamepadAvailable()
     {
+        EnsureHostSettings();
         return !REL::Module::IsVR() && s_gamepadTuning.enabled;
     }
 
@@ -10912,6 +10920,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     Gamepad::Glyphs GamepadGlyphs()
     {
+        EnsureHostSettings();
         return s_gamepadTuning.glyphs;
     }
 
