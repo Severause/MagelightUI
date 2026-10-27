@@ -4,8 +4,10 @@ rem runs it without the page VM's lock, which must still crash (as Ultralight 2.
 rem then with the host's lock (src\PageStackCore.h) on the CPU and on the GPU, three rounds each. GPU mode takes
 rem MagelightGPU.dll from the build dir (MG_BUILD_DIR, default C:\b\mgl: its unpatched copy) and is skipped when there
 rem is none. A failure means PageStackCore.h no longer holds for this SDK: an export it resolves is gone, or the lock
-rem no longer cures the crash, or the crash no longer needs it. %1 = output folder (default C:\b\mgl-fibergc).
-rem Exit 0 when all of it holds.
+rem no longer cures the crash, or the crash no longer needs it. Then the page thread's gate (invariant 27): pages on a
+rem thread of their own must pass WITHOUT the lock (a real thread's stack is WebKit's own, in a frame and between
+rem frames) and with it (the host holds it there for speed), CPU and GPU. %1 = output folder (default
+rem C:\b\mgl-fibergc). Exit 0 when all of it holds.
 setlocal
 set "OUT=%~1"
 if "%OUT%"=="" set "OUT=C:\b\mgl-fibergc"
@@ -33,6 +35,14 @@ echo.
 echo == the host's lock, CPU
 "%OUT%\fibergc.exe" "%UL%" "%TESTS%" --lock session --rounds 3
 if %ERRORLEVEL% NEQ 0 (echo GATE FAIL: CPU with the lock& set /a FAILS+=1)
+echo.
+echo == the page thread without the lock, CPU (must pass)
+"%OUT%\fibergc.exe" "%UL%" "%TESTS%" --thread --lock none --rounds 3
+if %ERRORLEVEL% NEQ 0 (echo GATE FAIL: the page thread without the lock, CPU& set /a FAILS+=1)
+echo.
+echo == the page thread with the host's lock, CPU
+"%OUT%\fibergc.exe" "%UL%" "%TESTS%" --thread --lock session --rounds 3
+if %ERRORLEVEL% NEQ 0 (echo GATE FAIL: the page thread with the lock, CPU& set /a FAILS+=1)
 if not exist "%BUILD%\MagelightGPU.dll" (
   echo No %BUILD%\MagelightGPU.dll: GPU mode skipped ^(build.ps1 first^)
   goto done
@@ -41,6 +51,14 @@ echo.
 echo == the host's lock, GPU
 "%OUT%\fibergc.exe" "%UL%" "%TESTS%" --lock session --rounds 3 --gpu "%BUILD%"
 if %ERRORLEVEL% NEQ 0 (echo GATE FAIL: GPU with the lock& set /a FAILS+=1)
+echo.
+echo == the page thread without the lock, GPU (must pass)
+"%OUT%\fibergc.exe" "%UL%" "%TESTS%" --thread --lock none --rounds 3 --gpu "%BUILD%"
+if %ERRORLEVEL% NEQ 0 (echo GATE FAIL: the page thread without the lock, GPU& set /a FAILS+=1)
+echo.
+echo == the page thread with the host's lock, GPU
+"%OUT%\fibergc.exe" "%UL%" "%TESTS%" --thread --lock session --rounds 3 --gpu "%BUILD%"
+if %ERRORLEVEL% NEQ 0 (echo GATE FAIL: the page thread with the lock, GPU& set /a FAILS+=1)
 :done
 echo.
 if %FAILS% EQU 0 (echo GATE PASS) else (echo GATE FAILED: %FAILS%)
