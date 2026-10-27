@@ -1,0 +1,16 @@
+{
+  "modId": "MgLoadTest",
+  "name": "Magelight Load Test",
+  "version": "1.0.0",
+  "minHost": "1.7.0",
+  "views": {
+    "load": {
+      "path": "views/load/index.html",
+      "layer": "panel",
+      "anchor": "top-right",
+      "x": 24, "y": 24, "w": 460, "h": 420,
+      "hotkey": "F10",
+      "loadOnShow": true
+    }
+  }
+}
