@@ -3389,7 +3389,36 @@ namespace Magelight {
     }
 
     // False when the timer cannot start: the caller then exits as usual, never a hold nothing ends.
-    static bool ArmControlsHold(const VR::HeldButtons& held)
+    // Gamepad layer (1.6.0): the pad controls down now (a bit per Gamepad::Control) and when each was last pressed,
+    // written by the input sink, so an exit of a view that held the pad keeps the controls until the button that
+    // closed it is up, as on VR (a B the game saw released would open the Tween menu). s_heldPad is the hold's share.
+    static std::atomic<std::uint64_t> s_gamepadOwner{ 0 };              // the view holding the pad, as of the last batch
+    static std::atomic<std::uint32_t> s_gamepadHeld{ 0 };
+    static std::array<std::atomic<std::uint64_t>, Gamepad::kControlCount> s_gamepadPressedMs{};
+    static std::atomic<std::uint32_t> s_heldPad{ 0 };
+    static std::atomic<bool>          s_gamepadHidesCursor{ false };    // the pad navigates: no pointer to draw
+    static std::atomic<bool>          s_gamepadKeyActivity{ false };    // a key went down: the keyboard is the device
+
+    static void NoteGamepadControl(Gamepad::Control c, bool down)
+    {
+        const auto i = Gamepad::Index(c);
+        if (c == Gamepad::Control::None || i >= Gamepad::kControlCount) return;
+        const std::uint32_t bit = 1u << i;
+        if (down && !(s_gamepadHeld.fetch_or(bit) & bit)) s_gamepadPressedMs[i].store(GetTickCount64());
+        if (!down) s_gamepadHeld.fetch_and(~bit);
+    }
+
+    // The pad controls down now that were pressed at or after `sinceTickMs`.
+    static std::uint32_t GamepadHeldPressedSince(std::uint64_t sinceTickMs)
+    {
+        std::uint32_t out = 0;
+        const std::uint32_t held = s_gamepadHeld.load();
+        for (std::size_t i = 1; i < Gamepad::kControlCount; ++i)
+            if ((held & (1u << i)) && s_gamepadPressedMs[i].load() >= sinceTickMs) out |= 1u << i;
+        return out;
+    }
+
+    static bool ArmControlsHold(const VR::HeldButtons& held, std::uint32_t pad)
     {
         std::uint32_t gen = s_holdCounter.fetch_add(1) + 1;
         if (!gen) gen = s_holdCounter.fetch_add(1) + 1;
@@ -3404,6 +3433,7 @@ namespace Magelight {
         }
         s_heldRuntime.store(held.runtime);
         s_heldEngine.store(held.engine);
+        s_heldPad.store(pad);
         s_heldGen.store(gen);
         return true;
     }
@@ -3450,7 +3480,10 @@ namespace Magelight {
         // See s_heldGen. Entering again ends a pending hold here: its focus menu is still open.
         const VR::HeldButtons heldAtExit = (!on && !s_exitWithoutHold && VR::IsVRRuntime())
             ? VR::HeldButtonsPressedSince(s_uiModeEnteredMs.load()) : VR::HeldButtons{};
-        const bool holdForRelease = heldAtExit.Any() && ArmControlsHold(heldAtExit);
+        // Only a view that held the pad: every other view closes as it always has.
+        const std::uint32_t padAtExit = (!on && !s_exitWithoutHold && uiView && s_gamepadOwner.load() == uiView)
+            ? GamepadHeldPressedSince(s_uiModeEnteredMs.load()) : 0;
+        const bool holdForRelease = (heldAtExit.Any() || padAtExit) && ArmControlsHold(heldAtExit, padAtExit);
         const bool holdCancelled = on && s_heldGen.exchange(0) != 0;
 
         if (auto* queue = RE::UIMessageQueue::GetSingleton()) {
@@ -3849,6 +3882,7 @@ namespace Magelight {
             return true;
         case WM_KEYDOWN: case WM_KEYUP:
         case WM_CHAR:
+            if (msg == WM_KEYDOWN) s_gamepadKeyActivity.store(true);   // the input sink hands the keyboard the device
             if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wparam == VK_PROCESSKEY) {   // the IME owns this key
                 if (((lparam >> 16) & 0xFF) == 0x01) {
                     // An Escape the IME consumed: its plain key-up (and any character) is the IME's too.
@@ -8306,7 +8340,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                 if (gen != postedGen) {
                     const std::uint64_t now = GetTickCount64();
                     const VR::HeldButtons held = VR::HeldButtonsNow();
-                    if ((held.runtime & s_heldRuntime.load()) | (held.engine & s_heldEngine.load())) upSinceMs = 0;
+                    if ((held.runtime & s_heldRuntime.load()) | (held.engine & s_heldEngine.load()) |
+                        (s_gamepadHeld.load() & s_heldPad.load()))
+                        upSinceMs = 0;
                     else if (!upSinceMs) upSinceMs = now;
                     if (upSinceMs && now - upSinceMs >= kHeldReleaseSettleMs) {
                         postedGen = gen;
@@ -8510,7 +8546,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             // but in the UI pass the CursorMenu draws after us.
             // This quad tracks the same MenuCursor position, sized from
             // cursorHeight at 1080p and scaled with the back buffer's height.
-            if (anyVisible && s_focused.load() && s_cursorSrv && bh > 0 && !VR::IsLive()) {   // never on a prepaint-only frame
+            if (anyVisible && s_focused.load() && s_cursorSrv && bh > 0 && !VR::IsLive() &&   // never on a prepaint-only frame
+                !s_gamepadHidesCursor.load()) {
                 const float px = static_cast<float>(s_cursorPosX.load());
                 const float py = static_cast<float>(s_cursorPosY.load());
                 const int artHeight = static_cast<int>(std::lround(s_cursorHeight * (bh / 1080.0f)));
@@ -9624,7 +9661,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     static ViewId                     s_gamepadPacketView = 0;  // the view the last packet went to
     static int                        s_gamepadBatches = 0, s_gamepadEmpty = 0;   // "trace"
     static double                     s_gamepadTraceAt = 0.0;
-    static std::atomic<std::uint64_t> s_gamepadOwner{ 0 };
+    static bool                       s_gamepadCursorDown = false;   // cursor mode's left press is down
     static std::atomic<std::uint64_t> s_gamepadGeneration{ 0 };
     static std::atomic<bool>          s_gamepadConnected{ false };
 
@@ -9712,6 +9749,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         s_gamepadRouter.tuning = s_gamepadTuning;
         s_gamepadRouter.Begin(in);
+        if (s_gamepadKeyActivity.exchange(false)) s_gamepadRouter.OtherDeviceActivity();
         s_gamepadIn = in;
         if (s_gamepadTuning.trace) {
             ++s_gamepadBatches;
@@ -9737,7 +9775,31 @@ float4 ps_straight(VSOut i) : SV_Target {
             SendGamepadPacket(s_gamepadPacketView, false, out);
             s_gamepadPacketView = 0;
         }
+        // Cursor mode moves the cursor the mouse moves (MenuCursor), so the page sees one pointer; every press it
+        // sends gets its release (invariant 24), also when the view loses the pad.
+        if (s_gamepadCursorDown && (out.pointer.release || !owner)) {
+            QueueInput(WM_LBUTTONUP, 0, PackCursorPos());
+            s_gamepadCursorDown = false;
+            s_mouseDown.store(false);
+        }
+        s_gamepadHidesCursor.store(owner && out.mode == Gamepad::Mode::Navigation && out.gamepadDevice);
         if (!owner) return;
+        if (out.pointer.dx != 0.0f || out.pointer.dy != 0.0f) {
+            const int bw = s_backbufferW.load(), bh = s_backbufferH.load();
+            if (auto* mc = RE::MenuCursor::GetSingleton(); mc && bw > 0 && bh > 0) {
+                const float scale = bh / 1080.0f;
+                auto& rd = mc->GetRuntimeData();
+                rd.cursorPosX = std::clamp(rd.cursorPosX + out.pointer.dx * scale, 0.0f, static_cast<float>(bw - 1));
+                rd.cursorPosY = std::clamp(rd.cursorPosY + out.pointer.dy * scale, 0.0f, static_cast<float>(bh - 1));
+                QueueInput(WM_MOUSEMOVE, 0, PackCursorPos());
+            }
+        }
+        for (const bool down : out.pointer.buttons) {
+            if (down == s_gamepadCursorDown) continue;
+            QueueInput(down ? WM_LBUTTONDOWN : WM_LBUTTONUP, 0, PackCursorPos());
+            s_gamepadCursorDown = down;
+            s_mouseDown.store(down);
+        }
         for (const int vk : out.keys) QueueVirtualKey(vk);
         if (!out.events.empty() || out.reset || out.stateChanged || s_gamepadHostDirty || s_gamepadPacketView != owner) {
             SendGamepadPacket(owner, true, out);
@@ -9836,6 +9898,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                         if (s_gamepadTuning.trace)
                             SKSE::log::info("Magelight: gamepad button {} value {:.2f}", b->GetIDCode(), b->Value());
                         const auto control = Gamepad::FromSkseKeycode(SKSE::InputMap::GamepadMaskToKeycode(b->GetIDCode()));
+                        NoteGamepadControl(control, b->Value() >= 0.1f);
                         if (s_gamepadRouter.Button(control, b->Value())) {
                             if (prev) prev->next = next;
                             else *const_cast<RE::InputEvent**>(a_events) = next;
