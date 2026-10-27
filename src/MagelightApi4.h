@@ -133,6 +133,8 @@ namespace Magelight::Api4 {
     Result RebuildViewAtScale(ViewId view, float scale);                         // 0.31.7 reload the page at a new device scale
     Result SetViewKeyboardTheme(ViewId view, const MAGELIGHT_API::KeyboardTheme* theme);   // 0.31.9 the VR keyboard's colours
     Result SetViewPrepaint(ViewId view, bool on);                                          // 0.31.11 paint while hidden (and at settle from 1.5.0)
+    Result SetViewGamepad(ViewId view, const MAGELIGHT_API::GamepadConfig* config);         // 1.6.0 the gamepad layer's opt-in
+    Result GetViewGamepadState(ViewId view, MAGELIGHT_API::GamepadState* out);              // 1.6.0
     // 0.31.0: a manifest's top-level "cursor", the default for every view of the mod without a cursor of its own
     // (existing views now, later ones at CreateViewEx).
     void SetModCursor(ModId mod, const Magelight::CursorSet& set);
