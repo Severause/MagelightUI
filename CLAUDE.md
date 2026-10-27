@@ -419,7 +419,11 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     frame's views that are still wanted, then lets the next page frame start (`PageThread::Handoff`). The game
     thread never waits on the page thread: no join, no wait on its frames, and no lock held across page script (the
     host runs none under `s_viewsMutex`, invariant 16), so a page stuck in a script freezes only itself (the stall
-    watchdog names it). A packet's `PresentedView`s hold SRV references of their own and never `ul` (a View's
+    watchdog names it). The locks the page work holds across Ultralight or driver calls (`s_viewsMutex`,
+    `s_imagesMutex`) are `PageThread::OwnedMutex`es: built /EHsc, a fault the page thread's SEH guard catches runs
+    no destructor, so the guard gives back what its thread still holds (`ReleasePageLocksAfterFault`) or the game's
+    next lock hangs; a new lock held across such calls on the page side must be one too. A packet's
+    `PresentedView`s hold SRV references of their own and never `ul` (a View's
     reference count is Ultralight's); a recorded list keeps every resource it uses alive until it is released, so
     a View Ultralight frees meanwhile needs no retire queue (`tools/deferred-test`). Engine work at Present
     (`GameBookkeeping`, the overlay menu, the UI pass, the cursor quad) stays on the game thread. The mode is decided
