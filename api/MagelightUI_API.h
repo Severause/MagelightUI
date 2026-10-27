@@ -21,6 +21,10 @@
 //    task to the game thread).
 //  - JS listener callbacks fire on the RENDER thread mid-frame — snapshot
 //    what you need, then post the game-state work with PostGameTask (0.30.1+).
+//    The render thread is the game's main thread inside Present, or, when the
+//    player turned on Magelight.json "pageThread" (host 1.7.0+, flat only),
+//    Magelight's own page thread: never assume either, and never touch RE::
+//    state from a render-thread callback.
 //  - Never call SKSE's AddTask or AddUITask from a callback the host makes
 //    inside a frame: JS listeners, DOM ready, VR callbacks, and for a
 //    RenderThread mod its events and EvalJS results (and onLog for a call made

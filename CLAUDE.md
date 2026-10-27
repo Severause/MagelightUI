@@ -25,6 +25,7 @@ src/MagelightVR.h           the VR presenter's interface to the host (docs/VR_PR
 src/MagelightVR/            the VR presenter: Runtime, Overlays, Laser, Input, Bindings, Lifecycle; State.h = the state they share and its rules
 src/GamepadCore.h           the gamepad layer's rules (1.6.0): who holds the pad, dead zones, repeat, held buttons, the keys style, the page packet; engine-free
 src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
+src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -46,8 +47,11 @@ tools/ime-box-test/         the page core's IME candidate box in Ultralight's ow
 tools/editor-test/          src/EditStateCore.h's text-focus rules on real EditableState reports, typed text as the host fires it, views/keyboard's layouts (build.bat)
 tools/gamepad-test/         src/GamepadCore.h's ledger, router, keys style and packet (build.bat)
 tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus by geometry under zoom and device scale, scopes, editing, stale packets (build.bat)
-tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1)
+tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it; --thread: pages on the page thread, which must pass without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1) or the page thread (MG_PAGE_THREAD=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
+tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
+tools/pagethread-test/      src/PageThreadCore.h: Decide, and the handoff (no page frame dropped, the game thread never waits, a stuck page included) (build.bat)
+tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
 build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <that>\stage (namespaced runtime patch)
 ```
@@ -77,8 +81,14 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    `tools/fiber-gc-test` (build.bat) at every SDK update; it must still crash without the lock and pass with it,
    CPU and GPU, and `tools/stack-test`'s `stack_probe` checks the zones on the game's stack. The other tools'
    checks hold on the fiber too: run them again with `MG_PAGE_FIBER=1` set (`tools/fiber-gc-test/FiberRun.h`).
+   With `"pageThread"` (1.7.0, invariant 27) none of this applies: Ultralight is created on Magelight's page
+   thread, whose stack is its own in a frame and between frames, so there is no fiber, no game-stack zones, and
+   the collector crash the lock prevents cannot happen (`fiber-gc-test --thread --lock none` must pass). The page
+   thread still holds the lock between frames, for speed only (an idle frame about 13 us against 235). The mode
+   is decided at render init, before the renderer exists: the fiber and the page thread are never both used, and
+   the tools run on it with `MG_PAGE_THREAD=1`.
 2. **Listener callbacks fire on the render thread** (JS listeners, DOM ready, console, load
-   failed). Game state = `GameTask::Post` (`MagelightGameTask.h` says why), never a raw
+   failed): the game's main thread inside Present, or the page thread with `pageThread` (invariant 27). Game state = `GameTask::Post` (`MagelightGameTask.h` says why), never a raw
    `SKSE::GetTaskInterface()->AddTask`; mods use `PostGameTask`. A new main-thread entry point
    (a hook, a sink, an engine menu) holds a `GameTask::Scope` so its posts go through the pump. UI-mode entry/exit runs on the
    game thread (`SetUIMode` is an SEH-wrapped function: no locals with destructors inside it).
@@ -179,7 +189,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `ulFiberMB`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `ulFiberMB`, `pageThread`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).
@@ -399,3 +409,24 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     script must not bring a View's first one, invariant 25); the answer also gives the VR keyboard its
     decimal keypad. `tools/ime-test` and `tools/ime-box-test` check it, on the fiber too; re-run them
     at every SDK bump.
+27. **The page thread (`pageThread`, 1.7.0, flat only).** With it on, Magelight's page thread (`PageThreadMain`)
+    owns Ultralight from `Renderer::Create` on and is the render thread of invariants 2, 13, 16 and 22-26: every page
+    part of the frame (`PageWorkBegin`, `MaterializeImages`, Update, the second sync, the prepaint, Render,
+    `CollectView`, `TickMemoryReport`) runs there (`PageThreadFrame`) and nowhere else. `MagelightGPU.dll` gets a
+    deferred context of the game's device (contract 3) and only the page thread calls it; the game's immediate
+    context is used on the game thread alone, which at Present (`ThreadModeFrame`) runs every finished page frame's
+    command list in order (none is ever dropped: each carries uploads later frames build on), then draws the newest
+    frame's views that are still wanted, then lets the next page frame start (`PageThread::Handoff`). The game
+    thread never waits on the page thread: no join, no wait on its frames, and no lock held across page script (the
+    host runs none under `s_viewsMutex`, invariant 16), so a page stuck in a script freezes only itself (the stall
+    watchdog names it). A packet's `PresentedView`s hold SRV references of their own and never `ul` (a View's
+    reference count is Ultralight's); a recorded list keeps every resource it uses alive until it is released, so
+    a View Ultralight frees meanwhile needs no retire queue (`tools/deferred-test`). Engine work at Present
+    (`GameBookkeeping`, the overlay menu, the UI pass, the cursor quad) stays on the game thread. The mode is decided
+    at render init (`StartPageThread`, `PageThread::Decide`): VR, a single-threaded device, a refused deferred
+    context or a failed thread turn it Off with a log line, and the next frame starts Ultralight on the fiber. With
+    the setting off the frame is unchanged. Today's single thread no longer serializes the page parts against the
+    input sink, the window procedure, game tasks, Papyrus natives and API calls on the game thread: state they share
+    is atomic or under its mutex, and new shared state must be too. `tools/deferred-test`, `tools/pagethread-test`
+    and `fiber-gc-test --thread` are its gates; re-run them, and the page-facing tools with `MG_PAGE_THREAD=1`, at
+    every SDK bump.

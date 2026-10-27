@@ -58,3 +58,10 @@ Modifications vs the SDK reference driver (marked `// MG:` in source):
   apart) and the `Flush` commands run. The host's memory line reads it to say whether any page target took MSAA,
   which Ultralight's own memory report does not (its render-target bytes include the multisample surfaces).
 - Testing-only parts of the SDK driver (readback, GPU timing, its memory stats) are left out.
+- Contract 3 (1.7.0): the context `MgGpu_Create` is given may be a **deferred context** of the game's device (the
+  host's page thread, `"pageThread"`). Everything the driver does is then recorded and the host runs the list on the
+  immediate context at Present. On a deferred context `Flush` does nothing (a list cannot record one), the pipeline
+  backup and predication scopes are skipped (a list starts from default state and holds nothing of the game's), and
+  a boxed `UpdateSubresource` is given the bitmap's origin where the runtime emulates command lists
+  (`DriverCommandLists` false), which otherwise applies the box's offset twice. `tools/deferred-test` checks it
+  against the immediate context byte for byte, on hardware and on WARP (emulated lists).

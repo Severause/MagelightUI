@@ -27,10 +27,11 @@ audio, which neither engine can play itself.
 CPU path is fine for a light page; your page does nothing PrismaUI can't do; you don't want
 to touch a working integration. One design difference cuts the other way: PrismaUI runs
 Ultralight on a thread of its own, so a page's work stays off the game's frame. Magelight runs
-it on the game's main thread, inside the frame. GPU rendering and paused hidden pages keep a
-typical page cheap there, but a page that runs heavy script every frame costs the game that
-time. A dedicated thread for Magelight's page work is planned, which would take that cost off the
-game's frame as well. (Project-state facts — Nexus build version, game-version
+it on the game's main thread, inside the frame, by default. GPU rendering and paused hidden pages
+keep a typical page cheap there, but a page that runs heavy script every frame costs the game that
+time. Since 1.7.0 the player can move Magelight's page work to a thread of its own as well
+(`Magelight.json` `"pageThread": true`, flat only, opt-in while it gathers field reports), which
+takes that cost off the game's frame. (Project-state facts — Nexus build version, game-version
 compatibility — change over time; check them fresh rather than trusting
 any summary, including this one.)
 

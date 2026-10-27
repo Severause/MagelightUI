@@ -59,6 +59,46 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 1.7.0 - Unreleased
+
+### What players notice
+
+- **Pages can run on a thread of their own** (`Magelight.json` `"pageThread": true`, flat only; off by default in
+  this release). A page's scripts, layout and painting then no longer take time out of the game's frame: the game
+  thread only runs the GPU work the page thread recorded and draws the result, so a page that runs heavy script every
+  frame costs its own frame rate, not the game's. A page stuck in a script freezes only itself: the game keeps
+  running, the page's key and the toggle key still close it (Escape too, unless the page took Escape), and
+  `Magelight.log` names the stall once with the page thread's stack. A page shows each frame one game frame later than in the game's frame; the cursor does not lag. Magelight
+  turns the thread off for the session, with a log line saying why, on Skyrim VR, on a graphics device that cannot be
+  used from a second thread, or when the device (or a wrapper of it) refuses a deferred context; pages then run in
+  the game's frame as before.
+- With the thread on, `Magelight.log`'s cost line every 2 s is the game thread's (`prelude`, `execute`,
+  `composite`), and a second line gives the page thread's own (`ul.update`, `ul.render`, frames per second).
+  `tools/load-test` is a page that burns a chosen load, with the before/after protocol.
+
+### For mod authors
+
+- No new API. With `pageThread` on, the render thread of the threading contract is Magelight's page thread: JS
+  listeners, DOM-ready and console callbacks, and a `RenderThread` mod's events and `EvalJS` results run there,
+  no longer inside the game's Present. The rules are the ones `MagelightUI_API.h` already states (copy the argument,
+  post game work with `PostGameTask`, never touch `RE::` there). A mod that reached into `RE::` from a JS listener
+  got away with it on the game's main thread; on the page thread it races the game.
+- Texture images (`RegisterTextureImage`) keep working unchanged: the page thread's recorded draws sample your SRV
+  when the game thread runs them at Present, as before. Keep rendering on the game thread and `InvalidateImage`
+  after each update.
+
+### Packaging, licences and tools
+
+- `MagelightGPU.dll` contract 3: `MgGpu_Create` may be given a deferred context of the game's device. The driver
+  then records (no `Flush`, no pipeline backup), and offsets a boxed `UpdateSubresource` by the bitmap's origin
+  where Direct3D emulates command lists (`tools/deferred-test` proves the placement on WARP).
+- New offline tests: `tools/deferred-test` (the driver on a deferred context driven from a page thread against the
+  immediate context, byte for byte; a View freed while its target is held), `tools/pagethread-test` (the handoff:
+  no page frame dropped, the game thread never waits, a stuck page included). `tools/fiber-gc-test --thread` shows
+  pages on a real thread need no VM lock (its `build.bat` gates it), and `FiberRun.h`'s `MG_PAGE_THREAD=1` runs any
+  page-facing tool there.
+- `tools/load-test/MgLoadTest`: the in-game load kit (`package.ps1` zips it).
+
 ## 1.6.0 - Unreleased
 
 ### What players notice
