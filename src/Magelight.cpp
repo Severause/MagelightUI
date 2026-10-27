@@ -719,7 +719,7 @@ namespace Magelight {
     static MgGpuUnregExtFn s_gpuUnregExt = nullptr;
     static MgGpuStatsFn    s_gpuStats = nullptr;
     static void*          s_gpu = nullptr;       // backend handle (render thread)
-    static bool           s_gpuActive = false;   // accelerated path in use
+    static std::atomic<bool> s_gpuActive{ false };   // accelerated path in use (set by Ultralight's thread at its start)
 
     // Why a backend's build does not match this host's, or "" when it does. A mod manager can pair this
     // Magelight.dll with another mod's MagelightGPU.dll, and one built for another Ultralight SDK reads every
@@ -5738,10 +5738,9 @@ float4 ps_straight(VSOut i) : SV_Target {
     // page: outside every view the host cursor always draws, so a stale "none" never leaves the player without a
     // pointer. Precedence: cursorForce > the view's own set > its mod's default > the host cursor; modCursors false
     // drops the images and the tint.
-    static CursorPick PickCursorAt(int x, int y, float bw, float bh)
+    static CursorPick PickCursorAtLocked(int x, int y, float bw, float bh)
     {
         CursorPick pick;
-        std::lock_guard<std::mutex> lk(s_viewsMutex);
         const MlView* view = nullptr;
         bool inside = false;
         for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
@@ -5768,6 +5767,21 @@ float4 ps_straight(VSOut i) : SV_Target {
         pick.image = set.image[state];
         if (!pick.image && state == 1) pick.image = set.image[0];   // text keeps the host I-beam: the caret hint matters
         return pick;
+    }
+
+    // Game thread. With the page thread, its registry walks can hold the lock across a page's load or resize
+    // (MaterializeViews, ApplyPendingResizes): the cursor keeps the last frame's pick for this frame rather than wait
+    // (invariant 27). The pick owns its image (shared_ptr), so a view freed meanwhile takes nothing from under it.
+    static CursorPick PickCursorAt(int x, int y, float bw, float bh)
+    {
+        if (!PageThreadOn()) {
+            std::lock_guard<std::mutex> lk(s_viewsMutex);
+            return PickCursorAtLocked(x, y, bw, bh);
+        }
+        static CursorPick* const s_last = new CursorPick();   // never freed: no D3D release at exit
+        std::unique_lock<std::mutex> lk(s_viewsMutex, std::try_to_lock);
+        if (lk.owns_lock()) *s_last = PickCursorAtLocked(x, y, bw, bh);
+        return *s_last;
     }
 
     // VR laser end with vr.cursorDot false: the view's image for its page state, never "none" (the laser has to
@@ -8183,7 +8197,9 @@ float4 ps_straight(VSOut i) : SV_Target {
     // a minute) and on request (RequestMemoryReport, at most one every 10 s). GetMemoryUsage costs about a
     // millisecond and reclaims nothing; it runs after the frame's stage timing, so the line carries its own time.
     static std::atomic<bool> s_memReportRequested{ false };     // any thread
-    static std::chrono::steady_clock::time_point s_memAfterUi{};   // render thread: the last UI-mode exit, {} = none
+    // The last UI-mode exit in steady-clock ms, 0 = none: the game thread sets it (GameBookkeeping), the memory
+    // report reads it on Ultralight's thread (the page thread with pageThread).
+    static std::atomic<long long> s_memAfterUiMs{ 0 };
 
     // Render thread, inside FrameWork (invariant 1) and outside s_viewsMutex: GetMemoryUsage runs no page code, but
     // it is an Ultralight call like any other.
@@ -8214,8 +8230,9 @@ float4 ps_straight(VSOut i) : SV_Target {
             full = true;
             lastRequested = now;
         }
-        if (s_memAfterUi != Clock::time_point{} && now - s_memAfterUi >= std::chrono::seconds(5)) {
-            s_memAfterUi = {};
+        long long afterUi = s_memAfterUiMs.load();
+        const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        if (afterUi && nowMs - afterUi >= 5000 && s_memAfterUiMs.compare_exchange_strong(afterUi, 0)) {
             if (lastAfterUi == Clock::time_point{} || now - lastAfterUi >= std::chrono::seconds(60)) {
                 lastAfterUi = now;
                 if (!why) {
@@ -8351,7 +8368,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         ConfineCursor(s_focused.load());
         if (s_focused.load()) {
             if (s_focusMenuHideSeen.load()) CheckFocusMenuClosed();
-            s_memAfterUi = {};   // back in UI mode: the after-UI memory line waits for this exit
+            s_memAfterUiMs.store(0);   // back in UI mode: the after-UI memory line waits for this exit
             ++uiFrames;
             offFrames = -1;
             // The Cursor Menu reopened (MenuSink): its new movie is visible until hidden, at once and for a few
@@ -8399,7 +8416,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
             }
             if (uiFrames > 0) {
-                s_memAfterUi = std::chrono::steady_clock::now();
+                s_memAfterUiMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
                 offFrames = 0;
                 // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
                 // every page's cursor; each reports again on the first mouse move (the core re-sends it per move).
@@ -9270,20 +9288,23 @@ float4 ps_straight(VSOut i) : SV_Target {
         static PagePacket* s_held = nullptr;
         const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
         // The views wanted now, read here rather than from the page frame: one hidden since (Escape, a mod's hide) is
-        // not drawn even when the page thread is slow or stuck in a script. The page thread never runs script under
-        // the registry's lock (invariant 16), so this short walk never waits on a page.
+        // not drawn even when the page thread is slow or stuck in a script (it never runs script under the registry's
+        // lock, invariant 16).
+        // While a page load or resize holds the registry's lock (MaterializeViews, ApplyPendingResizes), this frame
+        // keeps the last frame's reading rather than wait.
         static std::vector<ViewId> s_wanted;
-        s_wanted.clear();
-        bool anyVisible = false, interactiveVisible = false;
-        {
-            std::lock_guard<std::mutex> lk(s_viewsMutex);
+        static bool s_anyVisible = false, s_interactiveVisible = false;
+        if (std::unique_lock<std::mutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock()) {
+            s_wanted.clear();
+            s_anyVisible = s_interactiveVisible = false;
             for (const auto& v : s_views) {
                 if (!v->visible) continue;
-                anyVisible = true;
-                interactiveVisible = interactiveVisible || !v->clickThrough;
+                s_anyVisible = true;
+                s_interactiveVisible = s_interactiveVisible || !v->clickThrough;
                 s_wanted.push_back(v->id);
             }
         }
+        const bool anyVisible = s_anyVisible, interactiveVisible = s_interactiveVisible;
         const CompositeTarget target = ChooseCompositeTarget(interactiveVisible);
         std::vector<QueuedQuad> queued;
         const EmitFn emit = MakeEmit(sc, target, queued);

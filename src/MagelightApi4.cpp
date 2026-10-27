@@ -49,6 +49,8 @@ namespace Magelight::Api4 {
 
     using namespace MAGELIGHT_API;
 
+    static std::string LastErrorText(ModId mod);   // fwd (beside GetLastErrorMessage)
+
     namespace {
 
         constexpr std::size_t kMaxSlugLen = 32;   // leaves room for "<slug>.<image>" under the 64-char image-name cap
@@ -496,7 +498,7 @@ namespace Magelight::Api4 {
                 }
                 const std::string detail = "queued request for view " + std::to_string(q.view);
                 if (RequestUIMode(q.view, q.flags & ~kUIModeFlagQueue) == Result::Ok) return;
-                SKSE::log::info("Magelight[v4]: {} skipped — {}", detail, GetLastErrorMessage(OwnerOf(q.view)));
+                SKSE::log::info("Magelight[v4]: {} skipped — {}", detail, LastErrorText(OwnerOf(q.view)));
             }
         }
 
@@ -1125,6 +1127,15 @@ namespace Magelight::Api4 {
         std::lock_guard<std::mutex> lk(s_mutex);
         Mod* m = FindLocked(mod);
         return m ? m->lastError.c_str() : "";
+    }
+
+    // The host's own reading of a mod's last error, copied under the lock: the pointer GetLastErrorMessage hands out
+    // lives only until the mod's next failing call, which with pageThread can come from the page thread meanwhile.
+    static std::string LastErrorText(ModId mod)
+    {
+        std::lock_guard<std::mutex> lk(s_mutex);
+        Mod* m = FindLocked(mod);
+        return m ? m->lastError : std::string();
     }
 
     Result BindHotkey(ViewId view, std::uint32_t dxScancode, std::uint32_t action)
@@ -1803,7 +1814,7 @@ namespace Magelight::Api4 {
                 if (Magelight::GetUIModeView() == hk.view) {
                     const Result r = ReleaseUIModeAs(OwnerOf(hk.view), false);
                     if (r != Result::Ok)
-                        SKSE::log::warn("Magelight[v4]: hotkey close refused — {}", GetLastErrorMessage(OwnerOf(hk.view)));
+                        SKSE::log::warn("Magelight[v4]: hotkey close refused — {}", LastErrorText(OwnerOf(hk.view)));
                     // A toggle key's close means HIDE. ReleaseUIMode alone keeps
                     // the page rendered (the Free Look contract: leaving UI mode
                     // never hides), which is right for a mod that asked for it
@@ -1887,7 +1898,7 @@ namespace Magelight::Api4 {
         vd.layer = Layer::Panel;
         ViewId id = 0;
         if (CreateViewEx(s_hostMod, &vd, &id) != Result::Ok) {
-            SKSE::log::warn("Magelight[v4]: host probe view failed — {}", GetLastErrorMessage(s_hostMod));
+            SKSE::log::warn("Magelight[v4]: host probe view failed — {}", LastErrorText(s_hostMod));
             return 0;
         }
         return id;
