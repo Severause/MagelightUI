@@ -168,6 +168,60 @@ magelight.hostTheme({
 - **Order with C++**: the plugin's `SetViewKeyboardTheme` / `SetViewCursorTint` and the page write the
   same slots; whichever comes last wins.
 
+## Gamepad (1.6.0)
+
+A view its mod opted in (C++ `SetViewGamepad`, manifest `"gamepad"`) gets the gamepad while it holds UI mode, on
+flat; `capabilities.gamepad` is 1 where the layer can run. In the `keys` style the host types the pad: A is Enter,
+B is Escape, the d-pad and left stick are the arrow keys (with key repeat), so the page's own keyboard handling
+answers it and it needs nothing below. In the `navigation` style the page gets actions through
+`window.magelight.gamepad` (typed as `GamepadHelper` in `@magelight/sdk`; the host passes it the pad on the reserved
+`__gamepad` channel, nothing to subscribe), which moves focus for it:
+
+```js
+const pad = window.magelight?.gamepad;
+if (pad) {
+  magelight.send('__escapecapture', '1');          // B reaches the page (see below)
+  const close = () => { dispose(); magelight.send('close'); };
+  let dispose = pad.attachNavigation({
+    root: document.querySelector('#settings'),
+    initialFocus: 'first-setting',                  // an id or data-ml-id, an element, or a function
+    onBack: close,
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  pad.onAction(e => {                              // before the scope's defaults; return true to take it
+    if (e.action === 'secondary' && e.phase === 'press') { magelight.send('favourite'); return true; }
+  });
+  footer.textContent = `${pad.getPrompt('accept').label} Select  ${pad.getPrompt('cancel').label} Back`;
+}
+```
+
+- **Scopes.** `attachNavigation({ root, initialFocus, onBack, onAction, wrap, getCandidates })` returns a
+  dispose. The newest scope moves focus; a modal attaches its own and disposes it when it closes, which gives the
+  page under it back its selection. Candidates are the visible, enabled buttons, inputs, selects, textareas,
+  links, `[tabindex]` elements and `[data-ml-focusable]` elements inside `root` (`getCandidates` for a custom or
+  virtualised list). Directions move by geometry, as drawn (CSS `zoom` included); `data-ml-up`, `-down`, `-left`
+  and `-right` on a control name the control (by id or `data-ml-id`) that direction goes to. A control removed or
+  re-rendered keeps the selection when its id or `data-ml-id` is the same.
+- **What the defaults do.** Accept clicks; on a range, a select or a text field it enters edit mode, where
+  directions step the range or the select (`input` and `change` fire) and leave a text field alone (free text needs
+  a keyboard). Cancel leaves edit mode first, then calls `onBack`. The shoulders cycle `role="tab"` buttons by
+  clicking the next one. The right stick scrolls the nearest scrollable container.
+- **B and Escape.** B follows Escape's rule: it closes the view unless the page holds Escape
+  (`magelight.send('__escapecapture', '1')`, or the plugin's `SetEscapeCapture`), and only then does the page get
+  `cancel`. A page that takes Escape for B handles keyboard Escape too, as above. The helper never takes Escape
+  itself.
+- **Styling and prompts.** The focused control carries `data-ml-focused` (one at a time); style it yourself
+  (`[data-ml-focused] { outline: 3px solid var(--accent); }`). `<html>` carries `data-ml-input` (`gamepad` or
+  `keyboardMouse`, which follows the last device used) and `data-ml-gamepad-mode`. `getPrompt(action)` gives the
+  label of the control bound to an action in the player's glyph family (`A`, `Cross`, `South`), `onStateChange`
+  says when it changes. Both work in the keys style too.
+- **Events.** `onAction` sees every input first: `{ control, action, phase, value, x, y, dt }`, phase `press`,
+  `release`, `repeat` (a held direction), `change` (a stick, every batch while off centre, with `x` and `y`) or
+  `cancel` (the pad changed hands or the page reloaded: stop anything a held button was doing). Controls are
+  positional (`south`, `east`, `leftShoulder`, `rightStick`); triggers, start and back arrive with action `none`.
+- **Cursor mode.** Where the view allows it, a right-stick click (or `setMode('cursor')`) switches to a cursor the
+  left stick moves; A clicks there. A direction press, or `setMode('navigation')`, goes back.
+
 ## What a page can reach
 
 - **Files**: the `Data/Magelight/` tree, registered page folders and the host's runtime dir, nothing

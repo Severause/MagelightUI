@@ -744,6 +744,43 @@ if (v4()->QueryCapability("auxbuttons") == 1) {
 }
 ```
 
+## A gamepad (1.6.0)
+
+`SetViewGamepad` opts a view in to the gamepad layer: while the view holds UI mode on flat, the pad is its page's and
+the game, and the input sinks registered after Magelight's, get none of it. Gate on `hostVersionNumber >= 10600`
+and `QueryCapability("gamepad") == 1` (0 on VR, where the laser is, and when the player switched the layer off).
+
+```cpp
+if (api->hostVersionNumber >= 10600 && api->QueryCapability("gamepad") == 1) {
+    MAGELIGHT_API::GamepadConfig pad{};
+    pad.size = sizeof(pad);
+    pad.enabled = true;
+    pad.style = MAGELIGHT_API::kGamepadStyleNavigation;   // or kGamepadStyleKeys
+    pad.allowCursor = true;                               // right-stick click: a cursor the left stick moves
+    api->SetViewGamepad(view, &pad);                      // kept across reloads; nullptr opts out
+}
+```
+
+- **Styles.** `kGamepadStyleKeys` types the pad as keys (A Enter, B Escape, the d-pad and left stick the arrows,
+  with repeat): a page that works with a keyboard works with a pad and needs no script. `kGamepadStyleNavigation`
+  hands the page actions and the focus navigation of `window.magelight.gamepad` ([SDK.md](SDK.md), "Gamepad").
+- **B** follows Escape's rule: it closes the view unless the page holds Escape (`SetEscapeCapture`, or the page's
+  `__escapecapture`), and then the page gets Escape (keys) or `cancel` (navigation).
+- **When the view holds the pad**: while it holds UI mode, its page's helper has started (each document's load),
+  the game window has focus, the game has the pad connected and enabled, and no engine menu that takes menu input is
+  open over the page. `GetViewGamepadState` reports it (`capturing`), with the glyph family the player chose.
+- **Held buttons.** A button down when the view takes the pad does nothing in the page until it is released and
+  pressed again (the shoulder that cast a power from the favorites, say); its release goes to the game if the game
+  saw the press. A UI-mode exit with a pad button down that was pressed while the page held the pad keeps the game's
+  controls suspended until that button is up, as on VR, so the B that closed the page does not reach the game.
+- **No opener.** The layer adds no gamepad hotkey: open the view the way your mod already does (a power or spell
+  in the favorites, a dialogue option, a keyboard hotkey).
+- **Your own bridge.** A mod that reads the pad for its pages itself steps aside per view: where
+  `QueryCapability("gamepad")` is 1, opt the view in with `kGamepadStyleKeys` (the semantics of a bridge that sends
+  Enter, Escape and the arrows) and stop the bridge for that view; where it is 0 (VR, an older host, the player
+  turned it off), keep the bridge. Running both on one view sends each press twice.
+- **Threads.** Any thread; the input sink applies the change at its next batch (game thread).
+
 ## Your own cursor (0.31.0)
 
 The flat cursor is the host's by default: a drawn arrow that glows over a

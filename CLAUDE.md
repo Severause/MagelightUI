@@ -23,6 +23,8 @@ src/MagelightDevWatch.cpp   devMode hot reload (folder watchers -> ReloadView)
 src/MagelightFonts.cpp      the font loader: wraps the SDK's Windows loader (compiled in) with a last resort that always loads (src/fonts: DejaVu Sans, an RCDATA resource)
 src/MagelightVR.h           the VR presenter's interface to the host (docs/VR_PRESENTER.md)
 src/MagelightVR/            the VR presenter: Runtime, Overlays, Laser, Input, Bindings, Lifecycle; State.h = the state they share and its rules
+src/GamepadCore.h           the gamepad layer's rules (1.6.0): who holds the pad, dead zones, repeat, held buttons, the keys style, the page packet; engine-free
+src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -42,6 +44,8 @@ tools/input-test/           src/InputCore.h's key events on the flat and VR path
 tools/ime-test/             src/ImeCore.h's candidate-list parsing and '__ime' payload rules (ime_test), the Editor calls the native composition relies on (imeprobe); build.bat builds and runs both
 tools/ime-box-test/         the page core's IME candidate box in Ultralight's own WebKit: a reading the Editor composed, zoom, an iframe editor, device scale, the opt-outs (build.bat; needs node)
 tools/editor-test/          src/EditStateCore.h's text-focus rules on real EditableState reports, typed text as the host fires it, views/keyboard's layouts (build.bat)
+tools/gamepad-test/         src/GamepadCore.h's ledger, router, keys style and packet (build.bat)
+tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus by geometry under zoom and device scale, scopes, editing, stale packets (build.bat)
 tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
@@ -118,7 +122,9 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    MenuCursor only while a cursor-using menu is topmost. On VR an exit with a controller button
    down that was pressed while the page was open keeps that menu and the suspended controls until
    those buttons have been up 100 ms (`EndControlsHold`, 1.5 s at most): it is the menu context that
-   keeps the closing press from the game. A kHide is read as the game closing the menu only if the
+   keeps the closing press from the game. On flat the same holds for a view that held the gamepad
+   (1.6.0) and a pad button pressed while it did (`s_heldPad`): B closes a page, and its release would
+   otherwise open the Tween menu. A view that did not hold the pad never arms it. A kHide is read as the game closing the menu only if the
    menu is still closed once the queue has run (`CheckFocusMenuClosed`). The engine opens and closes
    the Cursor Menu with it: queue no Cursor Menu message of your own while it is registered, open the
    overlay (no kUsesCursor) before it, and keep kAssignCursorToRenderer on the overlay, or the engine
@@ -172,7 +178,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `ulFiberMB`; `animationTimerDelay` is ignored on 2.0, whose
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `ulFiberMB`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).
@@ -242,7 +248,13 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     not for Papyrus `OnKeyDown`. The text-entry flag is raised too, for the
     mods that check it. Typing, Escape and bound hotkeys all ride the window
     proc (WM_KEYDOWN / WM_CHAR are the OS, not DirectInput), so they keep
-    working. Mouse and gamepad devices are untouched. A plugin that polls
+    working. The mouse device is untouched, and so is the gamepad but for a
+    view that opted in to the gamepad layer (1.6.0): while it holds the pad
+    (`src/GamepadCore.h`, decided in the input sink on the game thread), every
+    pad event ends at the sink, unlinked like a typed key, and each release
+    goes where its press went (a press the game saw keeps its release; one the
+    page owned never reaches the game). Every engine pad event passes the
+    router whether or not a view holds the pad, or that bookkeeping breaks. A plugin that polls
     user32 `GetAsyncKeyState` / `GetKeyState` itself gets keyboard keys as up
     (the Polled keys block in Magelight.cpp), except the UI-mode owner's DLL,
     Magelight and non-plugin modules. Two things the sink
