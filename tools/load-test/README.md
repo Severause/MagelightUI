@@ -27,9 +27,10 @@ log ties each cost line to the load that produced it.
 3. Quit, set `"pageThread": true` in `Magelight.json`, repeat step 2 at the same spot.
 4. With the thread on: **Hang**. The game must keep running and the log must say
    `the page thread has been in ... for N s - its pages are frozen; the game goes on`; Escape and F10 must still
-   close the panel and give the controls back.
+   close the panel and give the controls back, and the next `present cost` line must say `views=0` (the frozen
+   panel is no longer drawn) while its page thread count stays at 0 frames.
 
-What the log shows:
+What the log shows (in both modes `views` is the number of views drawn in the frame that wrote the line):
 
 - Thread off: `present cost over N frames - ul.update ..., ul.render ..., composite(+mirror) ..., vr.submit ...,
   total avg ..., WORST ...`. The script load shows in `ul.render` (a page's `requestAnimationFrame` callbacks run

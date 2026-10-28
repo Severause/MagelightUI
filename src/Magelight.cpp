@@ -9357,6 +9357,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         for (const auto& p : packets) lists = lists || !p->lists.empty();
         const auto tPrelude = ClockT::now();
         auto tExecuted = tPrelude;
+        std::size_t drawn = 0;   // the cost line's views, as the in-frame line's: drawn this frame, not held
         if (lists || anyVisible) {
             StateBackup backup;
             backup.Capture(s_context);
@@ -9374,7 +9375,10 @@ float4 ps_straight(VSOut i) : SV_Target {
             StateBackup::Neutralize(s_context);
             if (newest)
                 for (const auto& pv : newest->views)
-                    if (std::find(s_wanted.begin(), s_wanted.end(), pv.id) != s_wanted.end()) EmitView(pv, emit);
+                    if (std::find(s_wanted.begin(), s_wanted.end(), pv.id) != s_wanted.end()) {
+                        EmitView(pv, emit);
+                        ++drawn;
+                    }
             EmitCursor(anyVisible, bw, bh, emit);
             backup.Restore(s_context);
         }
@@ -9409,8 +9413,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                             "{:.2f}ms, total avg {:.2f}ms, WORST {:.2f}ms (uiMode={}, views={}, page thread: {} frames, "
                             "{} presents without a new one)",
                             acc.frames, acc.prelude / n, acc.execute / n, acc.composite / n,
-                            (acc.prelude + acc.execute + acc.composite) / n, acc.worst, s_focused.load(),
-                            s_held ? s_held->views.size() : 0, pageFrames - acc.pageFramesAtLast, acc.withoutNew);
+                            (acc.prelude + acc.execute + acc.composite) / n, acc.worst, s_focused.load(), drawn,
+                            pageFrames - acc.pageFramesAtLast, acc.withoutNew);
             acc = Acc{};
             acc.last = tEnd;
             acc.pageFramesAtLast = pageFrames;
