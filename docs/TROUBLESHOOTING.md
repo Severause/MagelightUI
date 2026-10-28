@@ -6,7 +6,7 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v1.1.0 loading`); the lines after it name the game (SE, AE or VR, its version and
+version (`Magelight v1.6.0 loading`); the lines after it name the game (SE, AE or VR, its version and
 SKSE's), Windows (or the Wine under Proton), the CPU and RAM, and, once the game's data has loaded,
 every graphics adapter with its driver version, the one the game renders on marked. Paths in the
 log show your user folder as `%USERPROFILE%`. Each line starts with the date and time, a level
@@ -104,6 +104,29 @@ v1-v3 C++ `CreateView` belong to no mod: they are file-only and cannot opt in.
   page has key focus only that page's own key fires (to close it).
 - The user may have rebound or disabled it in `Magelight.json` (`"hotkeys"`); the log says
   `hotkey for 'Mod/view' rebound ...` or `disabled by Magelight.json`.
+
+## A gamepad does nothing in a page
+
+Since 1.6.0 a page can be driven with a gamepad, on flat only, when its mod opted it in (`SetViewGamepad`, a
+manifest's `"gamepad"`): the pad is the page's while it holds UI mode, the game window has focus, the game has the pad
+connected and enabled (its Controls settings), and no engine menu that takes menu input (a message box, another
+mod's menu) is open over it. A page that did not opt in gets the pad as before 1.6.0, the game's own handling of
+it. Check, in `Magelight.log`:
+
+- `view N gamepad on (keys)` or `on (navigation)`: the mod opted the view in. Without it, the mod has its own gamepad
+  handling or none.
+- `settings loaded (... gamepad=true)`: `false` means `Magelight.json` turned the layer off. The next line,
+  `gamepad layer: deadZone ...`, gives the tuning in effect, after any value outside its range was brought inside it.
+- `"gamepad": { "trace": true }` logs, once a second, `gamepad batches N (empty N) connected true owner N contexts [..]`:
+  `owner 0` while the page is open means one of the conditions above is not met. It also logs each pad press and
+  release with the name the game gave it and the game's input contexts (0 gameplay, 1 menu mode, 9 the cursor).
+
+The `Magelight.json` `"gamepad"` block (or `"gamepad": false`): `enabled` (`true`; `false` turns the layer off for every page),
+`glyphs` (`"xbox"`; `"playstation"` or `"generic"` labels the buttons a page shows for another pad), `deadZone`
+(0.25) and `exitDeadZone` (0.18) for the sticks, `repeatDelay` (0.35 s) and `repeatInterval` (0.09 s) for a held
+direction, `cursorSpeed` (900: pixels a second at 1080p in a page's cursor mode), and `trace` (`false`). Values outside
+their range are brought inside it: `deadZone` 0.05-0.90, `exitDeadZone` 0 up to just under `deadZone` (0.89 at most),
+`cursorSpeed` 100-3000, `repeatDelay` 0.1-2 s, `repeatInterval` 0.03-0.5 s; an unknown `glyphs` reads as `xbox`.
 
 ## I can move but the page stays / I cannot move
 
@@ -409,6 +432,7 @@ it read, or says that defaults are in effect.
 | `blockPolledKeys` | `true` | 0.31.10: while a page holds UI mode, other SKSE plugins that ask Windows for the key state themselves (`GetAsyncKeyState` / `GetKeyState`) read every keyboard key as up, so typing into a page cannot fire their hotkeys. The plugin whose page it is is exempt. `false` installs no filter |
 | `stallWatchdog`, `stallThresholdMs` | `true`, `1500` | Log the present and main threads' stacks when no frame is presented for this long (250-60000 ms); the first time per session, every other thread's too. On flat, not while another program's window is in the foreground (alt-tab): the gap counts from the game's return, unless the game's window stops responding |
 | `exceptionTelemetry` | `true` | The `Magelight VEH` lines (see "Magelight VEH" below). `false` takes Magelight's exception handler out of the game entirely, from the main menu on |
+| `gamepad` | see below | 1.6.0: the gamepad layer for pages that opt in (flat only). See "A gamepad does nothing in a page" |
 | `vr` | see below | Skyrim VR only |
 
 The `vr` block: `enabled` (`true`), `mirror` (`true`: keep drawing pages on the desktop mirror),
@@ -502,4 +526,4 @@ own they do not mean Magelight crashed. Nothing is sent anywhere.
 
 ## A key typed into a page triggered another mod
 
-On flat, while UI mode is on, Magelight mutes the engine's keyboard device: its DirectInput poll reads and discards the buffered keys instead of turning them into button events, so no keyboard button event exists anywhere in the engine — not for SKSE input sinks, not for mods that hook the input dispatcher (Immersive Equipment Displays' Backspace UI key was the field case), not for Papyrus `OnKeyDown` — and nothing replays into the game when the page closes. The page keeps typing through the window's own key messages, and so do Escape and Magelight's bound hotkeys. It also raises the engine's text-entry flag for the mods that check it. Mouse and gamepad are untouched. On VR the device is not muted (the page is typed from the engine's key events); Magelight takes each key out of the event chain before the input sinks registered after its own. A mod that asks Windows for the key state itself (`GetAsyncKeyState` or `GetKeyState`, which is how some plugins read their hotkeys) reads every keyboard key as up while a page holds UI mode, since 0.31.10; the log names each such plugin once (`keys <dll> polls are hidden while a page holds UI mode`), and `"blockPolledKeys": false` turns this off. Exempt: the plugin whose page holds UI mode, the mouse buttons, and Magelight's own runtime folder (`SKSE\Plugins\Magelight\`), whose web engine reads Shift, Ctrl and Alt that way for the page's own key events. A mod that still reacts reads the keyboard some other way (`GetKeyboardState`, raw input); report it with the mod name.
+On flat, while UI mode is on, Magelight mutes the engine's keyboard device: its DirectInput poll reads and discards the buffered keys instead of turning them into button events, so no keyboard button event exists anywhere in the engine — not for SKSE input sinks, not for mods that hook the input dispatcher (Immersive Equipment Displays' Backspace UI key was the field case), not for Papyrus `OnKeyDown` — and nothing replays into the game when the page closes. The page keeps typing through the window's own key messages, and so do Escape and Magelight's bound hotkeys. It also raises the engine's text-entry flag for the mods that check it. The mouse is untouched, and so is a gamepad unless the page opted in to the gamepad layer (1.6.0), whose pad events then end at Magelight's input sink. On VR the device is not muted (the page is typed from the engine's key events); Magelight takes each key out of the event chain before the input sinks registered after its own. A mod that asks Windows for the key state itself (`GetAsyncKeyState` or `GetKeyState`, which is how some plugins read their hotkeys) reads every keyboard key as up while a page holds UI mode, since 0.31.10; the log names each such plugin once (`keys <dll> polls are hidden while a page holds UI mode`), and `"blockPolledKeys": false` turns this off. Exempt: the plugin whose page holds UI mode, the mouse buttons, and Magelight's own runtime folder (`SKSE\Plugins\Magelight\`), whose web engine reads Shift, Ctrl and Alt that way for the page's own key events. A mod that still reacts reads the keyboard some other way (`GetKeyboardState`, raw input); report it with the mod name.

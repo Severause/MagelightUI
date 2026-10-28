@@ -27,6 +27,79 @@ export interface PageCore {
   sound?(name: string): void;
   /** 0.31.9: this view's colours for the host's VR keyboard and drawn cursor; `null` clears both (see `HostTheme`) */
   hostTheme?(theme: HostTheme | null): void;
+  /** 1.6.0: the gamepad helper (see `GamepadHelper`); idle unless the view opted in to the gamepad layer */
+  gamepad?: GamepadHelper;
+}
+
+/** Positional pad controls: `south` is A on an Xbox pad, Cross on a PlayStation one. */
+export type GamepadControl =
+  | 'none' | 'dpadUp' | 'dpadDown' | 'dpadLeft' | 'dpadRight' | 'start' | 'back' | 'leftThumb' | 'rightThumb'
+  | 'leftShoulder' | 'rightShoulder' | 'south' | 'east' | 'west' | 'north' | 'leftTrigger' | 'rightTrigger'
+  | 'leftStick' | 'rightStick';
+
+export type GamepadAction =
+  | 'none' | 'up' | 'down' | 'left' | 'right' | 'accept' | 'cancel' | 'previousTab' | 'nextTab' | 'secondary'
+  | 'tertiary' | 'toggleCursor';
+
+/** The layer as the host last described it to this page (frozen). */
+export interface GamepadState {
+  enabled: boolean;
+  /** this view holds the pad now (it holds UI mode, and nothing above it takes the pad) */
+  active: boolean;
+  connected: boolean;
+  /** `keys`: the host types the pad as Enter, Escape and the arrows; `navigation`: actions reach `onAction` and scopes */
+  style: 'keys' | 'navigation';
+  mode: 'navigation' | 'cursor';
+  /** the device in use, also on `<html data-ml-input>` */
+  device: 'gamepad' | 'keyboardMouse';
+  glyphFamily: 'xbox' | 'playstation' | 'generic';
+  /** empty until the host's first packet (a view that never opted in keeps it empty) */
+  bindings: Readonly<Partial<Record<Exclude<GamepadAction, 'none'>, GamepadControl>>>;
+  generation: number;
+}
+
+/** One input, navigation style. Sticks send `change` with x and y every batch while off centre; a reset sends `cancel`. */
+export interface GamepadEvent {
+  control: GamepadControl;
+  action: GamepadAction;
+  phase: 'press' | 'release' | 'repeat' | 'change' | 'cancel';
+  value: number;
+  x: number;
+  y: number;
+  /** seconds since the last batch, at most 0.05 */
+  dt: number;
+  generation: number;
+  sequence: number;
+}
+
+/** A focus scope: a screen or a modal. The newest scope moves focus; disposing it restores the one below. */
+export interface GamepadScope {
+  root: Element;
+  /** an id or `data-ml-id`, an element, or a function returning one; default the first candidate */
+  initialFocus?: string | Element | (() => Element | null | undefined);
+  /** cancel (B) when no control is being edited. B reaches the page only while it holds Escape (`__escapecapture`). */
+  onBack?(event: GamepadEvent): void;
+  /** return true to handle an input before the scope's defaults */
+  onAction?(event: GamepadEvent): boolean | void;
+  /** focus wraps from the last control to the first */
+  wrap?: boolean;
+  /** the scope's controls, for a custom or virtualised widget (default: buttons, inputs, selects, textareas, links, [tabindex], [data-ml-focusable]) */
+  getCandidates?(): ArrayLike<Element>;
+}
+
+/** `window.magelight.gamepad` (host 1.6.0, `capabilities.gamepad`). The focused control carries `data-ml-focused`. */
+export interface GamepadHelper {
+  version: 1;
+  getState(): GamepadState;
+  /** every input before the scopes; return true to handle it. Returns an unsubscribe. */
+  onAction(fn: (event: GamepadEvent) => boolean | void): () => void;
+  onStateChange(fn: (state: GamepadState) => void): () => void;
+  /** ask for cursor mode (the view must allow it) or navigation mode */
+  setMode(mode: 'navigation' | 'cursor'): void;
+  /** the label for an action's control in the player's glyph family, e.g. `A` or `Cross` */
+  getPrompt(action: GamepadAction): Readonly<{ action: GamepadAction; control: GamepadControl; family: string; label: string }>;
+  /** push a scope; returns its dispose */
+  attachNavigation(scope: GamepadScope): () => void;
 }
 
 /** `#rrggbb`, exactly: opaque, no shorthand, no alpha. Anything else refuses its part (host 1.1.0+; the whole theme before). */

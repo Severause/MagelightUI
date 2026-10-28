@@ -11,5 +11,11 @@ export type {
   HostThemeResult,
   KeyboardThemeColors,
   CursorThemeColors,
+  GamepadControl,
+  GamepadAction,
+  GamepadState,
+  GamepadEvent,
+  GamepadScope,
+  GamepadHelper,
 } from './types.js';
 export type { MockOptions } from './mock.js';

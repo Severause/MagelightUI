@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 
+#include "GamepadCore.h"
 #include "HostThemeCore.h"
 
 struct ID3D11ShaderResourceView;
@@ -352,6 +353,15 @@ namespace Magelight {
     // thread. A page sets the same slot through magelight.hostTheme (the reserved '__hosttheme' channel).
     bool SetViewKeyboardTheme(ViewId view, const HostTheme::KbTheme* theme);
     bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)
+    // Gamepad layer (1.6.0, GamepadCore.h). The view's opt-in, kept across reloads; a config with enabled false
+    // turns it off. False = no such view, or an inspector. Any thread: the input sink applies it at its next batch.
+    bool SetViewGamepad(ViewId view, const Gamepad::ViewConfig& config);
+    // The view's opt-in, and whether it holds the pad now, its mode and the layer's generation. False = no such view.
+    bool GetViewGamepad(ViewId view, Gamepad::ViewConfig* config, bool* capturing, Gamepad::Mode* mode,
+                        std::uint64_t* generation);
+    bool GamepadAvailable();               // flat, and Magelight.json "gamepad" enabled
+    bool GamepadConnected();               // as the last input batch saw it
+    Gamepad::Glyphs GamepadGlyphs();       // the prompt labels Magelight.json chose
     ViewId GetUIModeView();                // the current/last UI-mode target (0 = none)
     std::uint32_t GetToggleKey();          // the host's own UI-mode toggle scancode (Magelight.json)
     bool IsUIModeActive();

@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.6.0 | 10600 | The gamepad layer: `SetViewGamepad` / `GetViewGamepadState`, manifest `"gamepad"`, page `window.magelight.gamepad`; a `keys` style (A Enter, B Escape, d-pad and stick the arrows) and a `navigation` style (actions, focus scopes, prompts, an optional stick cursor); flat only; `QueryCapability("gamepad")`, `capabilities.gamepad` |
 | 1.5.0 | 10500 | Key events as in a browser: `KeyboardEvent.code`, a `key` from the player's layout and `location`, on flat and in VR; Alt, F10 and Alt+key reach the page; `QueryCapability("keyboardcode")`, `capabilities.keyboardCode` |
 | 1.5.0 | 10500 | Mouse buttons 4 and 5 as back / forward with `auxclick` (never `click` or `dblclick`); no middle-click autoscroll; `QueryCapability("auxbuttons")`, `capabilities.auxButtons` |
 | 1.5.0 | 10500 | Hidden pages pause: `document.visibilityState` / `visibilitychange` follow `ShowView`, `requestAnimationFrame` and CSS animations stop while hidden, `resize` / `scroll` / `matchMedia` / observer callbacks wait for the next show or prepaint; timers, messages and `InteropCall` keep running; `QueryCapability("pagevisibility")`, `capabilities.pageVisibility` |
@@ -57,6 +58,38 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.6.0 - Unreleased
+
+### What players notice
+
+- **Pages that opt in can be used with a gamepad** (flat only). While such a page holds UI mode the pad is the
+  page's: the d-pad and left stick move between its controls (or type the arrow keys), A presses, B goes back or
+  closes, and nothing reaches the game: Magelight takes the pad ahead of the game's own input handling, so no button
+  draws a weapon, attacks or shouts behind the page. The button that opened the page (a favorite power cast with a
+  shoulder, say) does nothing in it until you let go of it, and the B that closes a page never reaches the game, so it
+  does not open the Tween menu behind you. Pages that did not opt in, and every mod's own gamepad handling,
+  behave as before. `Magelight.json` `"gamepad": { "enabled": false }` turns the layer off for every page;
+  `"glyphs": "playstation"` (or `"generic"`) labels the buttons for another pad.
+
+### For mod authors: new API and capabilities
+
+Gate each on `hostVersionNumber >= 10600` or `QueryCapability("gamepad")` (page `capabilities.gamepad`; 0 on VR and
+when the player switched the layer off).
+
+- **The gamepad layer** (`SetViewGamepad(view, &GamepadConfig)`, `GetViewGamepadState`, manifest view key
+  `"gamepad"`). A view opts in with one of two styles. `keys` types the pad as keys: south (A) is Enter, east (B)
+  Escape, the d-pad and left stick the arrows with key repeat, the right stick scrolls under the pointer, so a page that works with a keyboard works with a pad
+  and needs no script (`"gamepad": true` in a manifest). `navigation` hands the page actions (up, down, left, right,
+  accept, cancel, previous and next tab, secondary, tertiary, the cursor toggle) through `window.magelight.gamepad`,
+  which moves focus between the controls of the scopes the page attaches (`attachNavigation`, newest scope first, a
+  modal's dispose restoring the page's selection), steps through `role=tab` buttons on the shoulders, edits range and select
+  controls in place, scrolls with the right stick and labels buttons for prompts (`getPrompt`). The focused control
+  carries `data-ml-focused`; `<html>` carries `data-ml-input` (`gamepad` | `keyboardMouse`) for styling. B follows
+  Escape's rule in both styles: it closes the view unless the page holds Escape (`SetEscapeCapture` /
+  `__escapecapture`), and then the page gets it. With `allowCursor`, a right-stick click switches to a cursor the
+  left stick moves and A clicks. A mod running its own gamepad bridge steps it aside where the capability is 1:
+  opt the view in with the keys style and stop the bridge for it (docs/CPP.md).
 
 ## 1.5.1 - Unreleased
 

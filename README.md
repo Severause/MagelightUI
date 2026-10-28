@@ -69,8 +69,9 @@ and that no other mod binds: one binding per key, and the first binder keeps it.
   (a mod can bring its own per view, or hide it for a page that draws its own, 0.31.0, or recolour
   the drawn one, 0.31.1);
   clipboard; hotkeys that never fire over an engine menu, the console or game text entry, and
-  never open another mod's page while you are typing. On flat, pages take mouse and keyboard;
-  controller navigation inside a page is up to each mod. On VR, the controller laser points
+  never open another mod's page while you are typing. On flat, pages take mouse and keyboard,
+  and a gamepad for a page that opts in (1.6.0): typed as Enter, Escape and the arrows, or as
+  actions with focus navigation the host does for the page. On VR, the controller laser points
   and the trigger clicks.
 - **Files**: a page reads the `Data/Magelight/` tree, the folders of pages registered elsewhere
   and the host's runtime dir, nothing else — no `..` out of them, no arbitrary drive path (the

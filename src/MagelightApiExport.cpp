@@ -150,6 +150,9 @@ namespace {
         &Magelight::Api4::SetViewPrepaint,
         // 1.1.0 appendix
         &Magelight::Api4::CancelUIModeRequest,
+        // 1.6.0 appendix
+        &Magelight::Api4::SetViewGamepad,
+        &Magelight::Api4::GetViewGamepadState,
     };
 
 }  // namespace

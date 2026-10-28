@@ -444,6 +444,52 @@ namespace MAGELIGHT_API {
         std::uint32_t barHover;          // the title bar under the laser (host: 0xFF251D14)
     };
 
+    // ── Gamepad layer (1.6.0) ──────────────────────────────────────────────
+    // SetViewGamepad opts a view in: while it holds UI mode on flat, the pad is
+    // its page's and kept from the game. kGamepadStyleKeys types the pad as
+    // keys (south/A Enter, east/B Escape, d-pad and left stick the arrows, the
+    // right stick a mouse wheel under the pointer), so a
+    // page that works with a keyboard works with a pad; kGamepadStyleNavigation
+    // hands the page actions, which window.magelight.gamepad turns into focus
+    // moves between the controls of the scopes the page attaches (docs/SDK.md).
+    // B follows Escape's rule either way: it closes the view unless the page
+    // took Escape (SetEscapeCapture / '__escapecapture'), and then the page
+    // gets it (Escape, or the cancel action).
+    inline constexpr std::uint32_t kGamepadStyleKeys = 0;
+    inline constexpr std::uint32_t kGamepadStyleNavigation = 1;
+    inline constexpr std::uint32_t kGamepadModeNavigation = 0;
+    inline constexpr std::uint32_t kGamepadModeCursor = 1;     // the left stick moves the cursor, south/A clicks
+    inline constexpr std::uint32_t kGamepadGlyphsXbox = 0;
+    inline constexpr std::uint32_t kGamepadGlyphsPlayStation = 1;
+    inline constexpr std::uint32_t kGamepadGlyphsGeneric = 2;
+    // Controls, for GamepadConfig::bindings: 1 dpadUp, 2 dpadDown, 3 dpadLeft,
+    // 4 dpadRight, 5 start, 6 back, 7 leftThumb, 8 rightThumb, 9 leftShoulder,
+    // 10 rightShoulder, 11 south (A), 12 east (B), 13 west (X), 14 north (Y).
+    struct GamepadConfig {
+        std::uint32_t size;              // = sizeof(GamepadConfig)
+        bool enabled;                    // false = the pad is the game's again (as without a config)
+        std::uint32_t style;             // kGamepadStyle*
+        bool allowCursor;                // right-stick click toggles cursor mode
+        bool startInCursorMode;          // needs allowCursor
+        // One control per action, 0 = the default; actions in this order: up, down, left, right (default the
+        // d-pad), accept (south), cancel (east), previousTab (left shoulder), nextTab (right shoulder), secondary
+        // (west), tertiary (north), toggleCursor (right-stick click). Each control on one action at most, and a
+        // slot left 0 keeps its default control, which counts: moving a control to another action means
+        // rebinding the action that had it. No action can be left unbound.
+        std::uint8_t bindings[11];
+        std::uint8_t reserved[3];        // must be 0
+        // 1.6.0 ends here (size 28); fields a later host adds start at offset 28.
+    };
+    struct GamepadState {
+        std::uint32_t size;              // = sizeof(GamepadState), set by the caller
+        bool enabled;                    // the view opted in and the layer can run (flat, Magelight.json allows it)
+        bool connected;                  // a gamepad is connected and enabled in the game
+        bool capturing;                  // the view holds the pad right now
+        std::uint32_t mode;              // kGamepadMode*
+        std::uint32_t glyphs;            // kGamepadGlyphs*: the prompt labels the player chose
+        std::uint64_t generation;        // changes whenever the pad changes hands or reconnects
+    };
+
     // Actions for BindHotkey (one binding per DirectInput scancode, process-wide).
     inline constexpr std::uint32_t kHotkeyActionUnbind = 0;             // scancode 0 = every binding of the view
     inline constexpr std::uint32_t kHotkeyActionToggleUIMode = 1;       // RequestUIMode / ReleaseUIMode + hide
@@ -532,7 +578,8 @@ namespace MAGELIGHT_API {
                                                             // "tooltips" (1.2.0), "scriptErrors"
                                                             // "pageVisibility" "keyboardCode"
                                                             // "auxButtons" "imeCandidates" (1.5.0;
-                                                            // "ime" is 0 in VR from 1.5.0). The
+                                                            // "ime" is 0 in VR from 1.5.0), "gamepad"
+                                                            // (1.6.0; 0 in VR). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -799,6 +846,27 @@ namespace MAGELIGHT_API {
         // ReleaseUIMode: a release while the entry waits forgets it (as before
         // 1.1.0, the entry still runs) and this then answers Denied. Any thread.
         Result (*CancelUIModeRequest)(ModId mod);
+
+        // ── appended in 1.6.0 — gate on hostVersionNumber >= 10600 and QueryCapability("gamepad") ──
+        // Opt a view in to the gamepad layer (see GamepadConfig), or out with
+        // nullptr or enabled false. Kept across reloads and hibernation, ended by
+        // DestroyView. The view holds the pad only while it holds UI mode, the
+        // page core of its current document has started, the game window has
+        // focus and no engine menu that takes menu input is open above it. Flat only: QueryCapability("gamepad")
+        // is 0 on VR (the laser) and when the player switched the layer off.
+        // A mod with its own gamepad bridge steps it aside where the capability
+        // is 1: opt the view in with kGamepadStyleKeys and stop the bridge for
+        // that view; where it is 0, keep the bridge. Any thread; *config is
+        // copied. InvalidView for a view that is gone or an inspector;
+        // InvalidArgument for a short size, an unknown style or bindings that
+        // reuse a control or name a stick or trigger (GetLastErrorMessage says
+        // which). Nothing changes on a failure.
+        Result (*SetViewGamepad)(ViewId view, const GamepadConfig* config);
+        // The view's opt-in and the pad as the host last saw it (*out filled;
+        // out->size set by the caller). Any thread. InvalidArgument for a null
+        // out or a size below the 1.6.0 struct; InvalidView for a view that is
+        // gone or an inspector.
+        Result (*GetViewGamepadState)(ViewId view, GamepadState* out);
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)

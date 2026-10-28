@@ -302,9 +302,11 @@ Nothing in SA is required for VR-1..3. When the presenter is live:
   to the presenter; the texture-image path works in VR like on flat because
   the page samples it — re-enable once the renderer's VR render-target
   assumptions are checked.
-- SA's `GamepadUIBridge` semantics are the model for the host gamepad item
-; the VR button→pointer synthesis in section 6 is the same
-  machinery and should land in the host once, not twice.
+- The host gamepad item landed in 1.6.0 (flat only): its `keys` style is SA's
+  `GamepadUIBridge` semantics (A Enter, B Escape, d-pad and stick the arrows),
+  so SA can step its bridge aside where `QueryCapability("gamepad")` is 1
+  ([CPP.md](CPP.md), "A gamepad"). Its cursor mode sends its clicks through the
+  same input queue the laser's synthesis uses.
 
 ## 10. Field test plan
 

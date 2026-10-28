@@ -1115,6 +1115,7 @@ namespace Magelight::Api4 {
         if (n == "keyboardcode") return 1;  // KeyboardEvent.code, a layout-correct key and location; Alt and F10 reach the page (1.5.0)
         if (n == "auxbuttons") return 1;    // mouse back/forward as buttons 3/4 and auxclick, no click or dblclick; no middle-click autoscroll (1.5.0)
         if (n == "imecandidates") return Magelight::VR::IsLive() ? 0 : 1;   // the page core draws the IME's candidate list (1.5.0); flat only
+        if (n == "gamepad") return Magelight::GamepadAvailable() ? 1 : 0;   // SetViewGamepad / manifest "gamepad" / magelight.gamepad (1.6.0); flat only
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1240,7 +1241,7 @@ namespace Magelight::Api4 {
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
-                                        "keyboardCode", "auxButtons", "imeCandidates" };
+                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1649,6 +1650,77 @@ namespace Magelight::Api4 {
         if (const Result g = GateView(view, "SetViewPrepaint"); g != Result::Ok) return g;
         if (!Magelight::SetViewPrepaint(view, on))
             return Fail(OwnerOf(view), Result::InvalidView, "SetViewPrepaint: view is gone or is an inspector");
+        return Result::Ok;
+    }
+
+    // 1.6.0 (Magelight::SetViewGamepad, GamepadCore.h). The public numbers are GamepadCore's enums cast straight
+    // across: these pin them, so reordering an enum cannot silently remap every shipped consumer's config.
+    namespace Gp = Magelight::Gamepad;
+    static constexpr std::uint32_t kGamepadConfigSize = 28, kGamepadStateSize = 24;   // as released in 1.6.0
+    static_assert(sizeof(MAGELIGHT_API::GamepadConfig) == kGamepadConfigSize, "GamepadConfig grew: read the new fields");
+    static_assert(sizeof(MAGELIGHT_API::GamepadState) == kGamepadStateSize, "GamepadState grew: fill the new fields");
+    static_assert(std::size(MAGELIGHT_API::GamepadConfig{}.bindings) == Gp::kBindingCount);
+    static_assert(offsetof(MAGELIGHT_API::GamepadConfig, bindings) == 14 &&
+                  offsetof(MAGELIGHT_API::GamepadConfig, reserved) == 25, "GamepadConfig's 1.6.0 layout moved");
+    static_assert(Gp::Index(Gp::Control::DpadUp) == 1 && Gp::Index(Gp::Control::DpadRight) == 4 &&
+                  Gp::Index(Gp::Control::Start) == 5 && Gp::Index(Gp::Control::RightShoulder) == 10 &&
+                  Gp::Index(Gp::Control::South) == 11 && Gp::Index(Gp::Control::North) == 14);
+    static_assert(static_cast<std::uint32_t>(Gp::Style::Keys) == MAGELIGHT_API::kGamepadStyleKeys &&
+                  static_cast<std::uint32_t>(Gp::Style::Navigation) == MAGELIGHT_API::kGamepadStyleNavigation);
+    static_assert(static_cast<std::uint32_t>(Gp::Mode::Navigation) == MAGELIGHT_API::kGamepadModeNavigation &&
+                  static_cast<std::uint32_t>(Gp::Mode::Cursor) == MAGELIGHT_API::kGamepadModeCursor);
+    static_assert(static_cast<std::uint32_t>(Gp::Glyphs::Xbox) == MAGELIGHT_API::kGamepadGlyphsXbox &&
+                  static_cast<std::uint32_t>(Gp::Glyphs::PlayStation) == MAGELIGHT_API::kGamepadGlyphsPlayStation &&
+                  static_cast<std::uint32_t>(Gp::Glyphs::Generic) == MAGELIGHT_API::kGamepadGlyphsGeneric);
+
+    Result SetViewGamepad(ViewId view, const MAGELIGHT_API::GamepadConfig* config)
+    {
+        if (const Result g = GateView(view, "SetViewGamepad"); g != Result::Ok) return g;
+        Gp::ViewConfig cfg;   // enabled false: the pad is the game's
+        if (config) {
+            const ModId owner = OwnerOf(view);
+            if (config->size < kGamepadConfigSize)
+                return Fail(owner, Result::InvalidArgument, "SetViewGamepad: config->size is below the 1.6.0 GamepadConfig");
+            for (const std::uint8_t r : config->reserved)
+                if (r) return Fail(owner, Result::InvalidArgument, "SetViewGamepad: reserved bytes must be 0");
+            if (config->style > MAGELIGHT_API::kGamepadStyleNavigation)
+                return Fail(owner, Result::InvalidArgument, "SetViewGamepad: unknown style " + std::to_string(config->style));
+            cfg.enabled = config->enabled;
+            cfg.style = static_cast<Gp::Style>(config->style);
+            cfg.allowCursor = config->allowCursor;
+            cfg.startInCursor = config->startInCursorMode;
+            for (std::size_t i = 0; i < Gp::kBindingCount; ++i) {
+                if (!config->bindings[i]) continue;
+                if (config->bindings[i] >= Gp::kControlCount)
+                    return Fail(owner, Result::InvalidArgument, "SetViewGamepad: binding " + std::to_string(i) + " names no control");
+                cfg.bindings[i] = static_cast<Gp::Control>(config->bindings[i]);
+            }
+            if (!Gp::ValidBindings(cfg.bindings))
+                return Fail(owner, Result::InvalidArgument,
+                            "SetViewGamepad: the bindings put one control on two actions, or bind a stick or trigger");
+        }
+        if (!Magelight::SetViewGamepad(view, cfg))
+            return Fail(OwnerOf(view), Result::InvalidView, "SetViewGamepad: view is gone or is an inspector");
+        return Result::Ok;
+    }
+
+    Result GetViewGamepadState(ViewId view, MAGELIGHT_API::GamepadState* out)
+    {
+        if (const Result g = GateView(view, "GetViewGamepadState"); g != Result::Ok) return g;
+        if (!out || out->size < kGamepadStateSize)
+            return Fail(OwnerOf(view), Result::InvalidArgument, "GetViewGamepadState: out->size is below the 1.6.0 GamepadState");
+        Gp::ViewConfig cfg;
+        Gp::Mode mode = Gp::Mode::Navigation;
+        bool capturing = false;
+        std::uint64_t generation = 0;
+        if (!Magelight::GetViewGamepad(view, &cfg, &capturing, &mode, &generation))
+            return Fail(OwnerOf(view), Result::InvalidView, "GetViewGamepadState: view is gone or is an inspector");
+        out->enabled = cfg.enabled && Magelight::GamepadAvailable();
+        out->connected = Magelight::GamepadConnected();
+        out->capturing = capturing;
+        out->mode = static_cast<std::uint32_t>(mode);
+        out->glyphs = static_cast<std::uint32_t>(Magelight::GamepadGlyphs());
+        out->generation = generation;
         return Result::Ok;
     }
 
