@@ -1,7 +1,7 @@
 #pragma once
 // The gamepad layer (1.6.0): who owns the pad, dead zones, repeat, and the held-button rules that keep a press from
 // acting twice (on the page and in the game). Engine-free, so tools/gamepad-test runs it on the desktop; the input
-// sink feeds it the engine's gamepad events on the game thread. Pages see the control, action and phase names below:
+// sink feeds it the engine's gamepad events from the engine's input dispatch. Pages see the control, action and phase names below:
 // renaming one breaks them.
 
 #include <algorithm>
@@ -162,8 +162,7 @@ namespace Magelight::Gamepad {
     // Per-control physical state and who owns each press. A control that is off neutral when the owner changes is
     // blocked until it returns to neutral, so the button that opened or closed a page never acts in the next owner.
     // A release goes where its press went: on down the event chain if the game saw the press, ended at the sink if a
-    // page owned it (the engine's own handlers, which run first, are kept off by UI mode's menu context and the
-    // controls hold).
+    // page owned it (Magelight's GamepadSink runs ahead of the engine's own input sinks, so neither sees it).
     class Ledger {
     public:
         Tuning tuning;
@@ -222,8 +221,8 @@ namespace Magelight::Gamepad {
         std::uint64_t Owner() const { return m_owner; }
         bool InitialRepeat() const { return m_initialRepeat; }
 
-        // A digital control or a trigger. forceCapture consumes it and blocks it until release.
-        Transition Button(Control c, float value, bool forceCapture = false)
+        // A digital control or a trigger.
+        Transition Button(Control c, float value)
         {
             if (c < Control::DpadUp || c > Control::RightTrigger) return {};
             const std::size_t i = Index(c);
@@ -232,7 +231,7 @@ namespace Magelight::Gamepad {
             const float old = m_value[i];
             m_value[i] = value;
             const bool wasBlocked = m_blocked[i];
-            bool consumed = m_owner != 0 || m_uiOwned[i] || forceCapture;
+            bool consumed = m_owner != 0 || m_uiOwned[i];
             if (value == 0.0f) {
                 if (m_gameDown[i]) consumed = false;   // a press the game saw gets its release
                 m_gameDown[i] = false;
@@ -243,9 +242,8 @@ namespace Magelight::Gamepad {
             } else {
                 m_uiOwned[i] = true;
             }
-            if (forceCapture && value != 0.0f) m_blocked[i] = true;
             Phase phase = value == old ? Phase::None : value == 0.0f ? Phase::Release : old == 0.0f ? Phase::Press : Phase::Change;
-            if (wasBlocked || forceCapture) phase = Phase::None;
+            if (wasBlocked) phase = Phase::None;
             return { consumed, phase };
         }
 
@@ -364,8 +362,13 @@ namespace Magelight::Gamepad {
         PadSnapshot pad;                 // read when the ledger is seeded: a connect, an owner change, an overflow
     };
 
+    // The keys style's right stick scrolls what is under the pointer, as a mouse wheel there would: px a second at
+    // full deflection, quadratic so a small push scrolls slowly.
+    inline constexpr float kKeysScrollSpeed = 1500.0f;
+
     struct PointerOut {
         float dx = 0.0f, dy = 0.0f;      // px on a 1080-high back buffer; the host scales by its height / 1080
+        float scrollY = 0.0f;            // keys style: px to scroll under the pointer, positive up (as a wheel)
         std::vector<bool> buttons;       // left button: true down, false up, in order
         bool release = false;            // release a left press the cursor still holds
     };
@@ -380,10 +383,11 @@ namespace Magelight::Gamepad {
         std::vector<Event> events;       // navigation style
         std::vector<int> keys;           // keys style: virtual keys to tap, in order
         PointerOut pointer;              // cursor mode
+        bool close = false;              // cancel pressed while the page did not hold Escape: the host closes the view
     };
 
     // Turns one batch of engine gamepad events into what the owning page gets. Begin, then Button / Stick for each
-    // event in the batch (true: the host unlinks it), then End. Game thread only.
+    // event in the batch (true: the host unlinks it), then End. One batch at a time, from the input dispatch.
     class Router {
     public:
         Tuning tuning;
@@ -412,7 +416,10 @@ namespace Magelight::Gamepad {
                 ReleaseCursorPress();
             }
             const Mode mode = in.config.allowCursor ? in.mode : Mode::Navigation;
-            if (mode != m_mode) ReleaseCursorPress();   // the page's setMode, or the cursor taken away
+            if (mode != m_mode) {   // the page's setMode, or the cursor taken away
+                ReleaseCursorPress();
+                CaptureHeldAccept();
+            }
             m_mode = mode;
             m_dt = m_haveTime ? std::clamp(in.now - m_lastTime, 0.0, 0.05) : 0.0;
             m_lastTime = in.now;
@@ -428,9 +435,12 @@ namespace Magelight::Gamepad {
             if (!active || t.phase == Phase::None) return t.consume;
             const ViewConfig& cfg = m_in.config;
             const Action action = BindingAction(cfg, c);
-            // B (and cancel) belongs to the page only while it holds Escape; otherwise the focus menu's Cancel
-            // closes the view, and the page must not also see it.
-            if ((c == Control::East || action == Action::Cancel) && !m_in.escapeCaptured) return t.consume;
+            // Cancel belongs to the page only while it holds Escape; otherwise its press closes the view. The router
+            // decides it, not the engine's Cancel user event, which a load order can leave in gameplay context.
+            if (action == Action::Cancel && !m_in.escapeCaptured) {
+                if (t.phase == Phase::Press) m_out.close = true;
+                return t.consume;
+            }
             if (action >= Action::Up && action <= Action::Right) {
                 // Presses and repeats come from the clock in End, so a held direction emits once per batch.
                 if (t.phase == Phase::Release && cfg.style == Style::Navigation) Emit({ c, action, Phase::Release });
@@ -439,9 +449,6 @@ namespace Magelight::Gamepad {
             }
             if (action == Action::ToggleCursor && t.phase == Phase::Press && cfg.allowCursor) {
                 SetMode(m_mode == Mode::Navigation ? Mode::Cursor : Mode::Navigation);
-                // An accept already down when the mode flips must not click (or accept) when it is let go.
-                const Control accept = cfg.bindings[static_cast<std::size_t>(Action::Accept) - 1];
-                if (m_ledger.Held(accept)) m_ledger.Capture(accept);
                 return t.consume;
             }
             if (m_mode == Mode::Cursor && action == Action::Accept) {
@@ -506,6 +513,10 @@ namespace Magelight::Gamepad {
                     m_out.pointer.dx = m_ledger.X(Control::LeftStick) * step;
                     m_out.pointer.dy = -m_ledger.Y(Control::LeftStick) * step;
                 }
+                if (cfg.style == Style::Keys) {
+                    const float y = m_ledger.Y(Control::RightStick);
+                    m_out.pointer.scrollY = y * std::fabs(y) * kKeysScrollSpeed * static_cast<float>(m_dt);
+                }
             }
             if (m_out.events.size() + m_out.keys.size() > kMaxEvents) {
                 m_out.events.clear();
@@ -548,6 +559,13 @@ namespace Magelight::Gamepad {
             m_out.pointer.buttons.clear();
             m_out.pointer.release = true;
             m_cursorDown = false;
+            CaptureHeldAccept();
+        }
+        // An accept down when the mode changes must not click (or accept) when it is let go.
+        void CaptureHeldAccept()
+        {
+            const Control accept = m_in.config.bindings[static_cast<std::size_t>(Action::Accept) - 1];
+            if (m_ledger.Held(accept)) m_ledger.Capture(accept);
         }
         void ReleaseCursorPress()
         {

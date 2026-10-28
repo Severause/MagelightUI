@@ -65,9 +65,10 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 - **Pages that opt in can be used with a gamepad** (flat only). While such a page holds UI mode the pad is the
   page's: the d-pad and left stick move between its controls (or type the arrow keys), A presses, B goes back or
-  closes, and nothing reaches the game. The button that opened the page (a favorite power cast with a shoulder, say)
-  does nothing in it until you let go of it, and the B that closes a page is held from the game until you release it,
-  so it no longer opens the Tween menu behind you. Pages that did not opt in, and every mod's own gamepad handling,
+  closes, and nothing reaches the game: Magelight takes the pad ahead of the game's own input handling, so no button
+  draws a weapon, attacks or shouts behind the page. The button that opened the page (a favorite power cast with a
+  shoulder, say) does nothing in it until you let go of it, and the B that closes a page never reaches the game, so it
+  does not open the Tween menu behind you. Pages that did not opt in, and every mod's own gamepad handling,
   behave as before. `Magelight.json` `"gamepad": { "enabled": false }` turns the layer off for every page;
   `"glyphs": "playstation"` (or `"generic"`) labels the buttons for another pad.
 
@@ -78,7 +79,7 @@ when the player switched the layer off).
 
 - **The gamepad layer** (`SetViewGamepad(view, &GamepadConfig)`, `GetViewGamepadState`, manifest view key
   `"gamepad"`). A view opts in with one of two styles. `keys` types the pad as keys: south (A) is Enter, east (B)
-  Escape, the d-pad and left stick the arrows with key repeat, so a page that works with a keyboard works with a pad
+  Escape, the d-pad and left stick the arrows with key repeat, the right stick scrolls under the pointer, so a page that works with a keyboard works with a pad
   and needs no script (`"gamepad": true` in a manifest). `navigation` hands the page actions (up, down, left, right,
   accept, cancel, previous and next tab, secondary, tertiary, the cursor toggle) through `window.magelight.gamepad`,
   which moves focus between the controls of the scopes the page attaches (`attachNavigation`, newest scope first, a

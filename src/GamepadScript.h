@@ -16,19 +16,23 @@ var actions=new Set(),stateHandlers=new Set(),scopes=[],generation=-1,sequence=-
 var state=Object.freeze({enabled:false,active:false,connected:false,style:'keys',mode:'navigation',device:'keyboardMouse',
   glyphFamily:'xbox',bindings:Object.freeze({}),generation:-1});
 function request(op,extra){var o={op:op,page:page};if(extra)for(var k in extra)o[k]=extra[k];try{ml.send('__gamepad',JSON.stringify(o));}catch(e){}}
-function call(fn,arg){try{return fn(arg)===true;}catch(e){console.error('[magelight] gamepad handler threw',e);return true;}}
+var threw=new WeakSet();
+function reportThrow(fn,e){if(threw.has(fn))return;threw.add(fn);console.error('[magelight] gamepad handler threw',e);}
+function call(fn,arg){try{return fn(arg)===true;}catch(e){reportThrow(fn,e);return false;}}
 function isText(e){return !!e&&(e.isContentEditable||e.tagName==='TEXTAREA'||(e.tagName==='INPUT'&&
   ['button','checkbox','radio','submit','reset','file','image','hidden','range','color'].indexOf(e.type)<0));}
 function identity(e){return (e&&e.getAttribute&&(e.getAttribute('data-ml-id')||e.id))||'';}
-function top(){return scopes[scopes.length-1];}
-function marked(e){return e.hasAttribute('data-ml-focusable');}
+function top(){for(var i=scopes.length-1;i>=0;--i)if(scopes[i].root.isConnected)return scopes[i];return undefined;}
+function marked(e){return e.hasAttribute('data-ml-focusable')||e.getAttribute('role')==='tab';}
 function visible(e){
   if(!e||!e.isConnected||(e.tabIndex<0&&!marked(e))||e.matches(':disabled,[aria-disabled=true]')||e.closest('[hidden],[inert],[aria-hidden=true]'))return false;
   var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.visibility!=='collapse'&&e.getClientRects().length>0;}
 function candidates(scope){
   if(!scope||!scope.root.isConnected)return [];
-  var nodes=scope.getCandidates?scope.getCandidates():scope.root.querySelectorAll('button,input,select,textarea,a[href],[tabindex],[data-ml-focusable]');
-  return Array.prototype.filter.call(nodes,function(e){return scope.root.contains(e)&&visible(e);});}
+  var nodes=null;
+  if(scope.getCandidates){try{nodes=scope.getCandidates();}catch(e){reportThrow(scope.getCandidates,e);}}
+  if(!nodes||typeof nodes.length!=='number')nodes=scope.root.querySelectorAll('button,input,select,textarea,a[href],[tabindex],[data-ml-focusable]');
+  return Array.prototype.filter.call(nodes,function(e){return !!e&&scope.root.contains(e)&&visible(e);});}
 // One control is marked at a time: a modal's scope takes the mark from the page under it, and gives it back on dispose.
 function mark(e){document.querySelectorAll('[data-ml-focused]').forEach(function(o){if(o!==e)o.removeAttribute('data-ml-focused');});
   if(e)e.setAttribute('data-ml-focused','');}
@@ -44,10 +48,17 @@ function focus(scope,e){
   if(e.scrollIntoView)e.scrollIntoView({block:'nearest',inline:'nearest'});}
 function recover(scope){
   if(!scope||scope!==top())return;
+  // The selection still standing needs no full scan (a held stick recovers every batch).
+  if(!scope.getCandidates&&!scope.restore&&scope.selected&&scope.root.contains(scope.selected)&&visible(scope.selected)){
+    if(!scope.selected.hasAttribute('data-ml-focused'))mark(scope.selected);
+    return;}
   var items=candidates(scope);
-  if(items.indexOf(scope.selected)>=0)return;
-  var desired=scope.selectedId?items.find(function(e){return identity(e)===scope.selectedId;}):null;
-  var i=scope.initialFocus,initial=typeof i==='function'?i():typeof i==='string'?items.find(function(e){return identity(e)===i;}):i;
+  if(!scope.restore&&items.indexOf(scope.selected)>=0){if(!scope.selected.hasAttribute('data-ml-focused'))mark(scope.selected);return;}
+  var restore=scope.restore;scope.restore=null;
+  var desired=items.indexOf(restore)>=0?restore:scope.selectedId?items.find(function(e){return identity(e)===scope.selectedId;}):null;
+  var i=scope.initialFocus,initial=null;
+  if(typeof i==='function'){try{initial=i();}catch(e){reportThrow(i,e);}}
+  else initial=typeof i==='string'?items.find(function(e){return identity(e)===i;}):i;
   focus(scope,desired||(items.indexOf(initial)>=0?initial:items[0]));}
 // WebKit 615 reports an element's rect in the units of the CSS zoom it is drawn at, so a zoomed panel's controls would
 // seem nearer than they are: the rect times that zoom is where it is drawn (the page core's IME box does the same).
@@ -72,36 +83,45 @@ function fire(e,type){e.dispatchEvent(new Event(type,{bubbles:true}));}
 function adjust(e,dir){
   var sign=dir==='left'||dir==='down'?-1:1;
   if(e.matches('input[type=range]')){
-    var min=Number(e.min||0),max=Number(e.max||100),step=Number(e.step||1);
-    var v=Math.min(max,Math.max(min,Number(e.value)+sign*(Number.isFinite(step)?step:1)));
-    if(v!==Number(e.value)){e.value=String(v);fire(e,'input');fire(e,'change');}
+    var before=e.value;
+    try{if(sign>0)e.stepUp();else e.stepDown();}
+    catch(x){var min=Number(e.min||0),max=Number(e.max||100),step=Number(e.step||1);
+      e.value=String(Math.min(max,Math.max(min,Number(e.value)+sign*(Number.isFinite(step)?step:1))));}
+    if(e.value!==before){fire(e,'input');fire(e,'change');}
     return;}
   if(e.matches('select')){
     var d=dir==='up'||dir==='left'?-1:1,n=e.selectedIndex+d;
     while(n>=0&&n<e.options.length&&e.options[n].disabled)n+=d;
     if(n>=0&&n<e.options.length){e.selectedIndex=n;fire(e,'input');fire(e,'change');}}}
+function scrollable(t){var s=getComputedStyle(t);
+  return /(auto|scroll)/.test(s.overflowY+s.overflowX)&&(t.scrollHeight>t.clientHeight||t.scrollWidth>t.clientWidth);}
 function scroll(scope,ev){
   if(!ev.x&&!ev.y)return;
   var t=state.mode==='cursor'?document.elementFromPoint(lastX,lastY):scope.selected;
-  while(t&&t!==scope.root){
-    var s=getComputedStyle(t);
-    if(/(auto|scroll)/.test(s.overflowY+s.overflowX)&&(t.scrollHeight>t.clientHeight||t.scrollWidth>t.clientWidth))break;
-    t=t.parentElement;}
-  t=t||scope.root;
+  if(t&&!scope.root.contains(t))t=null;   // under a modal: the page beneath is not this scope's
+  var found=null;
+  for(;t&&t!==scope.root;t=t.parentElement)if(scrollable(t)){found=t;break;}
+  var r=scope.root,page=r===document.body||r===document.documentElement;
+  if(!found)found=page?(document.scrollingElement||r):scrollable(r)?r:null;
+  if(!found)return;
+  t=found;
   var left=ev.x*600*ev.dt,topBy=-ev.y*600*ev.dt;
   try{t.scrollBy({left:left,top:topBy,behavior:'instant'});}catch(e){t.scrollBy(left,topBy);}}
 function defaultAction(ev){
   var scope=top();if(!scope)return;
-  recover(scope);
+  if(ev.phase!=='change')recover(scope);
   if(scope.onAction&&call(scope.onAction,ev))return;
   if(ev.control==='rightStick'&&ev.phase==='change'){scroll(scope,ev);return;}
   var a=ev.action;
   if(ev.phase!=='press'&&ev.phase!=='repeat')return;
   if((a==='previousTab'||a==='nextTab')&&ev.phase==='press'){
-    var tabs=candidates(scope).filter(function(e){return e.getAttribute('role')==='tab';});
+    var sel=scope.selected,list=(sel&&sel.closest&&sel.closest('[role=tablist]'))||scope.root.querySelector('[role=tablist]')||scope.root;
+    var tabs=Array.prototype.filter.call(list.querySelectorAll('[role=tab]'),function(e){
+      return scope.root.contains(e)&&!e.matches(':disabled,[aria-disabled=true]')&&!e.closest('[hidden],[inert],[aria-hidden=true]')&&e.getClientRects().length>0;});
     var i=tabs.findIndex(function(e){return e.getAttribute('aria-selected')==='true';});
-    var next=tabs[Math.max(0,Math.min(tabs.length-1,(i<0?0:i)+(a==='nextTab'?1:-1)))];
-    if(next){focus(scope,next);next.click();}
+    var j=i<0?0:i+(a==='nextTab'?1:-1);
+    if(j<0||j>=tabs.length||j===i)return;
+    tabs[j].click();focus(scope,tabs[j]);
     return;}
   if(a==='cancel'){
     if(ev.phase!=='press')return;
@@ -165,11 +185,12 @@ function attachNavigation(o){
   var disposed=false;
   return function dispose(){
     if(disposed)return;disposed=true;observer.disconnect();
-    var wasTop=top()===scope,at=scopes.indexOf(scope);
+    var at=scopes.indexOf(scope);
+    var wasTop=at>=0&&scopes.slice(at+1).every(function(s){return !s.root.isConnected;});
     if(at>=0)scopes.splice(at,1);
     scope.root.querySelectorAll('[data-ml-focused]').forEach(function(e){e.removeAttribute('data-ml-focused');});
     if(editing&&scope.root.contains(editing))editing=null;
-    if(wasTop){var parent=top();if(parent){var sel=parent.selected;parent.selected=null;parent.initialFocus=sel;recover(parent);}}};}
+    if(wasTop){var parent=top();if(parent){parent.restore=parent.selected;parent.selected=null;recover(parent);}}};}
 var labels={
   xbox:{south:'A',east:'B',west:'X',north:'Y',leftShoulder:'LB',rightShoulder:'RB',leftTrigger:'LT',rightTrigger:'RT',leftThumb:'LS',rightThumb:'RS',start:'Menu',back:'View'},
   playstation:{south:'Cross',east:'Circle',west:'Square',north:'Triangle',leftShoulder:'L1',rightShoulder:'R1',leftTrigger:'L2',rightTrigger:'R2',leftThumb:'L3',rightThumb:'R3',start:'Options',back:'Share'},

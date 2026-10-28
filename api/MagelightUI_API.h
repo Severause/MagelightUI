@@ -447,7 +447,8 @@ namespace MAGELIGHT_API {
     // ── Gamepad layer (1.6.0) ──────────────────────────────────────────────
     // SetViewGamepad opts a view in: while it holds UI mode on flat, the pad is
     // its page's and kept from the game. kGamepadStyleKeys types the pad as
-    // keys (south/A Enter, east/B Escape, d-pad and left stick the arrows), so a
+    // keys (south/A Enter, east/B Escape, d-pad and left stick the arrows, the
+    // right stick a mouse wheel under the pointer), so a
     // page that works with a keyboard works with a pad; kGamepadStyleNavigation
     // hands the page actions, which window.magelight.gamepad turns into focus
     // moves between the controls of the scopes the page attaches (docs/SDK.md).
@@ -476,16 +477,17 @@ namespace MAGELIGHT_API {
         // slot left 0 keeps its default control, which counts: moving a control to another action means
         // rebinding the action that had it. No action can be left unbound.
         std::uint8_t bindings[11];
+        std::uint8_t reserved[3];        // must be 0
         // 1.6.0 ends here (size 28); fields a later host adds start at offset 28.
     };
     struct GamepadState {
         std::uint32_t size;              // = sizeof(GamepadState), set by the caller
-        bool enabled;                    // the view opted in and the player's Magelight.json allows the layer
+        bool enabled;                    // the view opted in and the layer can run (flat, Magelight.json allows it)
         bool connected;                  // a gamepad is connected and enabled in the game
         bool capturing;                  // the view holds the pad right now
         std::uint32_t mode;              // kGamepadMode*
         std::uint32_t glyphs;            // kGamepadGlyphs*: the prompt labels the player chose
-        std::uint64_t generation;        // changes whenever the pad changes hands or is reset
+        std::uint64_t generation;        // changes whenever the pad changes hands or reconnects
     };
 
     // Actions for BindHotkey (one binding per DirectInput scancode, process-wide).

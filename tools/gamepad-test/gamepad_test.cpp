@@ -230,7 +230,7 @@ int main()
         Check(x.keys.empty() && x.events.empty(), "keys style: X sends nothing");
     }
 
-    // B_uncaptured_consumed_and_release_swallowed: B closes through the focus menu, never reaches the page, and its
+    // B_uncaptured_closes_and_release_swallowed: B asks the host to close the view, never reaches the page, and its
     // release never reaches the game.
     {
         Router r;
@@ -238,6 +238,10 @@ int main()
         Check(r.Button(Control::East, 1.0f), "B is consumed while a view owns the pad");
         const BatchOut b = r.End();
         Check(b.events.empty() && b.keys.empty(), "uncaptured B sends the page nothing");
+        Check(b.close, "uncaptured B asks the host to close the view");
+        r.Begin(Owned(0.01, Style::Navigation));
+        r.Button(Control::East, 1.0f);
+        Check(!r.End().close, "a held B closes once, on its press");
         BatchIn left = Owned(0.02, Style::Navigation);
         left.owner = 0;
         r.Begin(left);
@@ -257,7 +261,59 @@ int main()
         Router k;
         k.Begin(Owned(0.0, Style::Keys, true));
         k.Button(Control::East, 1.0f);
-        Check(OnlyKeys(k.End(), { kVkEscape }), "keys style: captured B taps Escape");
+        const BatchOut kb = k.End();
+        Check(OnlyKeys(kb, { kVkEscape }), "keys style: captured B taps Escape");
+        Check(!kb.close, "captured B does not close the view");
+    }
+
+    // keys_style_right_stick_scrolls: up scrolls up, quadratic, nothing in the navigation style (the page scrolls).
+    {
+        Router r;
+        r.Begin(Owned(0.0, Style::Keys));
+        r.End();
+        r.Begin(Owned(0.02, Style::Keys));
+        r.Stick(Control::RightStick, 0.0f, 1.0f);
+        const BatchOut full = r.End();
+        Check(full.pointer.scrollY > 0.0f && Near(full.pointer.scrollY, kKeysScrollSpeed * 0.02f, 0.5),
+              "keys style: right stick up scrolls up at full speed");
+        r.Begin(Owned(0.04, Style::Keys));
+        r.Stick(Control::RightStick, 0.0f, -0.5f);
+        const BatchOut half = r.End();
+        Check(half.pointer.scrollY < 0.0f && Near(half.pointer.scrollY, -0.25f * kKeysScrollSpeed * 0.02f, 0.5),
+              "keys style: half down scrolls down at a quarter speed");
+        Router n;
+        n.Begin(Owned(0.0, Style::Navigation));
+        n.End();
+        n.Begin(Owned(0.02, Style::Navigation));
+        n.Stick(Control::RightStick, 0.0f, 1.0f);
+        Check(n.End().pointer.scrollY == 0.0f, "navigation style: the host scrolls nothing");
+    }
+
+    // B_held_at_capture_does_not_close: a B already down when the view takes the pad is not a close.
+    {
+        Router r;
+        BatchIn in = Owned(0.0, Style::Navigation);
+        in.pad.buttons = 0x2000;   // B
+        r.Begin(in);
+        r.Button(Control::East, 1.0f);
+        Check(!r.End().close, "a B held when the view took the pad does not close it");
+    }
+
+    // swapped_accept_and_cancel: cancel follows its binding, not the physical B.
+    {
+        Router r;
+        BatchIn in = Owned(0.0, Style::Navigation);
+        in.config.bindings[Slot(Action::Accept)] = Control::East;
+        in.config.bindings[Slot(Action::Cancel)] = Control::South;
+        r.Begin(in);
+        r.Button(Control::East, 1.0f);
+        const BatchOut accept = r.End();
+        Check(!accept.close && HasEvent(accept, Control::East, Action::Accept, Phase::Press),
+              "B bound to accept accepts and does not close");
+        in.now = 0.02;
+        r.Begin(in);
+        r.Button(Control::South, 1.0f);
+        Check(r.End().close, "A bound to cancel closes the view");
     }
 
     // owner_gain_with_held_shoulder_sends_no_tab: the shoulder that cast the opening power is not a tab change.

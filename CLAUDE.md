@@ -123,8 +123,9 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    down that was pressed while the page was open keeps that menu and the suspended controls until
    those buttons have been up 100 ms (`EndControlsHold`, 1.5 s at most): it is the menu context that
    keeps the closing press from the game. On flat the same holds for a view that held the gamepad
-   (1.6.0) and a pad button pressed while it did (`s_heldPad`): B closes a page, and its release would
-   otherwise open the Tween menu. A view that did not hold the pad never arms it. A kHide is read as the game closing the menu only if the
+   (1.6.0) and a pad button pressed while it did (`s_heldPad`), as a second line: GamepadSink already
+   ends the release of the B that closed the page before the engine sees it. A view that did not hold
+   the pad never arms it. A kHide is read as the game closing the menu only if the
    menu is still closed once the queue has run (`CheckFocusMenuClosed`). The engine opens and closes
    the Cursor Menu with it: queue no Cursor Menu message of your own while it is registered, open the
    overlay (no kUsesCursor) before it, and keep kAssignCursorToRenderer on the overlay, or the engine
@@ -250,12 +251,18 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     proc (WM_KEYDOWN / WM_CHAR are the OS, not DirectInput), so they keep
     working. The mouse device is untouched, and so is the gamepad but for a
     view that opted in to the gamepad layer (1.6.0): while it holds the pad
-    (`src/GamepadCore.h`, decided in the input sink on the game thread), every
-    pad event ends at the sink, unlinked like a typed key, and each release
-    goes where its press went (a press the game saw keeps its release; one the
-    page owned ends at the sink, and the controls hold of invariant 7 keeps the
-    engine's own handlers, which run first, off it). Every engine pad event passes the
-    router whether or not a view holds the pad, or that bookkeeping breaks. A plugin that polls
+    (`src/GamepadCore.h`), every pad event ends at GamepadSink, unlinked like a
+    typed key, and each release goes where its press went (a press the game saw
+    keeps its release; one the page owned ends there too). GamepadSink is
+    PREPENDED to the device manager's sinks, ahead of MenuControls and
+    PlayerControls: menu context does not keep the pad from the game (the
+    Cursor Menu's context is on top while a page is open, so B never arrives as
+    Cancel and X still reads as Ready Weapon), and the B close is the router's
+    own (`BatchOut::close`), not the focus menu's Cancel, which the focus menu
+    ignores while the UI-mode view holds the pad. The input dispatch runs on
+    whichever thread the engine's input job lands on, one dispatch at a time.
+    Every engine pad event passes the router whether or not a view holds the
+    pad, or that bookkeeping breaks. A plugin that polls
     user32 `GetAsyncKeyState` / `GetKeyState` itself gets keyboard keys as up
     (the Polled keys block in Magelight.cpp), except the UI-mode owner's DLL,
     Magelight and non-plugin modules. Two things the sink

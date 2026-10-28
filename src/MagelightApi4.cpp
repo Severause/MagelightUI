@@ -1660,6 +1660,8 @@ namespace Magelight::Api4 {
     static_assert(sizeof(MAGELIGHT_API::GamepadConfig) == kGamepadConfigSize, "GamepadConfig grew: read the new fields");
     static_assert(sizeof(MAGELIGHT_API::GamepadState) == kGamepadStateSize, "GamepadState grew: fill the new fields");
     static_assert(std::size(MAGELIGHT_API::GamepadConfig{}.bindings) == Gp::kBindingCount);
+    static_assert(offsetof(MAGELIGHT_API::GamepadConfig, bindings) == 14 &&
+                  offsetof(MAGELIGHT_API::GamepadConfig, reserved) == 25, "GamepadConfig's 1.6.0 layout moved");
     static_assert(Gp::Index(Gp::Control::DpadUp) == 1 && Gp::Index(Gp::Control::DpadRight) == 4 &&
                   Gp::Index(Gp::Control::Start) == 5 && Gp::Index(Gp::Control::RightShoulder) == 10 &&
                   Gp::Index(Gp::Control::South) == 11 && Gp::Index(Gp::Control::North) == 14);
@@ -1679,6 +1681,8 @@ namespace Magelight::Api4 {
             const ModId owner = OwnerOf(view);
             if (config->size < kGamepadConfigSize)
                 return Fail(owner, Result::InvalidArgument, "SetViewGamepad: config->size is below the 1.6.0 GamepadConfig");
+            for (const std::uint8_t r : config->reserved)
+                if (r) return Fail(owner, Result::InvalidArgument, "SetViewGamepad: reserved bytes must be 0");
             if (config->style > MAGELIGHT_API::kGamepadStyleNavigation)
                 return Fail(owner, Result::InvalidArgument, "SetViewGamepad: unknown style " + std::to_string(config->style));
             cfg.enabled = config->enabled;

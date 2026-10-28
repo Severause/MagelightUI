@@ -328,8 +328,14 @@ namespace Magelight::Manifest {
                         } else if (gp->is_object()) {
                             WarnUnknownKeys(*gp, { "style", "cursor" }, vctx + "gamepad: ");
                             gc.enabled = true;
-                            if (auto s = gp->find("style"); s != gp->end() && s->is_string()) style = s->get<std::string>();
-                            if (auto c = gp->find("cursor"); c != gp->end() && c->is_boolean()) gc.allowCursor = c->get<bool>();
+                            if (auto s = gp->find("style"); s != gp->end()) {
+                                if (s->is_string()) style = s->get<std::string>();
+                                else ok = false;
+                            }
+                            if (auto c = gp->find("cursor"); c != gp->end()) {
+                                if (c->is_boolean()) gc.allowCursor = c->get<bool>();
+                                else ok = false;
+                            }
                         } else {
                             ok = false;
                         }

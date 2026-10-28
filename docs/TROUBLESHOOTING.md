@@ -110,15 +110,16 @@ v1-v3 C++ `CreateView` belong to no mod: they are file-only and cannot opt in.
 Since 1.6.0 a page can be driven with a gamepad, on flat only, when its mod opted it in (`SetViewGamepad`, a
 manifest's `"gamepad"`): the pad is the page's while it holds UI mode, the game window has focus, the game has the pad
 connected and enabled (its Controls settings), and no engine menu that takes menu input (a message box, another
-mod's menu) is open over it. A page that did not opt in gets the pad as before 1.6.0: B closes it, every other button
-does nothing in it. Check, in `Magelight.log`:
+mod's menu) is open over it. A page that did not opt in gets the pad as before 1.6.0, the game's own handling of
+it. Check, in `Magelight.log`:
 
 - `view N gamepad on (keys)` or `on (navigation)`: the mod opted the view in. Without it, the mod has its own gamepad
   handling or none.
 - `settings loaded (... gamepad=true)`: `false` means `Magelight.json` turned the layer off. The next line,
   `gamepad layer: deadZone ...`, gives the tuning in effect, after any value outside its range was brought inside it.
-- `"gamepad": { "trace": true }` logs, once a second, `gamepad batches N (empty N) connected true owner N`: `owner 0`
-  while the page is open means one of the conditions above is not met. It also logs each pad button with its value.
+- `"gamepad": { "trace": true }` logs, once a second, `gamepad batches N (empty N) connected true owner N contexts [..]`:
+  `owner 0` while the page is open means one of the conditions above is not met. It also logs each pad press and
+  release with the name the game gave it and the game's input contexts (0 gameplay, 1 menu mode, 9 the cursor).
 
 The `Magelight.json` `"gamepad"` block (or `"gamepad": false`): `enabled` (`true`; `false` turns the layer off for every page),
 `glyphs` (`"xbox"`; `"playstation"` or `"generic"` labels the buttons a page shows for another pad), `deadZone`

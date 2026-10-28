@@ -179,7 +179,7 @@ answers it and it needs nothing below. In the `navigation` style the page gets a
 
 ```js
 const pad = window.magelight?.gamepad;
-if (pad) {
+if (pad && window.__MAGELIGHT__?.capabilities?.gamepad) {   // the helper is in every page; the layer may be off
   magelight.send('__escapecapture', '1');          // B reaches the page (see below)
   const close = () => { dispose(); magelight.send('close'); };
   let dispose = pad.attachNavigation({
@@ -198,7 +198,8 @@ if (pad) {
 - **Scopes.** `attachNavigation({ root, initialFocus, onBack, onAction, wrap, getCandidates })` returns a
   dispose. The newest scope moves focus; a modal attaches its own and disposes it when it closes, which gives the
   page under it back its selection. Candidates are the visible, enabled buttons, inputs, selects, textareas,
-  links, `[tabindex]` elements and `[data-ml-focusable]` elements inside `root` (a marked element with no `tabindex`
+  links, elements with a `tabindex` of 0 or more, `role="tab"` elements and `[data-ml-focusable]` elements inside
+  `root` (a marked element with no `tabindex`
   gets `tabindex="-1"` when it is focused, so it stays out of the Tab order; `getCandidates` for a custom or
   virtualised list). Directions move by geometry, as drawn (CSS `zoom` included); `data-ml-up`, `-down`, `-left`
   and `-right` on a control name the control (by id or `data-ml-id`) that direction goes to. A control removed or
@@ -207,14 +208,17 @@ if (pad) {
 - **What the defaults do.** Accept clicks; on a range, a select or a text field it enters edit mode, where
   directions step the range or the select (`input` and `change` fire) and leave a text field alone (free text needs
   a keyboard). Cancel leaves edit mode first, then calls `onBack`. The shoulders click the `role="tab"` button
-  before or after the one with `aria-selected="true"`, stopping at the ends, so the page keeps `aria-selected` up to
-  date. The right stick scrolls the nearest scrollable container.
+  before or after the one with `aria-selected="true"` in the selection's `role="tablist"` (else the scope's first),
+  unselected tabs at `tabindex="-1"` included; a press past either end does nothing, and the page keeps
+  `aria-selected` up to date. The right stick scrolls the nearest scrollable container of the selection (in cursor
+  mode, under the pointer), else the scope's root, else the page when the scope is the page itself. A handler that throws is logged once and counts as not handled.
 - **B and Escape.** B follows Escape's rule: it closes the view unless the page holds Escape
   (`magelight.send('__escapecapture', '1')`, or the plugin's `SetEscapeCapture`), and only then does the page get
   `cancel`. A page that takes Escape for B handles keyboard Escape too, as above. The helper never takes Escape
   itself.
 - **Styling and prompts.** The focused control carries `data-ml-focused` (one at a time); style it yourself
-  (`[data-ml-focused] { outline: 3px solid var(--accent); }`). `<html>` carries `data-ml-input` (`gamepad` or
+  (`html[data-ml-input="gamepad"] [data-ml-focused] { outline: 3px solid var(--accent); }`, so mouse and keyboard
+  users see no ring). `<html>` carries `data-ml-input` (`gamepad` or
   `keyboardMouse`, which follows the last device used) and `data-ml-gamepad-mode`. `getPrompt(action)` gives the
   label of the control bound to an action in the player's glyph family (`A`, `Cross`, `South`), `onStateChange`
   says when it changes. Both work in the keys style too.
@@ -222,7 +226,8 @@ if (pad) {
   `release`, `repeat` (a held direction), `change` (a stick, every batch while off centre, with `x` and `y`) or
   `cancel` (the pad changed hands, the view lost it, or the host dropped a flooded batch: stop anything a held button
   was doing). Controls are
-  positional (`south`, `east`, `leftShoulder`, `rightStick`); triggers, start and back arrive with action `none`.
+  positional (`south`, `east`, `leftShoulder`, `rightStick`); with the default bindings triggers, start and back
+  arrive with action `none`, and a stick at rest can get a zero `change` while the other moves.
 - **Cursor mode.** Where the view allows it, a right-stick click (or `setMode('cursor')`) switches to a cursor the
   left stick moves; A clicks there. A direction press, or `setMode('navigation')`, goes back.
 

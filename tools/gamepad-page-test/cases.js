@@ -94,14 +94,19 @@
                     [start, right, up, over].join(' '));
     }] },
 
-    { name: 'zoomed_grid_navigates_by_sight', steps: [function () {
-      var s = stage(grid(), '1.5');
-      attach({ root: s, initialFocus: 'b0' });
+    // A zoomed button between unzoomed ones: z2 sits at 230 px in its own units, centred at 540 px as drawn. Zoom
+    // ignored puts it first (270 px), zoom counted twice puts it last (1080 px); only counted once is z1, z2, z3.
+    { name: 'zoom_counted_once', steps: [function () {
+      stage('<button id="z0" style="left:100px;top:100px">a</button>' +
+            '<button id="z1" style="left:400px;top:100px">b</button>' +
+            '<button id="z3" style="left:600px;top:100px">d</button>' +
+            '<div style="position:absolute;left:0;top:0;zoom:2"><button id="z2" style="left:230px;top:50px">c</button></div>');
+      attach({ root: document.getElementById('stage'), initialFocus: 'z0' });
       press('right'); var a = focusedId();
-      press('down'); var b = focusedId();
-      press('left'); var c = focusedId();
+      press('right'); var b = focusedId();
+      press('right'); var c = focusedId();
       done();
-      return result(a === 'b1' && b === 'b4' && c === 'b3', [a, b, c].join(' '));
+      return result(a === 'z1' && b === 'z2' && c === 'z3', [a, b, c].join(' '));
     }] },
 
     // A zoomed panel beside unzoomed controls: the zoomed button sits at 300 px in its own units but draws at 600 px,
@@ -248,6 +253,110 @@
       return result(a === 'tab1' && b === 'tab2' && c === 'tab1', [a, b, c].join(' '));
     }] },
 
+    // The usual ARIA tablist: unselected tabs at tabindex -1. The shoulders still reach them, and a press past the
+    // last tab does nothing.
+    { name: 'tabs_roving_tabindex_stop_at_ends', steps: [function () {
+      var h = '<div role="tablist">';
+      for (var i = 0; i < 3; ++i)
+        h += '<button role="tab" id="rt' + i + '" tabindex="' + (i === 0 ? 0 : -1) + '" aria-selected="' + (i === 0) +
+             '" style="left:' + (100 + i * 120) + 'px;top:50px">t' + i + '</button>';
+      h += '</div><button id="body0" style="left:100px;top:200px">x</button>';
+      stage(h);
+      var tabs = document.querySelectorAll('[role=tab]'), clicks = 0;
+      tabs.forEach(function (t) {
+        t.addEventListener('click', function () {
+          ++clicks;
+          tabs.forEach(function (o) { o.setAttribute('aria-selected', String(o === t)); o.tabIndex = o === t ? 0 : -1; });
+        });
+      });
+      attach({ root: document.getElementById('stage'), initialFocus: 'body0' });
+      press('nextTab');
+      var a = document.querySelector('[aria-selected=true]').id;
+      press('nextTab');
+      var b = document.querySelector('[aria-selected=true]').id;
+      var clicksAtEnd = clicks;
+      press('nextTab');
+      var c = document.querySelector('[aria-selected=true]').id;
+      done();
+      return result(a === 'rt1' && b === 'rt2' && c === 'rt2' && clicks === clicksAtEnd && clicks === 2,
+                    [a, b, c, 'clicks=' + clicks].join(' '));
+    }] },
+
+    // React's order: the modal's DOM goes first, its dispose runs after. The page under it gets its mark back, and a
+    // press acts on the restored selection.
+    { name: 'modal_removed_before_dispose', steps: [
+      function () {
+        stage('<div id="pg"><button id="p0" style="left:100px;top:100px">0</button>' +
+              '<button id="p1" style="left:100px;top:160px">1</button></div>' +
+              '<div id="md"><button id="q0" style="left:600px;top:100px">q</button></div>');
+        attach({ root: document.getElementById('pg'), initialFocus: 'p1' });
+        window.__gpParent = dispose;
+        window.__gpModal = gp().attachNavigation({ root: document.getElementById('md') });
+        document.getElementById('md').remove();
+      },
+      function () {
+        window.__gpModal();
+        var marked = focusedId();
+        press('up');
+        var moved = focusedId();
+        dispose = window.__gpParent;
+        done();
+        return result(marked === 'p1' && moved === 'p0', marked + ' ' + moved);
+      }
+    ] },
+
+    // Tabs whose tabindex the page updates after the click (as React does, in a microtask): the selection still
+    // follows the tab the shoulder chose.
+    { name: 'tabs_roving_tabindex_async', steps: [
+      function () {
+        var h = '<div role="tablist">';
+        for (var i = 0; i < 3; ++i)
+          h += '<button role="tab" id="at' + i + '" tabindex="' + (i === 0 ? 0 : -1) + '" aria-selected="' + (i === 0) +
+               '" style="left:' + (100 + i * 120) + 'px;top:50px">t' + i + '</button>';
+        stage(h + '</div>');
+        var tabs = document.querySelectorAll('[role=tab]');
+        tabs.forEach(function (t) {
+          t.addEventListener('click', function () {
+            Promise.resolve().then(function () {
+              tabs.forEach(function (o) { o.setAttribute('aria-selected', String(o === t)); o.tabIndex = o === t ? 0 : -1; });
+            });
+          });
+        });
+        attach({ root: document.getElementById('stage'), initialFocus: 'at0' });
+        press('nextTab');
+      },
+      function () {
+        var sel = document.querySelector('[aria-selected=true]').id, marked = focusedId();
+        done();
+        return result(sel === 'at1' && marked === 'at1', sel + ' marked=' + marked);
+      }
+    ] },
+
+    // A page handler that throws does not take the input: the defaults still move the selection.
+    { name: 'throwing_handler_does_not_block', steps: [function () {
+      var s = stage(grid());
+      attach({ root: s, initialFocus: 'b4' });
+      var stop = gp().onAction(function () { throw new Error('page bug'); });
+      press('right');
+      var moved = focusedId();
+      stop();
+      done();
+      return result(moved === 'b5', moved);
+    }] },
+
+    // The right stick scrolls the scrollable container the selection is in.
+    { name: 'right_stick_scrolls_container', steps: [function () {
+      var rows = '';
+      for (var i = 0; i < 20; ++i) rows += '<div style="height:60px">row ' + i + '</div>';
+      stage('<div id="sc" class="scroll" style="left:100px;top:100px;width:300px;height:200px">' +
+            '<button id="in0" style="position:relative">a</button>' + rows + '</div>');
+      attach({ root: document.getElementById('stage'), initialFocus: 'in0' });
+      deliver(packet({ events: [{ control: 'rightStick', action: 'none', phase: 'change', value: 1, x: 0, y: -1 }], dt: 0.05 }));
+      var top = document.getElementById('sc').scrollTop;
+      done();
+      return result(top > 0, 'scrollTop=' + top);
+    }] },
+
     { name: 'keys_style_state_only', steps: [function () {
       var s = stage(grid());
       attach({ root: s, initialFocus: 'b4' });
@@ -281,7 +390,9 @@
       var p = packet({ events: [ev('right')] });
       deliver(p);
       var b5 = focusedId();
-      deliver(p); seen.push(focusedId());   // the same sequence again
+      var again = packet({ events: [ev('left')] });   // a move that would leave b5, under the sequence already seen
+      again.sequence = p.sequence;
+      deliver(again); seen.push(focusedId());
       var many = [];
       for (var i = 0; i < 129; ++i) many.push(ev('left'));
       deliver(packet({ events: many })); seen.push(focusedId());
