@@ -2626,14 +2626,22 @@ namespace Magelight {
                             msg == WM_CHAR;
         const std::uint16_t bits = !keyMsg ? 0 : keys >= 0 ? static_cast<std::uint16_t>(keys) : CaptureKeyBits(false);
         std::lock_guard<std::mutex> lk(s_inputMutex);
-        if (s_inputQueue.size() < 512) s_inputQueue.push_back({ msg, w, l, bits, source });
+        // A move merges into a move of its source at the tail; past the soft cap only releases and markers go in.
+        const bool tailMove = !s_inputQueue.empty() && s_inputQueue.back().msg == WM_MOUSEMOVE &&
+                              s_inputQueue.back().source == source;
+        switch (Input::QueueRule(s_inputQueue.size(), tailMove, msg, msg == 0 || msg == kKeyReleaseMsg)) {
+        case Input::QueueStep::Append: s_inputQueue.push_back({ msg, w, l, bits, source }); break;
+        case Input::QueueStep::ReplaceTail: s_inputQueue.back() = { msg, w, l, bits, source }; break;
+        case Input::QueueStep::Drop: break;
+        }
     }
 
-    // Any thread. Shares the queue's 512 messages a frame; at most 64 ops a frame, the rest are dropped.
+    // Any thread. Shares the queue's soft cap (Input::kQueueSoftCap a drain); at most 64 ops a drain, the rest are
+    // dropped.
     static void QueueEditOp(EditOp op)
     {
         std::lock_guard<std::mutex> lk(s_inputMutex);
-        if (s_inputQueue.size() >= 512 || s_editOps.size() >= 64) return;
+        if (s_inputQueue.size() >= Input::kQueueSoftCap || s_editOps.size() >= 64) return;
         s_inputQueue.push_back({ kEditOpMsg, static_cast<WPARAM>(s_editOps.size()), 0 });
         s_editOps.push_back(std::move(op));
     }
@@ -9066,13 +9074,14 @@ float4 ps_straight(VSOut i) : SV_Target {
     // With it on, a thread of Magelight's own (PageThreadMain) owns Ultralight from Renderer::Create on: script,
     // layout, Update, Render, and the GPU driver recording into a deferred context of the game's device. Each page
     // frame ends in a PagePacket: its command list and what it drew. At Present the game thread (ThreadModeFrame)
-    // takes every finished packet, runs their lists in order on the immediate context, draws the newest packet's
-    // views and lets the page thread start its next frame. It never waits on the page thread, so a page stuck in a
-    // script freezes only itself (the watchdog names it). A recorded list keeps every resource it uses alive until it
-    // is released, and a packet's SRVs hold references of their own, so a View Ultralight frees meanwhile cannot pull
-    // a texture from under the game thread (tools/deferred-test). No fiber here: the thread's stack is WebKit's own,
-    // in a frame and between frames (tools/fiber-gc-test --thread passes without the VM lock); it holds the lock
-    // between frames for speed only (an idle frame about 13 us against 235). Flat only (VR never asks for it).
+    // takes every finished packet and at once lets the page thread start its next frame, then runs their lists in
+    // order on the immediate context and draws the newest packet's views. It never waits on the page thread, so a
+    // page stuck in a script freezes every page (they share this thread) but never the game (the watchdog names it).
+    // A recorded list keeps every resource it uses alive until it is released, and a packet's SRVs hold references of
+    // their own, so a View Ultralight frees meanwhile cannot pull a texture from under the game thread
+    // (tools/deferred-test). No fiber here: the thread's stack is WebKit's own, in a frame and between frames
+    // (tools/fiber-gc-test --thread passes without the VM lock); it holds the lock between frames for speed only (an
+    // idle frame about 13 us against 235). Flat only (VR never asks for it).
     struct PagePacket {
         // The frame's recorded GPU work, in order: the parts the driver split off at each flush (MgGpu_TakeCommandList),
         // then the frame's own. Empty when the frame rendered nothing.
@@ -9319,8 +9328,9 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // The frame at Present with the page thread: the game thread's bookkeeping, every page frame finished since the
-    // last Present run in order, the newest one's views drawn, the next page frame let go. Never waits on the page
-    // thread: until it has finished a frame there is simply nothing new to draw.
+    // last Present taken and the next one let go at once (it records while this frame runs the taken frames' lists in
+    // order and draws the newest one's views). Never waits on the page thread: until it has finished a frame there is
+    // simply nothing new to draw.
     static void ThreadModeFrame(IDXGISwapChain* sc, float bw, float bh)
     {
         using ClockT = std::chrono::steady_clock;
@@ -11550,6 +11560,12 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         EnsureHostSettings();
         return s_gamepadTuning.glyphs;
+    }
+
+    bool PageThreadActive()
+    {
+        EnsureHostSettings();
+        return s_pageThreadMode.load() != PageThread::Mode::Off;
     }
 
     bool SetViewLoadOnShow(ViewId view, bool onShow)

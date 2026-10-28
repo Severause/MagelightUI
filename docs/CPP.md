@@ -101,7 +101,8 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
   `MagelightUI_API.h` says why). With `Magelight.json` `"pageThread": true`
   (host 1.7.0+, flat) the render thread is Magelight's own page thread instead,
   running beside the game: the same rules hold there, and `RE::` from a
-  listener is then a race with the game, not merely bad form. Magelight's own functions are safe to call from
+  listener is then a race with the game, not merely bad form.
+  `QueryCapability("pagethread")` is 1 in that mode. Magelight's own functions are safe to call from
   there; every one is callable from any thread. VR button callbacks
   (`BindVRHotkeyCallback`, `SetVRButtonListener`) run on the **present thread**;
   post from them the same way. `fn` is a plain function pointer, so box the copy:

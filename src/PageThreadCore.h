@@ -1,11 +1,12 @@
 #pragma once
 // The page thread (1.7.0, "pageThread"): whether it may run, and how a page frame reaches the game thread. With it on,
 // a thread of Magelight's own owns Ultralight and records each frame's GPU work into a deferred context; the game
-// thread, at Present, takes every finished frame (TakeAll), runs their command lists in order and composites the
-// newest, and lets the page thread start the next one (Go). The page thread makes at most one frame per Go and the
-// game thread takes them all, so none is dropped (each carries uploads later frames build on) and at most a couple
-// ever wait. The game thread never waits on the page thread: TakeAll and Go hold only the queue's own lock, for a
-// swap. Windows and the standard library only, so tools/pagethread-test runs it on the desktop.
+// thread, at Present, takes every finished frame (TakeAll) and at once lets the page thread start the next one (Go),
+// then runs the taken frames' command lists in order and composites the newest while that one records. The page
+// thread makes at most one frame per Go and the game thread takes them all, so none is dropped (each carries uploads
+// later frames build on) and at most a couple ever wait. The game thread never waits on the page thread: TakeAll and
+// Go hold only the queue's own lock, for a swap. Windows and the standard library only, so tools/pagethread-test runs
+// it on the desktop.
 
 #ifndef NOMINMAX
 #define NOMINMAX   // a no-op when <windows.h> came first; otherwise keeps std::min / std::max usable

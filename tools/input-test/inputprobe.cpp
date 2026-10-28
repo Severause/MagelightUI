@@ -6,6 +6,7 @@
 //   leave    a move outside the view as the leave the host sends a view the pointer left (checked)
 //   guard    the page core's pointer guard, Input::kPointerGuardScript (checked)
 //   routes   which view each pointer source's events go to, Input::PointerRoutes, with two VR hands (checked)
+//   queue    the input queue a page frame drains, Input::QueueRule: moves merged, releases and markers kept (checked)
 //   keys, dead, state, mouse, wheel   the matrix the design was made from (printed, a few checks): the events
 //            Magelight 1.x built by hand, the bare 2.0 constructor and MakeKeyEvent side by side; the es-419 layout's
 //            AltGr, ñ and dead key, and the dead key a layout holds; when the constructor reads the keyboard state;
@@ -1117,6 +1118,68 @@ static void RoutesTest()
 }
 
 // ── mouse, mouse2, wheel: what Ultralight does (printed) ──────────────────
+// The host's input queue as QueueInput keeps it: each message and its pointer source.
+struct QMsg { UINT msg; std::uint8_t src; };
+static void QPush(std::vector<QMsg>& q, UINT msg, std::uint8_t src, bool marker = false)
+{
+    const bool tailMove = !q.empty() && q.back().msg == WM_MOUSEMOVE && q.back().src == src;
+    switch (In::QueueRule(q.size(), tailMove, msg, marker)) {
+    case In::QueueStep::Append: q.push_back({ msg, src }); break;
+    case In::QueueStep::ReplaceTail: q.back() = { msg, src }; break;
+    case In::QueueStep::Drop: break;
+    }
+}
+
+static void QueueTest()
+{
+    std::printf("== queue: Input::QueueRule, the input queue a page frame drains\n");
+    const std::uint8_t M = In::kPointerMouse, H0 = In::kPointerHand0;
+    auto N = [](std::size_t n) { return std::to_string(n); };
+    {
+        std::vector<QMsg> q;
+        for (int i = 0; i < 3; ++i) QPush(q, WM_MOUSEMOVE, M);
+        Expect("queue: three moves of the mouse are one", N(q.size()), "1");
+        QPush(q, WM_LBUTTONDOWN, M);
+        QPush(q, WM_MOUSEMOVE, M);
+        QPush(q, WM_MOUSEMOVE, M);
+        Expect("queue: a press keeps the moves on either side of it", N(q.size()), "3");
+        QPush(q, WM_MOUSEMOVE, H0);
+        Expect("queue: a hand's move never replaces the mouse's", N(q.size()), "4");
+    }
+    {
+        // A page stuck in a script for 30 s while UI mode is on, the game at 144 fps and the mouse moving every frame.
+        std::vector<QMsg> q;
+        for (int i = 0; i < 30 * 144; ++i) QPush(q, WM_MOUSEMOVE, M);
+        Expect("queue: 30 s of mouse moves during one page frame", N(q.size()), "1");
+    }
+    {
+        // A stalled page frame's queue already full of typed keys, then the exit: Escape leaves UI mode, focus goes.
+        std::vector<QMsg> q;
+        for (std::size_t i = 0; i < In::kQueueSoftCap; ++i) QPush(q, i % 2 ? WM_KEYUP : WM_KEYDOWN, M);
+        QPush(q, WM_KEYDOWN, M);
+        QPush(q, WM_LBUTTONDOWN, M);
+        Expect("queue: past the soft cap a press is dropped", N(q.size()), N(In::kQueueSoftCap));
+        QPush(q, WM_LBUTTONUP, M);
+        QPush(q, WM_RBUTTONUP, M);
+        QPush(q, WM_MBUTTONUP, M);
+        QPush(q, WM_XBUTTONUP, M);
+        QPush(q, WM_KEYUP, M);
+        QPush(q, WM_SYSKEYUP, M);
+        QPush(q, 0, M, true);         // the unfocus marker SetUIMode queues
+        QPush(q, WM_APP, M, true);    // the release the window's lost focus queues
+        Expect("queue: past it every release and both markers still go in", N(q.size()), N(In::kQueueSoftCap + 8));
+        QPush(q, WM_MOUSEMOVE, M);
+        QPush(q, WM_MOUSEWHEEL, M);
+        Expect("queue: past it a new move and the wheel are dropped", N(q.size()), N(In::kQueueSoftCap + 8));
+    }
+    {
+        std::vector<QMsg> q(In::kQueueHardCap, QMsg{ WM_KEYUP, M });
+        QPush(q, WM_LBUTTONUP, M);
+        QPush(q, 0, M, true);
+        Expect("queue: nothing goes in past the hard cap", N(q.size()), N(In::kQueueHardCap));
+    }
+}
+
 static void MouseTest()
 {
     std::printf("== mouse  (GetDoubleClickTime %u ms, SM_CXDOUBLECLK %d)\n", GetDoubleClickTime(), GetSystemMetrics(SM_CXDOUBLECLK));
@@ -1204,7 +1267,7 @@ static void WheelTest()
 
 static int ToolMain(int argc, char** argv)
 {
-    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|keys|dead|state|mouse|wheel ...]\n"); return 2; }
+    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|queue|keys|dead|state|mouse|wheel ...]\n"); return 2; }
     const std::string sdk = argv[1];
     std::vector<std::string> want;
     for (int i = 2; i < argc; ++i) want.push_back(argv[i]);
@@ -1229,6 +1292,7 @@ static int ToolMain(int argc, char** argv)
     if (on("leave")) { NewView(); LeaveTest(); }
     if (on("guard")) GuardTest();
     if (on("routes")) RoutesTest();
+    if (on("queue")) QueueTest();
     if (on("keys")) { NewView(); KeysTest(); }
     if (on("dead")) { NewView(); DeadTest(); }
     if (on("state")) { NewView(); StateTest(); }

@@ -41,7 +41,7 @@ tools/tooltip-test/         src/TooltipCore.h's coalescing, clipping and payload
 tools/memreport-test/       src/MemoryReportCore.h against captured GetMemoryUsage reports (build.bat builds and runs it)
 tools/bridge-test/          src/JsBridgeCore.h and the page's __mlNative on a CPU view (build.bat builds and runs it)
 tools/visibility-test/      View::set_visible on CPU and GPU views: hidden pages, the prepaint, the frame order SyncViewVisibility relies on (build.bat)
-tools/input-test/           src/InputCore.h's key events on the flat and VR paths, the polled-keys exemption, the releases, the leave and the pointer guard (build.bat; MinHook from the build dir)
+tools/input-test/           src/InputCore.h's key events on the flat and VR paths, the polled-keys exemption, the releases, the leave, the pointer guard and the input queue's rule (build.bat; MinHook from the build dir)
 tools/ime-test/             src/ImeCore.h's candidate-list parsing and '__ime' payload rules (ime_test), the Editor calls the native composition relies on (imeprobe); build.bat builds and runs both
 tools/ime-box-test/         the page core's IME candidate box in Ultralight's own WebKit: a reading the Editor composed, zoom, an iframe editor, device scale, the opt-outs (build.bat; needs node)
 tools/editor-test/          src/EditStateCore.h's text-focus rules on real EditableState reports, typed text as the host fires it, views/keyboard's layouts (build.bat)
@@ -415,16 +415,25 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     part of the frame (`PageWorkBegin`, `MaterializeImages`, Update, the second sync, the prepaint, Render,
     `CollectView`, `TickMemoryReport`) runs there (`PageThreadFrame`) and nowhere else. `MagelightGPU.dll` gets a
     deferred context of the game's device (contract 3) and only the page thread calls it; the game's immediate
-    context is used on the game thread alone, which at Present (`ThreadModeFrame`) runs every finished page frame's
-    command lists in order (none is ever dropped: each carries uploads later frames build on) with
-    `PageThread::RunRecordedList`, whose `ExecuteCommandList(list, TRUE)` saves and restores the game's whole state
-    (FALSE clears it, and the game's renderer rebinds only what it thinks changed: `deferred-test`'s state case), and
-    flushes the immediate context after each part the driver split off at a flush (`MgGpu_TakeCommandList`, where
-    the in-frame driver flushes); a page frame that rendered nothing hands over no list. It then draws the newest
-    frame's views that are still wanted, then lets the next page frame start (`PageThread::Handoff`). The game
-    thread never waits on the page thread: no join, no wait on its frames, and no lock held across page script (the
-    host runs none under `s_viewsMutex`, invariant 16), so a page stuck in a script freezes only itself (the stall
-    watchdog names it). The locks the page work holds across Ultralight or driver calls (`s_viewsMutex`,
+    context is used on the game thread alone. At Present (`ThreadModeFrame`) it takes every page frame finished
+    since the last Present and at once lets the next one start (`PageThread::Handoff`), so that frame records while
+    the game thread runs the taken frames' command lists in order (none is ever dropped: each carries uploads later
+    frames build on) with `PageThread::RunRecordedList`, whose `ExecuteCommandList(list, TRUE)` saves and restores
+    the game's whole state (FALSE clears it, and the game's renderer rebinds only what it thinks changed:
+    `deferred-test`'s state case), and flushes the immediate context after each part the driver split off at a flush
+    (`MgGpu_TakeCommandList`, where the in-frame driver flushes); a page frame that rendered nothing hands over no
+    list. It then draws the newest frame's views that are still wanted. The game thread never waits for a page
+    frame: no join, no wait on its frames, and no lock held across page script (the host runs none under
+    `s_viewsMutex`, invariant 16). Its per-frame reads of the registry (the views still wanted, `PickCursorAt`) take
+    `s_viewsMutex` with `try_to_lock` and keep the last frame's reading while the page side holds it; a blocking lock
+    off the page thread (a hook, a task, the window procedure, an API call) can wait for the page side's Ultralight
+    or driver work under that lock (a page's load, a resize), never for page script. A page stuck in a script
+    freezes every page, as they share the one page thread, but never the game (the stall watchdog names it); a view
+    shown after that is not drawn, as the game thread draws only the views of the last frame the page thread
+    finished. Input waits for the page thread in `QueueInput`'s queue, drained once a page frame: a move replaces a
+    move of the same pointer source at its tail, and past the soft cap only releases and the focus markers still go
+    in (`Input::QueueRule`, `tools/input-test`), so a long page frame never drops the exit's unfocus or a release.
+    The locks the page work holds across Ultralight or driver calls (`s_viewsMutex`,
     `s_imagesMutex`) are `PageThread::OwnedMutex`es: built /EHsc, a fault the page thread's SEH guard catches runs
     no destructor, so the guard gives back what its thread still holds (`ReleasePageLocksAfterFault`) or the game's
     next lock hangs; a new lock held across such calls on the page side must be one too. A packet's

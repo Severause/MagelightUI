@@ -1118,6 +1118,7 @@ namespace Magelight::Api4 {
         if (n == "auxbuttons") return 1;    // mouse back/forward as buttons 3/4 and auxclick, no click or dblclick; no middle-click autoscroll (1.5.0)
         if (n == "imecandidates") return Magelight::VR::IsLive() ? 0 : 1;   // the page core draws the IME's candidate list (1.5.0); flat only
         if (n == "gamepad") return Magelight::GamepadAvailable() ? 1 : 0;   // SetViewGamepad / manifest "gamepad" / magelight.gamepad (1.6.0); flat only
+        if (n == "pagethread") return Magelight::PageThreadActive() ? 1 : 0;   // render-thread callbacks run on the page thread (1.7.0); flat only
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1252,7 +1253,7 @@ namespace Magelight::Api4 {
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
-                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad" };
+                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {

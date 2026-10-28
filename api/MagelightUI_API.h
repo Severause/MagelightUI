@@ -24,10 +24,11 @@
 //    The render thread is the game's main thread inside Present, or, when the
 //    player turned on Magelight.json "pageThread" (host 1.7.0+, flat only),
 //    Magelight's own page thread, running at the same time as the game
-//    thread: never assume either. Never touch RE:: state or the game's D3D11
-//    immediate context from a render-thread callback (render texture images
-//    on the game thread, then InvalidateImage), and guard any state such a
-//    callback shares with your game-thread code.
+//    thread (QueryCapability("pageThread") == 1): never assume either, the
+//    player can change it between sessions. Never touch RE:: state or the
+//    game's D3D11 immediate context from a render-thread callback (render
+//    texture images on the game thread, then InvalidateImage), and guard any
+//    state such a callback shares with your game-thread code.
 //  - Never call SKSE's AddTask or AddUITask from a callback the host makes
 //    inside a frame: JS listeners, DOM ready, VR callbacks, and for a
 //    RenderThread mod its events and EvalJS results (and onLog for a call made
@@ -62,8 +63,10 @@
 //    thread, FocusDenied from the requesting mod's thread, RenderDead from
 //    whichever present thread saw the kill switch. With "pageThread" the
 //    page thread is the render thread, so the handler can be entered from two
-//    threads at once. Pick RenderThread only if your handler is thread-agnostic
-//    and reentrant. A faulting handler disables that mod's
+//    threads at once, and a page event can still enter it after UnregisterMod
+//    has returned on another thread: keep `user` and the handler alive for
+//    the rest of the process. Pick RenderThread only if your handler is
+//    thread-agnostic and reentrant. A faulting handler disables that mod's
 //    sink, never the overlay.
 //  - ModDesc.onLog fires synchronously on the thread of the failing API
 //    call, outside the host's locks (calling back into the API is allowed).
@@ -589,13 +592,22 @@ namespace MAGELIGHT_API {
                                                             // "pageVisibility" "keyboardCode"
                                                             // "auxButtons" "imeCandidates" (1.5.0;
                                                             // "ime" is 0 in VR from 1.5.0), "gamepad"
-                                                            // (1.6.0; 0 in VR). The
+                                                            // (1.6.0; 0 in VR), "pageThread" (1.7.0: 1 when
+                                                            // render-thread callbacks run, or once the world is
+                                                            // up will run, on Magelight's page thread; it can
+                                                            // turn 0 for the session when the world comes up,
+                                                            // never back; see the threading contract; 0 in VR). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
                                                             // side is a plain key lookup).
         const char* (*GetLastErrorMessage)(ModId mod);      // per-mod storage, valid until the mod's next failing
-                                                            // call or UnregisterMod — copy it; "" if none
+                                                            // call or UnregisterMod — copy it; "" if none. Read it
+                                                            // on the thread that made the failing call, right
+                                                            // after it: with "pageThread" a failing call made from
+                                                            // a render-thread callback can replace it meanwhile
+                                                            // (ModDesc.onLog hands each message over on the
+                                                            // failing call's own thread)
         Result (*BindHotkey)(ViewId view, std::uint32_t dxScancode, std::uint32_t action);  // kHotkeyAction*; Busy names
                                                             // the mod holding the key, Denied = the host's toggle key.
                                                             // Fires on key-down outside engine menus/console/text entry;
