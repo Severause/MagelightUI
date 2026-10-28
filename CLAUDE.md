@@ -446,7 +446,8 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     turn it Off with a log line, and the next frame starts Ultralight on the fiber. The page thread holds a
     `GameTask::Scope` for its whole life, so its posts go through the pump as posts made inside Present do. With
     the setting off the frame is unchanged. Today's single thread no longer serializes the page parts against the
-    input sink, the window procedure, game tasks, Papyrus natives and API calls on the game thread: state they share
-    is atomic or under its mutex, and new shared state must be too. `tools/deferred-test`, `tools/pagethread-test`
+    input sinks (`InputSink`, and `GamepadSink` on whichever thread the engine's input job runs), the window
+    procedure, game tasks, Papyrus natives and API calls: state they share is atomic or under its mutex, and new
+    shared state must be too. `tools/deferred-test`, `tools/pagethread-test`
     and `fiber-gc-test --thread` are its gates; re-run them, and the page-facing tools with `MG_PAGE_THREAD=1`, at
     every SDK bump.
