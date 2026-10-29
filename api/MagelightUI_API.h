@@ -346,7 +346,12 @@ namespace MAGELIGHT_API {
         float heightOffset;              // metres above/below eye height
         float curvature;                 // reserved (IVROverlay_016 has no curvature)
         float autoCloseMeters;           // reserved
+        std::uint32_t flags;             // kVRPlacement* (1.6.1); an older host accepts the larger struct and ignores it
     };
+    // Place the view where the player is LOOKING, pitch included, tilted to face them (pitch held within 60 degrees
+    // of level), instead of level at eye height. Applies when the view is placed (each show, a recentre); best with
+    // WorldLocked, since a LazyFollow glide places it level again. QueryCapability("vrGaze").
+    inline constexpr std::uint32_t kVRPlacementAtGaze = 1;
 
     // Bind a view to a CONTROLLER button (VR only). Polled from the runtime
     // every frame whether or not UI mode is on — that is how a view opens with
@@ -579,7 +584,7 @@ namespace MAGELIGHT_API {
                                                             // "pageVisibility" "keyboardCode"
                                                             // "auxButtons" "imeCandidates" (1.5.0;
                                                             // "ime" is 0 in VR from 1.5.0), "gamepad"
-                                                            // (1.6.0; 0 in VR). The
+                                                            // (1.6.0; 0 in VR), "vrGaze" (1.6.1). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page

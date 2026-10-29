@@ -46,6 +46,8 @@ namespace Magelight::VR {
         float heightOffset = -0.15f;
         float curvature = 0.0f;         // unused on IVROverlay_016; kept for the API shape
         float autoCloseMeters = 3.0f;   // WorldLocked only; 0 = never
+        bool  atGaze = false;           // first placement along the gaze, pitch included (1.6.1); a LazyFollow glide
+                                        // levels it again
     };
 
     // Magelight.json "vr" object. Read at settings load (before Init).

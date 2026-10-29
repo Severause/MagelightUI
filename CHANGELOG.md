@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.6.1 | 10601 | `VRPlacementDesc::flags` with `kVRPlacementAtGaze` and manifest `vr.atGaze`: a view placed where the player is looking, pitch included; `QueryCapability("vrGaze")` |
 | 1.6.0 | 10600 | The gamepad layer: `SetViewGamepad` / `GetViewGamepadState`, manifest `"gamepad"`, page `window.magelight.gamepad`; a `keys` style (A Enter, B Escape, d-pad and stick the arrows) and a `navigation` style (actions, focus scopes, prompts, an optional stick cursor); flat only; `QueryCapability("gamepad")`, `capabilities.gamepad` |
 | 1.5.0 | 10500 | Key events as in a browser: `KeyboardEvent.code`, a `key` from the player's layout and `location`, on flat and in VR; Alt, F10 and Alt+key reach the page; `QueryCapability("keyboardcode")`, `capabilities.keyboardCode` |
 | 1.5.0 | 10500 | Mouse buttons 4 and 5 as back / forward with `auxclick` (never `click` or `dblclick`); no middle-click autoscroll; `QueryCapability("auxbuttons")`, `capabilities.auxButtons` |
@@ -58,6 +59,21 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.6.1 - Unreleased
+
+### What players notice
+
+- **In VR, the grip grabs a page.** Point at a page and squeeze the grip: the page hangs on your laser and goes where
+  you point until you let go, then stays there while it is open, even with `panelFollow` on. A grip that points at
+  no page still brings every page back in front of you.
+
+### For mod authors: new API and capabilities
+
+- **`VRPlacementDesc::flags`**, appended to the struct (an older host accepts the larger struct and ignores the field).
+  `kVRPlacementAtGaze` places a view where the player is looking, pitch included and held within 60 degrees of level,
+  tilted to face them, instead of level at eye height; manifest `"vr": { "atGaze": true }` does the same. It
+  applies at each placement (show, recentre), so pair it with WorldLocked. `QueryCapability("vrGaze")`.
 
 ## 1.6.0 - Unreleased
 

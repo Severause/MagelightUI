@@ -1116,6 +1116,7 @@ namespace Magelight::Api4 {
         if (n == "auxbuttons") return 1;    // mouse back/forward as buttons 3/4 and auxclick, no click or dblclick; no middle-click autoscroll (1.5.0)
         if (n == "imecandidates") return Magelight::VR::IsLive() ? 0 : 1;   // the page core draws the IME's candidate list (1.5.0); flat only
         if (n == "gamepad") return Magelight::GamepadAvailable() ? 1 : 0;   // SetViewGamepad / manifest "gamepad" / magelight.gamepad (1.6.0); flat only
+        if (n == "vrgaze") return 1;        // VRPlacementDesc::flags kVRPlacementAtGaze / manifest vr.atGaze (1.6.1)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1241,7 +1242,7 @@ namespace Magelight::Api4 {
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
-                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad" };
+                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "vrGaze" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1260,19 +1261,24 @@ namespace Magelight::Api4 {
             Magelight::VR::ClearPlacement(view);
             return Result::Ok;
         }
-        if (desc->size < sizeof(MAGELIGHT_API::VRPlacementDesc)) return Result::InvalidArgument;
+        // A pre-1.6.1 header's struct ends before flags and is still whole.
+        if (desc->size < offsetof(MAGELIGHT_API::VRPlacementDesc, flags)) return Result::InvalidArgument;
         Magelight::VR::Placement p;
+        p.distanceMeters = 0.0f;   // 0 = keep the layer's value when the override is merged (Lifecycle)
+        p.widthMeters = 0.0f;
         p.mode = static_cast<Magelight::VR::Mode>(desc->mode);
         if (desc->distanceMeters > 0.0f) p.distanceMeters = std::clamp(desc->distanceMeters, 0.2f, 20.0f);
         if (desc->widthMeters > 0.0f)    p.widthMeters    = std::clamp(desc->widthMeters, 0.05f, 20.0f);
         p.heightOffset = std::clamp(desc->heightOffset, -5.0f, 5.0f);
+        if (desc->size >= offsetof(MAGELIGHT_API::VRPlacementDesc, flags) + sizeof(desc->flags))
+            p.atGaze = (desc->flags & MAGELIGHT_API::kVRPlacementAtGaze) != 0;
         Magelight::VR::SetPlacement(view, p);
         return Result::Ok;
     }
 
     Result GetViewVRPlacement(ViewId view, MAGELIGHT_API::VRPlacementDesc* out)
     {
-        if (!out || out->size < sizeof(MAGELIGHT_API::VRPlacementDesc)) return Result::InvalidArgument;
+        if (!out || out->size < offsetof(MAGELIGHT_API::VRPlacementDesc, flags)) return Result::InvalidArgument;
         if (!Magelight::IsViewValid(view)) return Result::InvalidView;
         Magelight::VR::Placement p;
         if (!Magelight::VR::GetPlacement(view, p)) return Result::NotReady;   // no overlay yet
@@ -1282,6 +1288,8 @@ namespace Magelight::Api4 {
         out->heightOffset = p.heightOffset;
         out->curvature = p.curvature;
         out->autoCloseMeters = p.autoCloseMeters;
+        if (out->size >= offsetof(MAGELIGHT_API::VRPlacementDesc, flags) + sizeof(out->flags))
+            out->flags = p.atGaze ? MAGELIGHT_API::kVRPlacementAtGaze : 0;
         return Result::Ok;
     }
 

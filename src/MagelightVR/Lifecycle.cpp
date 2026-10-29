@@ -211,6 +211,7 @@ namespace Magelight::VR {
                     if (p.distanceMeters > 0.0f) r.placement.distanceMeters = p.distanceMeters;
                     if (p.widthMeters > 0.0f)    r.placement.widthMeters    = p.widthMeters;
                     r.placement.heightOffset = p.heightOffset;
+                    r.placement.atGaze = p.atGaze;
                     r.placed = false; r.following = false;   // re-place with the new values
                     s_placementOverrides.erase(ov);
                     if (r.handle != vr::k_ulOverlayHandleInvalid)

@@ -372,13 +372,14 @@ namespace Magelight::Manifest {
                         pd.size = sizeof(pd);
                         // Same non-throwing reads as the top level (review 2026-09-09:
                         // a mistyped value here still aborted the WHOLE manifest).
-                        WarnUnknownKeys(*vr, { "mode", "distance", "width", "heightOffset" }, vctx + "vr: ");
+                        WarnUnknownKeys(*vr, { "mode", "distance", "width", "heightOffset", "atGaze" }, vctx + "vr: ");
                         const std::string m = Lower(MJStr(*vr, "mode", "lazy", vctx + "vr: "));
                         pd.mode = (m == "head" || m == "headlocked") ? 0
                                 : (m == "world" || m == "worldlocked") ? 1 : 3;
                         pd.distanceMeters = MJFloat(*vr, "distance", 0.0f, vctx);
                         pd.widthMeters    = MJFloat(*vr, "width", 0.0f, vctx);
                         pd.heightOffset   = MJFloat(*vr, "heightOffset", -0.15f, vctx);
+                        if (MJBool(*vr, "atGaze", false, vctx + "vr: ")) pd.flags |= MAGELIGHT_API::kVRPlacementAtGaze;
                         Api4::SetViewVRPlacement(id, &pd);
                     }
                     // VR controller binding (0.18.0): the keyboard-free way in.

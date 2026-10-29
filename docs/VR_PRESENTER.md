@@ -143,11 +143,18 @@ legibility is measured in-headset.
 
 ```
 struct VRPlacementDesc { uint32_t size; uint8_t mode; float distanceMeters,
-                         widthMeters, heightOffset, curvature; float autoCloseMeters; };
+                         widthMeters, heightOffset, curvature; float autoCloseMeters;
+                         uint32_t flags; };   // flags: 1.6.1, kVRPlacementAtGaze
 Result (*SetViewVRPlacement)(ViewId view, const VRPlacementDesc* desc);   // nullptr = host defaults
 Result (*GetViewVRPlacement)(ViewId view, VRPlacementDesc* out);
 Result (*RecenterVRView)(ViewId view);                                    // re-place in front of the HMD now
 ```
+
+`kVRPlacementAtGaze` (1.6.1, `QueryCapability("vrGaze")`) places the view along the
+gaze, pitch included (held within 60 degrees of level), tilted to face the player,
+instead of level at eye height: a menu opened while looking down at something opens
+down there. It applies whenever the view is placed (each show, a recentre); a
+LazyFollow glide places it level again, so pair it with WorldLocked.
 
 `QueryCapability("vr")` returns 1 only while the VR presenter is live (runtime
 found, interfaces bound, first overlay created). Manifest mods get the same
@@ -188,7 +195,7 @@ UI mode is on:
 | trigger down / up | `WM_LBUTTONDOWN` / `WM_LBUTTONUP` | at the current hit; a down with no hit is ignored. While a trigger is held, that hand's moves and release go to the view it was pressed on (1.5.0); the other hand's go where it points. A controller that loses its tracking (no usable pose, a rotation-only fallback included) or disconnects with the trigger held releases at its last hit, so the press never outlives it |
 | stick Y (`thumbstick` events, `kThumbstick` input type) | `WM_MOUSEWHEEL` ±`WHEEL_DELTA` per ~0.35 deflection with repeat | scrolls the element under the ray (1.5.0: the hit pixel is the wheel's position) |
 | B/Y (`kBY`) on either hand | leaves UI mode | the VR way out; a page that has taken Escape does not stop it; skipped when B/Y is bound for the UI-mode view |
-| grip | `RecenterVRView` on the UI-mode view | cheap "bring it to me" |
+| grip | on a panel: grab it (1.6.1), held on the ray at the grab distance until the grip lets go, then pinned there for this opening; anywhere else, while no panel is held: every non-HUD panel re-placed in front of you | grabbing needs the polled controller level |
 
 `hitTest` in `DrainInputQueue` works in swapchain pixels; the VR path
 converts the overlay uv to the VIEW's swapchain rect (`EffectivePos` + `w/h`)
