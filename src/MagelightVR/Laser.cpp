@@ -133,15 +133,18 @@ namespace Magelight::VR {
         int    s_dragHand = -1;
         float  s_dragDist = 1.1f;
         float  s_dragOff[2] = { 0.0f, 0.0f };            // grabbed point from the panel's centre, panel metres (x right, y up)
+        float  s_dragYawDeg = 0.0f;                      // the holding hand's stick turn, + = the face turns to the right
+        constexpr float kDragMinDistM = 0.35f, kDragMaxDistM = 6.0f;   // how near and far a held page goes
 
         // Takes hold of view at the hit (u, v), dist metres along the ray.
         void BeginDrag(ViewId view, int hand, float dist, float u, float v, const OverlayRec& r)
         {
             s_dragView = view;
             s_dragHand = hand;
-            s_dragDist = std::clamp(dist, 0.35f, 6.0f);
+            s_dragDist = std::clamp(dist, kDragMinDistM, kDragMaxDistM);
             const float w = ClampWidthM(r.placement.widthMeters);
             const float h = r.texW > 0 ? w * static_cast<float>(r.texH) / static_cast<float>(r.texW) : 0.0f;
+            s_dragYawDeg = 0.0f;
             s_dragOff[0] = (u - 0.5f) * w;
             s_dragOff[1] = (0.5f - v) * h;
         }
@@ -168,6 +171,18 @@ namespace Magelight::VR {
         constexpr float kStickDeadzone = 0.30f;
         constexpr float kScrollNotchesPerSec = 6.0f;     // at full deflection
         constexpr std::uint64_t kStickStaleMs = 250;     // no stick event this long = centred
+        // The stick of the hand holding a page: X turns it, Y pushes it away (up) or pulls it in (down).
+        constexpr float kDragTurnDegPerSec = 60.0f;      // at full deflection
+        constexpr float kDragMaxYawDeg     = 60.0f;      // either way from facing the head
+        constexpr float kDragPushMPerSec   = 0.8f;       // at full deflection
+
+        // Deadzone, then rescaled so the first step past it starts at 0.
+        float StickAxis(float v)
+        {
+            v = std::clamp(v, -1.0f, 1.0f);
+            if (std::fabs(v) < kStickDeadzone) return 0.0f;
+            return (v > 0 ? 1.0f : -1.0f) * (std::fabs(v) - kStickDeadzone) / (1.0f - kStickDeadzone);
+        }
     }
 
     HoverState s_hover[2];
@@ -456,13 +471,14 @@ namespace Magelight::VR {
             // (it gives one click per frame), so the laser does not depend
             // on it — the sink only swallows those events.
             vr::VRControllerState_t st{};
-            bool polled = false, trig = false, gripNow = false; float stickY = 0.0f;
+            bool polled = false, trig = false, gripNow = false; float stickX = 0.0f, stickY = 0.0f;
             if (s_system->GetControllerState(idx, &st, sizeof(st))) {
                 polled = true;
                 trig = (st.rAxis[1].x > 0.5f) ||
                        ((st.ulButtonPressed & vr::ButtonMaskFromId(vr::k_EButton_SteamVR_Trigger)) != 0);
                 gripNow = ((st.ulButtonPressed & vr::ButtonMaskFromId(vr::k_EButton_Grip)) != 0) ||
                           (st.rAxis[2].x > 0.5f);
+                stickX = st.rAxis[0].x;
                 stickY = st.rAxis[0].y;
             } else {
                 static int s_pollWarned = 0;
@@ -550,15 +566,28 @@ namespace Magelight::VR {
                     s_dragView = 0; s_dragHand = -1;
                 } else {
                     OverlayRec& dr = dit->second;
+                    if (polled) {
+                        const float dt = std::clamp(s_frameDt, 0.0f, 0.1f);
+                        s_dragYawDeg = std::clamp(s_dragYawDeg + StickAxis(stickX) * kDragTurnDegPerSec * dt,
+                                                  -kDragMaxYawDeg, kDragMaxYawDeg);
+                        s_dragDist = std::clamp(s_dragDist + StickAxis(stickY) * kDragPushMPerSec * dt,
+                                                kDragMinDistM, kDragMaxDistM);
+                    }
                     // Hang the grabbed point on the ray at the grab distance,
-                    // then face the panel back at the head so it stays readable.
+                    // then face the panel back at the head, turned by the stick.
                     const float ox = ctrl.m[0][3], oy = ctrl.m[1][3], oz = ctrl.m[2][3];
                     const float dx = -ctrl.m[0][2], dy = -ctrl.m[1][2], dz = -ctrl.m[2][2];
                     const float gx = ox + dx * s_dragDist, gy = oy + dy * s_dragDist, gz = oz + dz * s_dragDist;
                     float fx = gx - hmd.mDeviceToAbsoluteTracking.m[0][3];
                     float fz = gz - hmd.mDeviceToAbsoluteTracking.m[2][3];
                     const float fn = std::sqrt(fx * fx + fz * fz);
-                    if (fn > 1e-3f) { dr.fwd[0] = fx / fn; dr.fwd[1] = fz / fn; }
+                    if (fn > 1e-3f) {
+                        // Turning the face (-fwd) right turns fwd the same way about +Y.
+                        const float a = s_dragYawDeg * 0.01745329252f, c = std::cos(a), sn = std::sin(a);
+                        const float hx = fx / fn, hz = fz / fn;
+                        dr.fwd[0] = hx * c + hz * sn;
+                        dr.fwd[1] = -hx * sn + hz * c;
+                    }
                     // The level panel's right is (-fwd.z, 0, fwd.x) and its up is world up (LevelMatrix).
                     dr.pos[0] = gx + dr.fwd[1] * s_dragOff[0];
                     dr.pos[1] = gy - s_dragOff[1];
@@ -600,10 +629,12 @@ namespace Magelight::VR {
             s_lastTriggerDown[hand] = nowDown;
 
             // Thumbstick Y -> wheel notches at the hit pixel (only while
-            // pointing at a panel). Deadzone, rate-limited via an
+            // pointing at a panel, and not while this hand holds one: the
+            // stick turns and pushes it then). Deadzone, rate-limited via an
             // accumulator, and a staleness guard so a stick that stopped
             // reporting never scrolls forever.
-            {
+            if (s_dragView && s_dragHand == hand) s_scrollAccum[hand] = 0.0f;
+            else {
                 float y;
                 if (polled) y = std::clamp(stickY, -1.0f, 1.0f);
                 else {

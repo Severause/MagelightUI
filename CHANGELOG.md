@@ -65,8 +65,9 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 ### What players notice
 
 - **In VR, the grip grabs a page.** Point at a page and squeeze the grip: the page hangs on your laser and goes where
-  you point until you let go, then stays there while it is open, even with `panelFollow` on. A grip that points at
-  no page still brings every page back in front of you.
+  you point until you let go, then stays there while it is open, even with `panelFollow` on. While you hold it, the
+  same hand's stick turns it left or right (up to 60 degrees either way) and pushes it away (up) or pulls it closer
+  (down), and does not scroll the page. A grip that points at no page still brings every page back in front of you.
 
 ### For mod authors: new API and capabilities
 

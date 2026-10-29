@@ -196,6 +196,7 @@ UI mode is on:
 | stick Y (`thumbstick` events, `kThumbstick` input type) | `WM_MOUSEWHEEL` ±`WHEEL_DELTA` per ~0.35 deflection with repeat | scrolls the element under the ray (1.5.0: the hit pixel is the wheel's position) |
 | B/Y (`kBY`) on either hand | leaves UI mode | the VR way out; a page that has taken Escape does not stop it; skipped when B/Y is bound for the UI-mode view |
 | grip | on a panel: grab it (1.6.1), held on the ray at the grab distance until the grip lets go, then pinned there for this opening; anywhere else, while no panel is held: every non-HUD panel re-placed in front of you | grabbing needs the polled controller level |
+| stick, while that hand holds a panel (1.6.1) | X turns it about the vertical (60°/s, at most 60° either way from facing the head); Y pushes it away (up) or pulls it in (down), 0.8 m/s, 0.35-6 m | the stick does not scroll the page meanwhile; polled level only |
 
 `hitTest` in `DrainInputQueue` works in swapchain pixels; the VR path
 converts the overlay uv to the VIEW's swapchain rect (`EffectivePos` + `w/h`)
