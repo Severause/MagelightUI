@@ -111,6 +111,7 @@ namespace Magelight::VR {
         bool s_lastTriggerDown[2] = { false, false };
         bool s_gripWas[2] = { false, false };            // polled grip level, rising-edge latch
         bool s_gripDrag[2] = { false, false };           // this hand's grip holds the drag (released with the grip)
+        bool s_stickOnPage[2] = { false, false };        // this hand's stick moved a held page: no scroll until centred
         bool s_gripSeeded[2] = { false, false };         // latch seeded from the live level on UI-mode entry
         int  s_lastPx[2] = { 0, 0 }, s_lastPy[2] = { 0, 0 };   // last hit pixel per hand (the UP lands here)
 
@@ -135,9 +136,12 @@ namespace Magelight::VR {
         float  s_dragOff[2] = { 0.0f, 0.0f };            // grabbed point from the panel's centre, panel metres (x right, y up)
         float  s_dragYawDeg = 0.0f;                      // the holding hand's stick turn, + = the face turns to the right
         constexpr float kDragMinDistM = 0.35f, kDragMaxDistM = 6.0f;   // how near and far a held page goes
+        constexpr float kDragMaxYawDeg = 60.0f;                        // either way from facing the head
 
-        // Takes hold of view at the hit (u, v), dist metres along the ray.
-        void BeginDrag(ViewId view, int hand, float dist, float u, float v, const OverlayRec& r)
+        // Takes hold of view at the hit (u, v), dist metres along ctrl's ray. The page keeps the heading it has: the
+        // yaw starts at its angle from the head->grabbed point direction, which the drag rebuilds fwd from.
+        void BeginDrag(ViewId view, int hand, float dist, float u, float v, const OverlayRec& r,
+                       const vr::HmdMatrix34_t& ctrl, const vr::HmdMatrix34_t& head)
         {
             s_dragView = view;
             s_dragHand = hand;
@@ -145,6 +149,15 @@ namespace Magelight::VR {
             const float w = ClampWidthM(r.placement.widthMeters);
             const float h = r.texW > 0 ? w * static_cast<float>(r.texH) / static_cast<float>(r.texW) : 0.0f;
             s_dragYawDeg = 0.0f;
+            const float gx = ctrl.m[0][3] - ctrl.m[0][2] * dist, gz = ctrl.m[2][3] - ctrl.m[2][2] * dist;
+            float hx = gx - head.m[0][3], hz = gz - head.m[2][3];
+            const float hn = std::sqrt(hx * hx + hz * hz);
+            if (hn > 1e-3f) {
+                hx /= hn; hz /= hn;
+                // Inverts the drag's fwd = (hx c + hz s, -hx s + hz c).
+                const float deg = std::atan2(hz * r.fwd[0] - hx * r.fwd[1], hx * r.fwd[0] + hz * r.fwd[1]) * 57.2957795f;
+                s_dragYawDeg = std::clamp(deg, -kDragMaxYawDeg, kDragMaxYawDeg);
+            }
             s_dragOff[0] = (u - 0.5f) * w;
             s_dragOff[1] = (0.5f - v) * h;
         }
@@ -173,7 +186,6 @@ namespace Magelight::VR {
         constexpr std::uint64_t kStickStaleMs = 250;     // no stick event this long = centred
         // The stick of the hand holding a page: X turns it, Y pushes it away (up) or pulls it in (down).
         constexpr float kDragTurnDegPerSec = 60.0f;      // at full deflection
-        constexpr float kDragMaxYawDeg     = 60.0f;      // either way from facing the head
         constexpr float kDragPushMPerSec   = 0.8f;       // at full deflection
 
         // Deadzone, then rescaled so the first step past it starts at 0.
@@ -416,7 +428,7 @@ namespace Magelight::VR {
     {
         for (int h = 0; h < 2; ++h) {
             HideBeam(h); s_hover[h] = HoverState{}; s_lastTriggerDown[h] = false; s_scrollAccum[h] = 0.0f;
-            s_gripWas[h] = false; s_gripSeeded[h] = false; s_gripDrag[h] = false;
+            s_gripWas[h] = false; s_gripSeeded[h] = false; s_gripDrag[h] = false; s_stickOnPage[h] = false;
             s_dragRequest.store(0); s_dragView = 0; s_dragHand = -1;
             s_hands[h].stickY_mil.store(0); s_hands[h].gripEdge.store(false);
         }
@@ -537,7 +549,7 @@ namespace Magelight::VR {
             if (gripEdge) {
                 const auto hitIt = (hit && target) ? s_overlays.find(target->id) : s_overlays.end();
                 if (polled && !s_dragView && hitIt != s_overlays.end() && hitIt->second.placement.mode != Mode::HeadLocked) {
-                    BeginDrag(target->id, hand, bestDist, bestU, bestV, hitIt->second);
+                    BeginDrag(target->id, hand, bestDist, bestU, bestV, hitIt->second, ctrl, hmd.mDeviceToAbsoluteTracking);
                     s_gripDrag[hand] = true;
                     SKSE::log::info("Magelight VR: view {} grabbed by grip (hand {}) at {:.2f}m", target->id, hand, s_dragDist);
                 } else if (!s_dragView) {   // a panel in hand stays where the other hand holds it
@@ -554,7 +566,7 @@ namespace Magelight::VR {
             if (const ViewId req = static_cast<ViewId>(s_dragRequest.load())) {
                 const auto reqIt = (!s_dragView && hit && target && target->id == req) ? s_overlays.find(req) : s_overlays.end();
                 if (reqIt != s_overlays.end()) {
-                    BeginDrag(req, hand, bestDist, bestU, bestV, reqIt->second);
+                    BeginDrag(req, hand, bestDist, bestU, bestV, reqIt->second, ctrl, hmd.mDeviceToAbsoluteTracking);
                     s_gripDrag[hand] = false;
                     s_dragRequest.store(0);
                     SKSE::log::info("Magelight VR: view {} grabbed by hand {} at {:.2f}m", req, hand, s_dragDist);
@@ -633,8 +645,12 @@ namespace Magelight::VR {
             // stick turns and pushes it then). Deadzone, rate-limited via an
             // accumulator, and a staleness guard so a stick that stopped
             // reporting never scrolls forever.
-            if (s_dragView && s_dragHand == hand) s_scrollAccum[hand] = 0.0f;
-            else {
+            if (s_dragView && s_dragHand == hand) s_stickOnPage[hand] = true;
+            if (s_stickOnPage[hand]) {
+                s_scrollAccum[hand] = 0.0f;
+                if (!(s_dragView && s_dragHand == hand) && StickAxis(polled ? stickY : hi.stickY_mil.load() / 1000.0f) == 0.0f)
+                    s_stickOnPage[hand] = false;
+            } else {
                 float y;
                 if (polled) y = std::clamp(stickY, -1.0f, 1.0f);
                 else {
@@ -642,8 +658,8 @@ namespace Magelight::VR {
                     if (GetTickCount64() - hi.stickTick.load() > kStickStaleMs) mil = 0;
                     y = mil / 1000.0f;
                 }
-                if (std::fabs(y) < kStickDeadzone) { y = 0.0f; s_scrollAccum[hand] = 0.0f; }
-                else y = (y > 0 ? 1.0f : -1.0f) * (std::fabs(y) - kStickDeadzone) / (1.0f - kStickDeadzone);
+                y = StickAxis(y);
+                if (y == 0.0f) s_scrollAccum[hand] = 0.0f;
                 if (y != 0.0f && hit && target) {
                     s_scrollAccum[hand] += y * kScrollNotchesPerSec * std::clamp(s_frameDt, 0.0f, 0.1f);
                     const int px = static_cast<int>(std::lround(target->x + bestU * target->w));

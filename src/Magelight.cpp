@@ -2881,12 +2881,31 @@ namespace Magelight {
     // Frames left in which FrameWork hides the cursor sprite again after the Cursor Menu reopened (MenuSink).
     static std::atomic<int> s_cursorRehideFrames{ 0 };
 
-    // Flat: the Cursor Menu's own AdvanceMovie hides its movie while a page holds UI mode and shows it again after,
+    // The Cursor Menu's own AdvanceMovie hides its movie while a page holds UI mode and shows it again after,
     // as PrismaUI does, so the movie's state is only changed where the game updates it, never from a task (a mod reads
     // it from its input hook, and two threads in the movie at once crash). The hide is set after the advance: the game
     // shows the movie again earlier in the frame, and nothing between the advance and the menu's PostDisplay does.
     // PrismaUI's own hook on this slot sets visibility before its call through, so ours is last in either order.
-    // s_hiddenCursorMovie is the movie it last hid; a new movie at the same address is shown anyway.
+    // s_hiddenCursorMovie is the movie it last hid; a new movie at the same address is shown anyway. On VR the root is
+    // made transparent too, once per movie (the engine never resets the root), as SeverActions 4.5 does for its own
+    // pages, the one hide of the VR quill known to work; whether hiding the movie alone would do there is untested.
+    // s_cursorRootStale: the Cursor Menu reopened, so the movie the hook sees may be a new one at the old address.
+    static std::atomic<bool> s_cursorRootStale{ false };
+    // VR: the root shows again (another writer: SeverActions before 1.6.1 restores it when its own page closes, even
+    // with another mod's page up). Read every 15th advance, on the advance's own thread.
+    static bool CursorRootShown(RE::GFxMovieView* movie)
+    {
+        static std::uint32_t s_n = 0;
+        if (!REL::Module::IsVR() || ++s_n % 15) return false;
+        RE::GFxValue visible;
+        return movie->GetVariable(&visible, "_root._visible") && visible.IsBool() && visible.GetBool();
+    }
+    static void SetCursorRootHidden(RE::GFxMovieView* movie, bool hide)
+    {
+        if (!REL::Module::IsVR()) return;
+        movie->SetVariableDouble("_root._alpha", hide ? 0.0 : 100.0);
+        movie->SetVariable("_root._visible", RE::GFxValue(!hide));
+    }
     using CursorAdvanceMovieFn = void (*)(RE::IMenu*, float, std::uint32_t);
     static CursorAdvanceMovieFn s_origCursorAdvanceMovie = nullptr;
     static bool CursorHiddenInAdvance() { return s_origCursorAdvanceMovie != nullptr; }
@@ -2897,9 +2916,12 @@ namespace Magelight {
         if (!movie) return;
         if (s_focused.load()) {
             if (movie->GetVisible()) movie->SetVisible(false);
-            s_hiddenCursorMovie.store(movie);
+            const bool stale = s_cursorRootStale.exchange(false);
+            if (s_hiddenCursorMovie.exchange(movie) != movie || stale || CursorRootShown(movie))
+                SetCursorRootHidden(movie, true);
         } else if (s_hiddenCursorMovie.load() == movie) {
             movie->SetVisible(true);
+            SetCursorRootHidden(movie, false);
             s_hiddenCursorMovie.store(nullptr);
         }
     }
@@ -2909,7 +2931,7 @@ namespace Magelight {
         static bool s_done = false;
         if (s_done) return;
         s_done = true;
-        if (REL::Module::IsVR()) return;   // VR keeps its own pointer path; HideVanillaCursor leaves VR alone too
+        // VR too (1.6.1): the vanilla quill showed at the pages' edges. The pin patches slot 4 of this vtable on VR too.
         REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_CursorMenu[0] };
         s_origCursorAdvanceMovie = reinterpret_cast<CursorAdvanceMovieFn>(vtbl.write_vfunc(0x5, &Hook_CursorAdvanceMovie));
         SKSE::log::info("Magelight: the game's cursor is hidden in its own menu's update while a page holds the mouse "
@@ -3565,7 +3587,7 @@ namespace Magelight {
         SKSE::log::info("Magelight: {} {} queued", s_focusMenuRegistered ? "focus menu" : "cursor-menu",
                         on ? "show" : "hide");
         if (!on) s_uiModeExitedMs.store(GetTickCount64());
-        // We draw our own cursor topmost. Fallback only: Hook_CursorAdvanceMovie hides the game's on flat.
+        // We draw our own cursor topmost. Fallback only: Hook_CursorAdvanceMovie hides the game's.
         HideVanillaCursor(on);
         if (!on) s_mouseDown.store(false);
         if (auto* cm = RE::ControlMap::GetSingleton()) {
@@ -10199,6 +10221,10 @@ float4 ps_straight(VSOut i) : SV_Target {
                 // A reopened Cursor Menu is a new movie, shown: hide it now, not at the next once-a-second pass. The
                 // sink can run off the main thread, so the hide is posted (and FrameWork repeats it a few frames);
                 // with skipGameCursor the sprite is not drawn meanwhile anyway.
+                // With the AdvanceMovie hook, a new movie may sit at the old one's address: its root is hidden again.
+                if (e->opening && e->menuName.c_str() && CursorHiddenInAdvance() &&
+                    std::string_view(e->menuName.c_str()) == RE::CursorMenu::MENU_NAME)
+                    s_cursorRootStale.store(true);
                 if (e->opening && e->menuName.c_str() && !CursorHiddenInAdvance() &&
                     std::string_view(e->menuName.c_str()) == RE::CursorMenu::MENU_NAME && !REL::Module::IsVR()) {
                     GameTask::Scope scope;

@@ -68,6 +68,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   you point until you let go, then stays there while it is open, even with `panelFollow` on. While you hold it, the
   same hand's stick turns it left or right (up to 60 degrees either way) and pushes it away (up) or pulls it closer
   (down), and does not scroll the page. A grip that points at no page still brings every page back in front of you.
+- **In VR, the game's red quill pointer no longer shows at the edges of a page** while a page holds UI mode, whichever
+  mod's page it is (SeverActions hid it for its own pages only).
 
 ### For mod authors: new API and capabilities
 

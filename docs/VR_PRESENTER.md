@@ -238,7 +238,9 @@ edit buttons run `Editor::Execute`.
 texture, premultiplied) transformed along the ray, shortened to the hit
 distance; hidden when no hit. The page's CSS cursor dot is the hit marker
 (the flat cursor sprite is not drawn in VR — `s_focused` still hides the
-vanilla cursor, the own-cursor draw is skipped when `VR::IsLive()`).
+vanilla cursor, the own-cursor draw is skipped when `VR::IsLive()`). Since
+1.6.1 the game's quill is hidden in VR too while a page holds UI mode: the
+Cursor Menu's AdvanceMovie hook hides its movie and, on VR, its root.
 
 ## 7. Runtime detection and interface versions
 
