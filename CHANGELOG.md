@@ -59,6 +59,26 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 1.6.1 - Unreleased
+
+### What players notice
+
+- **A game installed under a folder whose name is not plain English no longer crashes at start** (`D:\游戏\Skyrim
+  Special Edition`, say: the log named "No mapping for the Unicode character exists in the target multi-byte code
+  page"). Magelight read some of its paths in Windows' ANSI code page and some as UTF-8, so a Chinese, Japanese,
+  Cyrillic or accented folder name either threw on the first file a page asked for or left the page unfound. Every
+  path is UTF-8 now, and a page's `file:///` URL is plain ASCII whatever the folder is called.
+
+### For mod authors
+
+- Path strings the API takes (`ViewDesc.htmlPath`, the v1-v3 `CreateView`, cursor image paths, Papyrus `CreateView`)
+  are UTF-8. Text that is not valid UTF-8 is still read in the ANSI code page, so a plugin that passed
+  `path::string()` keeps working; ASCII paths are the same either way.
+- `GetViewInfo`'s `htmlPath` is UTF-8 too (it was ANSI for manifest and Papyrus views). Build a path from it with
+  `std::filesystem::path(std::u8string(...))` or `MultiByteToWideChar(CP_UTF8, ...)`, never `path(std::string)`.
+- The C++ quick start (`docs/CPP.md`) and the two C++ examples built their page path with `path::string()`, which
+  throws in your own plugin for such a folder: they use `u8string()` now; copy that.
+
 ## 1.6.0 - Unreleased
 
 ### What players notice

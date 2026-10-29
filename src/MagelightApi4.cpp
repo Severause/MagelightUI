@@ -30,6 +30,7 @@
 #include "MagelightGameTask.h"
 
 #include <windows.h>
+#include "PathTextCore.h"   // after windows.h
 
 #include <algorithm>
 #include <atomic>
@@ -822,7 +823,7 @@ namespace Magelight::Api4 {
             if (!cursor.Empty()) Magelight::SetViewCursorSet(id, true, cursor);
         }
         if (Magelight::DevModeEnabled()) {
-            const std::filesystem::path page = desc->htmlPath;
+            const std::filesystem::path page = Magelight::PathText::FromUtf8(desc->htmlPath);
             Dev::WatchView(id, (page.is_absolute() ? page : Magelight::RuntimeDirPath() / page).parent_path());
         }
         *outView = id;

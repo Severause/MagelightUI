@@ -25,9 +25,11 @@ high-confidence.
   a flag cleared before it is acted on drops the request.
 - **Fullscreen tracking**: a `w==0&&h==0` view never materializes until the backbuffer size is
   known; a code path that materializes before the size pass runs creates a 0x0 view.
-- **URL/path handling**: `PathToFileUrl` (percent-encode), `MlFileSystem::Resolve` (query strip,
-  percent-decode, absolute drive-letter paths). Any new path source must go through them; a
-  space in a mod-folder path is the classic failure.
+- **URL/path handling**: every `std::string` path is UTF-8 and converts through `src/PathTextCore.h`
+  (`FromUtf8` / `ToUtf8`, `ToFileUrl`, `PathOfFileRequest` for what Ultralight's file system is asked,
+  already decoded). `path(std::string)` or `path::string()` on a path is a bug: it reads the ANSI code
+  page and throws on a folder like D:\游戏\; a space, `#` or `%` in a mod-folder path is the other
+  classic failure.
 - **Settings parsing**: `Magelight.json` fields are type-checked (`is_number`, `is_boolean`)
   and clamped; a new key must be, too, and must be logged in the "settings loaded" line.
 - **Cursor**: hotspot math uses normalized hotspot × drawn size at the backbuffer scale; custom

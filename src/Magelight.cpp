@@ -39,6 +39,7 @@
 
 #include <JavaScriptCore/JavaScript.h>
 #include "JsBridgeCore.h"
+#include "PathTextCore.h"   // after windows.h
 
 #include <nlohmann/json.hpp>
 
@@ -2367,7 +2368,7 @@ namespace Magelight {
         const auto swf = GameRoot() / L"Data" / L"Interface" / L"magelightfocus.swf";
         if (!std::filesystem::exists(swf, ec)) {
             SKSE::log::warn("Magelight: {} missing — UI mode runs without an engine menu",
-                swf.string());
+                SysInfo::ForLog(swf));
             return;
         }
         if (auto* ui = RE::UI::GetSingleton()) {
@@ -4602,7 +4603,7 @@ namespace Magelight {
             const auto full = s_runtimeDir / name;
             if (!LoadLibraryW(full.c_str())) {
                 SKSE::log::error("Magelight: failed to load {} (GetLastError={})",
-                    std::filesystem::path(name).string(), GetLastError());
+                    PathText::ToUtf8(name), GetLastError());
                 return false;
             }
         }
@@ -4918,53 +4919,13 @@ namespace Magelight {
 
     class MlFileSystem final : public ultralight::FileSystem {
     public:
-        // Minimal percent-decode: WebKit encodes spaces (and friends) in
-        // file:/// URLs, and game installs live under paths like
-        // "Program Files (x86)".
-        static std::string UrlDecode(const std::string& in)
-        {
-            auto hex = [](char c) -> int {
-                if (c >= '0' && c <= '9') return c - '0';
-                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-                return -1;
-            };
-            std::string out;
-            out.reserve(in.size());
-            for (std::size_t i = 0; i < in.size(); ++i) {
-                if (in[i] == '%' && i + 2 < in.size()) {
-                    const int hi = hex(in[i + 1]), lo = hex(in[i + 2]);
-                    if (hi >= 0 && lo >= 0) {
-                        out += static_cast<char>((hi << 4) | lo);
-                        i += 2;
-                        continue;
-                    }
-                }
-                out += in[i];
-            }
-            return out;
-        }
-
-        // The file a file:/// URL names, as a page path (MlView::htmlPath): no query string (?v=N cache-busters on
-        // images the native side rewrites in place) or fragment, percent-decoded, no leading slash. A drive-letter
-        // path is absolute (SA's HTML ships in SA's own mod folder); anything else is relative to the runtime dir.
-        static std::string PathOfUrl(std::string p)
-        {
-            if (const auto q = p.find('?'); q != std::string::npos) p.resize(q);
-            if (const auto h = p.find('#'); h != std::string::npos) p.resize(h);
-            if (p.rfind("file:///", 0) == 0) p = p.substr(8);
-            p = UrlDecode(p);
-            while (!p.empty() && (p.front() == '/' || p.front() == '\\')) p.erase(p.begin());
-            return p;
-        }
-
-        // file:///-URL → filesystem path (PathOfUrl), refused outside the page roots.
+        // The path Ultralight asks for (PathText::PathOfFileRequest) as a filesystem path, refused outside the page roots.
         std::filesystem::path Resolve(const ultralight::String& file_path)
         {
-            const std::string p = PathOfUrl(file_path.utf8().data());
+            const std::string p = PathText::PathOfFileRequest(file_path.utf8().data());
             std::filesystem::path out = (p.size() > 1 && p[1] == ':')
-                ? std::filesystem::path(p).make_preferred()
-                : (s_runtimeDir / std::filesystem::path(p).make_preferred());
+                ? PathText::FromUtf8(p).make_preferred()
+                : (s_runtimeDir / PathText::FromUtf8(p).make_preferred());
             // The file gate: nothing outside the host runtime dir,
             // Data\Magelight or a registered page's own root is ever served,
             // and ".." is normalised away before the test so it cannot climb
@@ -4990,7 +4951,7 @@ namespace Magelight {
             std::error_code ec;
             return std::filesystem::is_regular_file(p, ec);
         }
-        static std::string LowerExt(const std::filesystem::path& p) { return HotkeyNames::Lower(p.extension().string()); }
+        static std::string LowerExt(const std::filesystem::path& p) { return HotkeyNames::Lower(PathText::ToUtf8(p.extension())); }
         static bool IsHtmlExt(const std::string& ext) { return ext == ".html" || ext == ".htm"; }
         ultralight::String GetFileMimeType(const ultralight::String& file_path) override
         {
@@ -5064,7 +5025,7 @@ namespace Magelight {
     {
         const bool absolute = htmlPath.size() > 1 && htmlPath[1] == ':';
         if (!absolute) return s_runtimeDir;
-        const std::filesystem::path page = std::filesystem::path(htmlPath).lexically_normal();
+        const std::filesystem::path page = PathText::FromUtf8(htmlPath).lexically_normal();
         const std::filesystem::path modsRoot = (GameRoot() / L"Data" / L"Magelight").lexically_normal();
         if (PathIsUnder(page, modsRoot)) {
             // modsRoot / <Mod> — the first component below Data\Magelight
@@ -5458,8 +5419,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (s_cursorFile.empty()) return;
         const bool absolute = s_cursorFile.size() > 1 && s_cursorFile[1] == ':';
         const std::filesystem::path p = absolute
-            ? std::filesystem::path(s_cursorFile)
-            : (s_runtimeDir / std::filesystem::path(s_cursorFile).make_preferred());
+            ? PathText::FromUtf8(s_cursorFile)
+            : (s_runtimeDir / PathText::FromUtf8(s_cursorFile).make_preferred());
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) {
             SKSE::log::info("Magelight: no cursor art at {} — the drawn cursor stays", Magelight::SysInfo::ForLog(p));
@@ -5480,7 +5441,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_cursorImgH = h;
         s_cursorCustom = true;
         SKSE::log::info("Magelight: cursor art {} ({}x{}, hotspot {:.2f},{:.2f}, height {}px@1080p)",
-            p.string(), w, h, s_cursorHotX, s_cursorHotY, s_cursorHeight);
+            SysInfo::ForLog(p), w, h, s_cursorHotX, s_cursorHotY, s_cursorHeight);
     }
 
     // ── Per-view cursors (0.31.0) ───────────────────────────────────────────
@@ -5520,7 +5481,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         std::error_code ec;
         if (!std::filesystem::is_regular_file(file, ec)) {
-            if (why) *why = "no file at " + file.string();
+            if (why) *why = "no file at " + SysInfo::ForLog(file);
             return nullptr;
         }
         const auto finite = [](float v) { return v == v && v > -1e30f && v < 1e30f; };
@@ -5528,7 +5489,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         hotY = finite(hotY) ? std::clamp(hotY, 0.0f, static_cast<float>(kViewCursorMaxPx)) : 0.0f;
         height = (finite(height) && height > 0.0f) ? std::clamp(height, 8.0f, 256.0f) : 0.0f;
         const std::filesystem::path norm = file.lexically_normal();
-        std::string key = norm.string();
+        std::string key = PathText::ToUtf8(norm);
         for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         key += "|" + std::to_string(hotX) + "|" + std::to_string(hotY) + "|" + std::to_string(height) + (press ? "|p" : "|-");
         std::lock_guard<std::mutex> lk(s_cursorImagesMutex);
@@ -5581,7 +5542,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (!TrySubmitThreadpoolCallback(&DecodeCursorImage, hold, nullptr)) {
                 delete hold;
                 SKSE::log::warn("Magelight: cursor image {} - could not queue its decode; the host cursor shows instead",
-                                img->file.string());
+                                SysInfo::ForLog(img->file));
                 img->state.store(CursorImage::kFailed);
             }
             return nullptr;
@@ -5591,7 +5552,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         std::vector<std::uint8_t>().swap(img->px);
         if (!ok) {
             SKSE::log::warn("Magelight: cursor image {} - texture creation failed; the host cursor shows instead",
-                            img->file.string());
+                            SysInfo::ForLog(img->file));
             img->state.store(CursorImage::kFailed);
             return nullptr;
         }
@@ -5610,7 +5571,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         for (int i = 0; i < kCursorStates; ++i) {
             if (!set.image[i]) continue;
             if (!out.empty()) out += ", ";
-            out += std::string(kCursorStateNames[i]) + "=" + set.image[i]->file.string();
+            out += std::string(kCursorStateNames[i]) + "=" + SysInfo::ForLog(set.image[i]->file);
         }
         return out.empty() ? "the host cursor" : out;
     }
@@ -5623,7 +5584,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool absolute = path.size() > 1 && path[1] == ':';
         if (absolute) {
             if (!absoluteOk) return fail("the path must be relative to the mod folder");
-            out = std::filesystem::path(path).lexically_normal();
+            out = PathText::FromUtf8(path).lexically_normal();
             return true;
         }
         if (path[0] == '/' || path[0] == '\\' || path.find("..") != std::string::npos)
@@ -5636,7 +5597,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             root = v->root;
         }
         if (root.empty()) root = s_runtimeDir;
-        out = (root / std::filesystem::path(path).make_preferred()).lexically_normal();
+        out = (root / PathText::FromUtf8(path).make_preferred()).lexically_normal();
         return true;
     }
 
@@ -6229,26 +6190,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         return true;
     }
 
-    // Absolute path → file:/// URL: forward slashes + the minimal percent
-    // set (space/%/#/?) so game-root paths like Program Files (x86) survive
-    // WebKit's URL parser. Inverse of MlFileSystem::UrlDecode.
-    static std::string PathToFileUrl(const std::filesystem::path& p)
-    {
-        std::string s = p.string();
-        for (auto& c : s)
-            if (c == '\\') c = '/';
-        std::string out = "file:///";
-        for (const char c : s) {
-            switch (c) {
-            case ' ': out += "%20"; break;
-            case '%': out += "%25"; break;
-            case '#': out += "%23"; break;
-            case '?': out += "%3F"; break;
-            default:  out += c;
-            }
-        }
-        return out;
-    }
+    // Absolute path → file:/// URL (PathText::ToFileUrl: UTF-8, percent-encoded to plain ASCII). Inverse of
+    // PathText::PathOfFileUrl.
+    static std::string PathToFileUrl(const std::filesystem::path& p) { return PathText::ToFileUrl(p); }
 
     // Render thread, per frame: give every registry entry that lacks one an
     // Ultralight view. Views registered from the game thread before the
@@ -6320,10 +6264,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         // a host navigation moved loads that URL again, fragment included.
         const bool absolute = v.htmlPath.size() > 1 && v.htmlPath[1] == ':';
         const std::filesystem::path onDisk =
-            absolute ? std::filesystem::path(v.htmlPath) : (s_runtimeDir / v.htmlPath);
+            absolute ? PathText::FromUtf8(v.htmlPath) : (s_runtimeDir / PathText::FromUtf8(v.htmlPath));
         if (!v.htmlPath.empty() && std::filesystem::exists(onDisk)) {
             const std::string url = !v.pageUrl.empty() ? v.pageUrl
-                : absolute ? PathToFileUrl(onDisk) : ("file:///" + v.htmlPath);
+                : absolute ? PathToFileUrl(onDisk) : PathText::ToRelativeFileUrl(v.htmlPath);
             SKSE::log::info("Magelight: view {} loading from disk ({})", v.id, v.pageUrl.empty() ? v.htmlPath : v.pageUrl);
             v.ul->LoadURL(url.c_str());
         } else {
@@ -6673,7 +6617,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                         w.alsoReload = v.reloadPending;
                         // Any other URL is stopped as it begins (OnBeginLoading) and leaves the page as it is.
                         if (IsLocalPageUrl(v.navigateUrl)) {
-                            v.htmlPath = MlFileSystem::PathOfUrl(v.navigateUrl);
+                            v.htmlPath = PathText::PathOfFileUrl(v.navigateUrl);
                             v.pageUrl = v.navigateUrl;
                         }
                         w.url = std::move(v.navigateUrl);
@@ -10904,7 +10848,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         std::string u = urlOrPath;
         if (u.rfind("file://", 0) != 0) {
             const bool absolute = u.size() > 1 && u[1] == ':';
-            u = absolute ? PathToFileUrl(std::filesystem::path(u)) : ("file:///" + u);
+            // A relative one keeps its '?' and '#' as URL syntax (a fragment-only Navigate keeps the page); only its
+            // text is made UTF-8.
+            u = absolute ? PathToFileUrl(PathText::FromUtf8(u)) : ("file:///" + PathText::ToUtf8(PathText::FromUtf8(u)));
         }
         std::lock_guard<std::mutex> lk(s_viewsMutex);
         MlView* v = FindViewLocked(view);

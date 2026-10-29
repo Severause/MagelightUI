@@ -44,7 +44,8 @@ static std::string PagePath()
     GetModuleFileNameW(nullptr, buf, MAX_PATH);
     auto p = std::filesystem::path(buf).parent_path()
            / L"Data" / L"Magelight" / L"MyMod" / L"views" / L"panel" / L"index.html";
-    return p.string();
+    const auto u = p.u8string();   // UTF-8: p.string() throws for a folder the ANSI code page cannot spell
+    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
 }
 
 static void OnMessage(SKSE::MessagingInterface::Message* m)
