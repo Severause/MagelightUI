@@ -8,9 +8,9 @@
 //                     (PageThread::RunRecordedList, a flush between parts, the next page frame already started) and
 //                     keeps an AddRef on the frame's target SRV.
 //
-// --case release: at frame 60 the View is released and made again on the same page; frame 59's lists run only after
-// that, and the main thread still copies from the old target's SRV for a few frames (what Ultralight frees while a
-// frame that drew it waits). --case upload: the driver alone, a texture updated in a box away from its origin, checked
+// --case release: at frame 60 the View is released and made again on the same page; frame 59's lists run only once the
+// driver's counts show a render target freed (the run fails if none is), and the main thread still copies from the
+// old target's SRV for a few frames (what Ultralight frees while a frame that drew it waits). --case upload: the driver alone, a texture updated in a box away from its origin, checked
 // against what was sent. --case state: objects bound on the immediate context in slots the driver never uses, as the
 // game leaves them, must still be bound after every page frame. --warp runs on WARP, which prints its
 // DriverCommandLists (0 exercises the emulated path).
@@ -171,7 +171,10 @@ namespace
     ID3D11ShaderResourceView* PageFrame(int frame)
     {
         if (g_case == "release" && frame == 60) {
-            g_view = nullptr;   // Ultralight frees the target (in a later Render) while the main thread holds its SRV
+            // Ultralight keeps a released View's target in its caches; the purge frees it, while the main thread still
+            // holds its SRV and frame 59's lists that draw it wait.
+            g_view = nullptr;
+            g_renderer->PurgeMemory();
             MakeView();
         }
         // Glyphs and shapes the first paint did not have: Ultralight adds them to textures it already made, which is
@@ -398,8 +401,9 @@ namespace
 
     // Thread mode: the host's handoff (ThreadModeFrame), one frame in flight. The main thread lets page frame f start,
     // then runs frame f-1's lists while the page thread works, as the host lets the next page frame go before it runs
-    // the lists it took. In the release case frame 60, which frees the old View, finishes first, so frame 59's lists
-    // run after Ultralight freed what they draw. A frame's lists are the parts the driver split off at each flush
+    // the lists it took. In the release case frame 60 releases the old View, and frame 59's lists (and each later
+    // frame's, in order) wait until the driver's counts show Ultralight freed a render target, so they run after what
+    // they draw is gone; a run that never sees the free fails. A frame's lists are the parts the driver split off at each flush
     // (MgGpu_TakeCommandList), with the immediate context flushed after each, then the frame's own.
     struct Packet {
         std::vector<ID3D11CommandList*> lists;
@@ -494,20 +498,44 @@ namespace
             RunLists(p);
             if (p.srv) { if (held) held->Release(); held = p.srv; p.srv = nullptr; }
         };
+        // The release case: render targets freed since MgGpu_Create, read only while the page thread waits for its
+        // next frame (the driver's counters are unlocked).
+        const auto targetsFreed = [] {
+            MgGpuStats st{};
+            st.size = sizeof(st);
+            g_mgStats(g_mg, &st);
+            return st.targetsCreated - st.renderTargets;
+        };
+        std::vector<Packet> backlog;   // the release case's frames from 59 on, until the free
+        bool holding = false;
+        std::uint64_t freedBefore = 0;
         for (int f = 0; f < g_frames; ++f) {
+            if (g_case == "release" && f == 60) {
+                freedBefore = targetsFreed();
+                holding = true;
+            }
             {
                 std::lock_guard<std::mutex> lk(g_mx);
                 g_go = f;
             }
             g_cv.notify_all();
-            if (!(g_case == "release" && f == 60)) adopt(pending);
+            if (holding) backlog.push_back(std::move(pending));
+            else adopt(pending);
+            pending = {};
             {
                 std::unique_lock<std::mutex> lk(g_mx);
                 g_cv.wait(lk, [&] { return g_packet.ready || g_pageFailed; });
                 if (g_pageFailed) { std::printf("the page thread failed to start\n"); return 2; }
-                pending.ready = false;
             }
-            adopt(pending);   // the release case's frame 59, after frame 60 freed the old View
+            if (holding && targetsFreed() > freedBefore) {
+                std::printf("  release: a render target was freed by frame %d; frames 59-%d run after it\n", f, f - 1);
+                for (std::size_t i = 0; i < backlog.size(); ++i) {
+                    adopt(backlog[i]);
+                    if (i + 1 < backlog.size()) g_imm->Flush();   // as the host flushes between page frames
+                }
+                backlog.clear();
+                holding = false;
+            }
             {
                 std::lock_guard<std::mutex> lk(g_mx);
                 pending = std::move(g_packet);
@@ -515,6 +543,10 @@ namespace
             }
             if (held && g_case == "release" && f >= 60 && f < 70) TouchTarget(held);
             Sleep(2);
+        }
+        if (holding) {
+            std::printf("FAIL: the release case never saw Ultralight free the old View's target\n");
+            return 1;
         }
         adopt(pending);
         WaitForSingleObject(t, INFINITE);

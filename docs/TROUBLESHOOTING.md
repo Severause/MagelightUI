@@ -468,7 +468,9 @@ was a PC where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near t
 name the last-resort font the session uses and, when Arial could not be used, why. An exception
 `0xC00000FD` is a stack overflow: see the next section. With `pageThread` the line reads `... in page frame work`
 (or `in the page thread's start`), and may be followed by `the page thread faulted holding the view registry ...;
-given back`; the game thread keeps running either way.
+given back`; the game thread keeps running either way. A page thread that started but could not start Ultralight
+logs `render-thread init failed on the page thread — overlay disabled`: nothing falls back to the game's frame then,
+so set `pageThread` to `false` for that session and report it with the log.
 
 ## A page error ends the UI or the game (stack overflow, 0xC00000FD)
 

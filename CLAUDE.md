@@ -425,11 +425,14 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     frames build on) with `PageThread::RunRecordedList`, whose `ExecuteCommandList(list, TRUE)` saves and restores
     the game's whole state (FALSE clears it, and the game's renderer rebinds only what it thinks changed:
     `deferred-test`'s state case), and flushes the immediate context after each part the driver split off at a flush
-    (`MgGpu_TakeCommandList`, where the in-frame driver flushes); a page frame that rendered nothing hands over no
-    list. It then draws the newest frame's views that are still wanted. The game thread never waits for a page
+    (`MgGpu_TakeCommandList`, where the in-frame driver flushes) and between two page frames taken at one Present
+    (in the frame a Present always parts them); a page frame that rendered nothing hands over no list. It then draws the newest frame's views that are still wanted. The game thread never waits for a page
     frame: no join, no wait on its frames, and no lock held across page script (the host runs none under
-    `s_viewsMutex`, invariant 16). Its per-frame reads of the registry (the views still wanted, `PickCursorAt`) take
-    `s_viewsMutex` with `try_to_lock` and keep the last frame's reading while the page side holds it; a blocking lock
+    `s_viewsMutex`, invariant 16). Its per-frame reads of the registry (the views still wanted, read before the Go,
+    `PickCursorAt`, the gamepad batch of a view that already holds the pad) take `s_viewsMutex` with `try_to_lock` and
+    keep the last reading while the page side holds it, and the writes it makes then (the page-cursor reset after UI
+    mode) are left for the next `PageWorkBegin`; so is a page's settle that finds the registry busy
+    (`s_pendingSettles`). A blocking lock
     off the page thread (a hook, a task, the window procedure, an API call) can wait for the page side's Ultralight
     or driver work under that lock (a page's load, a resize), never for page script. A page stuck in a script
     freezes every page, as they share the one page thread, but never the game (the stall watchdog names it); a view
@@ -447,11 +450,12 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     (`GameBookkeeping`, the overlay menu, the UI pass, the cursor quad) stays on the game thread. The mode is decided
     once: VR never asks for it (the setting is ignored there when `Magelight.json` is read); at render init
     (`StartPageThread`, `PageThread::Decide`) a single-threaded device, a refused deferred context or a failed thread
-    turn it Off with a log line, and the next frame starts Ultralight on the fiber. The page thread holds a
+    turn it Off with a log line, and the next frame starts Ultralight as without the setting (on the fiber, or the
+    game's stack with `ulFiberMB` 0). Once the thread runs, a failure there turns the overlay off; nothing falls back. The page thread holds a
     `GameTask::Scope` for its whole life, so its posts go through the pump as posts made inside Present do. With
-    the setting off the frame is unchanged. Today's single thread no longer serializes the page parts against the
-    input sinks (`InputSink`, and `GamepadSink` on whichever thread the engine's input job runs), the window
-    procedure, game tasks, Papyrus natives and API calls: state they share is atomic or under its mutex, and new
-    shared state must be too. `tools/deferred-test`, `tools/pagethread-test`
+    the setting off `FrameWork` is unchanged (the input queue's rule above applies in both modes). Today's single
+    thread no longer serializes the page parts against the input sinks (`InputSink`, and `GamepadSink` on whichever
+    thread the engine's input job runs), the window procedure, game tasks, Papyrus natives and API calls: state they
+    share is atomic or under its mutex, and new shared state must be too. `tools/deferred-test`, `tools/pagethread-test`
     and `fiber-gc-test --thread` are its gates; re-run them, and the page-facing tools with `MG_PAGE_THREAD=1`, at
     every SDK bump.

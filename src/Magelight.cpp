@@ -398,6 +398,9 @@ namespace Magelight {
     static std::atomic<bool> s_mouseDown{ false };
     // Backbuffer size: the game thread writes it at Present; the input sink's cursor clamp and the page work read it.
     static std::atomic<int> s_backbufferW{ 0 }, s_backbufferH{ 0 };
+    // The same size as one value (width high, height low), for the page thread: two loads of the pair above can
+    // straddle a resize and read a size that never existed.
+    static std::atomic<std::uint64_t> s_backbufferWH{ 0 };
 
     // ── IME (0.27.0): native composition for CJK input ──────────────────
     // The window's IME context is ATTACHED only while a field in the UI-mode
@@ -1875,6 +1878,25 @@ namespace Magelight {
     // fragment added or changed, or a navigation stopped below), and no DOM ready follows.
     static std::uint64_t s_mainLoadsBegun = 0;
 
+    // A page's settle, under s_viewsMutex: marks a hidden prepaint view for its settle repaint and logs it.
+    static void ApplyPageSettledLocked(ultralight::View* caller)
+    {
+        static std::atomic<int> s_logged{ 0 };
+        MlView* v = FindViewByUlLocked(caller);
+        if (!v) return;
+        const bool repaint = !VR::IsLive() && v->prepaint && v->prepainted && !v->visible && !v->settleRepainted;
+        v->settleRepaint = repaint;
+        if (s_logged.fetch_add(1) < 64)
+            SKSE::log::info("Magelight: view {} page settled{}", v->id,
+                            repaint ? " - its prepaint is painted once more while hidden" : "");
+    }
+    // Settles that found the registry busy, applied by the next PageWorkBegin. Ultralight's thread only (the settle
+    // fires in its Update and PageWorkBegin runs there too); no view is erased between the two, as ApplyPendingLifecycle
+    // runs after the apply.
+    static std::vector<ultralight::View*> s_pendingSettles;
+    // GameBookkeeping's page-cursor reset after UI mode, when the registry was busy: PageWorkBegin does it.
+    static std::atomic<bool> s_pageCursorResetPending{ false };
+
     class MlLoadListener final : public ultralight::LoadListener {
     public:
         // Ultralight fires OnBeginLoading SYNCHRONOUSLY inside LoadURL, which
@@ -2018,34 +2040,17 @@ namespace Magelight {
         // a resize does not reset it (tools/visibility-test section H). The repaint it asks for is latched until the
         // next DOM ready or kept host request (settleRepainted), and never asked in VR, where TakePrepaintView paints
         // nothing. It fires inside Renderer::Update, outside s_viewsMutex, but the header promises no call it runs
-        // in, so try_lock (as OnChangeCursor). A settle that finds the lock held (an API call on another thread)
-        // loses its repaint for the load, as the page settles once per navigation, and says so in the log (no view
-        // id: the registry cannot be read without the lock).
+        // in, so try_lock (as OnChangeCursor). A settle that finds the lock held (another thread's API call, or with
+        // pageThread the game thread's registry reads) waits for the next PageWorkBegin (s_pendingSettles): the page
+        // settles once per navigation, so a dropped one would lose its repaint for the load.
         void OnPageSettled(ultralight::View* caller, const ultralight::String&) override
         {
-            // Two budgets: the busy line is the only trace of a lost repaint, so the settle lines must not use it up.
-            static std::atomic<int> s_logged{ 0 };
-            static std::atomic<int> s_busyLogged{ 0 };
-            ViewId id = 0;
-            bool repaint = false;
-            const bool vr = VR::IsLive();
-            {
-                std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock);
-                if (!lk) {
-                    if (s_busyLogged.fetch_add(1) < 64)
-                        SKSE::log::info("Magelight: a page settled while the view registry was busy - no settle "
-                                        "repaint for it this load");
-                    return;
-                }
-                if (MlView* v = FindViewByUlLocked(caller)) {
-                    id = v->id;
-                    repaint = !vr && v->prepaint && v->prepainted && !v->visible && !v->settleRepainted;
-                    v->settleRepaint = repaint;
-                }
+            std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock);
+            if (!lk) {
+                s_pendingSettles.push_back(caller);
+                return;
             }
-            if (id && s_logged.fetch_add(1) < 64)
-                SKSE::log::info("Magelight: view {} page settled{}", id,
-                                repaint ? " - its prepaint is painted once more while hidden" : "");
+            ApplyPageSettledLocked(caller);
         }
     };
     static constinit NeverDestroyed<MlLoadListener> s_loadListener;
@@ -8045,7 +8050,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool deviceReady = CreateDeviceResources(sc);
         if (deviceReady && s_pageThreadMode.load() == PageThread::Mode::Wanted) {
             // Started: the page thread makes the renderer itself and raises s_rendererUp. Refused: the mode is Off and
-            // the next frame starts Ultralight here, on the page fiber (FrameWork).
+            // the next frame starts Ultralight here, as without the setting (FrameWork: the fiber, or the game stack).
             if (!StartPageThread()) s_renderInit = false;
             return;
         }
@@ -8288,6 +8293,15 @@ float4 ps_straight(VSOut i) : SV_Target {
     // the input, edit-state, tooltip and bridge drains. Ultralight's thread.
     static void PageWorkBegin(float bw, float bh)
     {
+        if (!s_pendingSettles.empty()) {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            for (ultralight::View* caller : s_pendingSettles) ApplyPageSettledLocked(caller);
+            s_pendingSettles.clear();
+        }
+        if (s_pageCursorResetPending.exchange(false)) {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            for (auto& vp : s_views) vp->pageCursor = 0;
+        }
         // Fullscreen views track the backbuffer: sized here BEFORE
         // materialization (a 0x0 view never materializes), re-Resized via
         // the boundsDirty path if the backbuffer ever changes.
@@ -8407,8 +8421,11 @@ float4 ps_straight(VSOut i) : SV_Target {
                 offFrames = 0;
                 // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
                 // every page's cursor; each reports again on the first mouse move (the core re-sends it per move).
-                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-                for (auto& vp : s_views) vp->pageCursor = 0;
+                // A registry the page thread holds is not waited for: its next PageWorkBegin does the reset.
+                if (std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock())
+                    for (auto& vp : s_views) vp->pageCursor = 0;
+                else
+                    s_pageCursorResetPending.store(true);
             }
             uiFrames = 0;
             if (offFrames >= 0 && ++offFrames == 30) {
@@ -8731,6 +8748,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             bh = static_cast<float>(scd.BufferDesc.Height);
             const int prevW = s_backbufferW.exchange(static_cast<int>(bw));  // for the cursor clamp (input sink)
             const int prevH = s_backbufferH.exchange(static_cast<int>(bh));
+            s_backbufferWH.store((static_cast<std::uint64_t>(scd.BufferDesc.Width) << 32) | scd.BufferDesc.Height);
             // With the page thread it sends this itself (PageThreadFrame), so a RenderThread mod still gets it on the
             // render thread.
             if (prevW > 0 && prevH > 0 && (prevW != static_cast<int>(bw) || prevH != static_cast<int>(bh)) &&
@@ -9079,8 +9097,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         using ClockT = std::chrono::steady_clock;
         const auto t0 = ClockT::now();
         s_pageFrameSinceMs.store(SteadyNowMs());
-        const float bw = static_cast<float>(s_backbufferW.load());
-        const float bh = static_cast<float>(s_backbufferH.load());
+        const std::uint64_t wh = s_backbufferWH.load();
+        const float bw = static_cast<float>(static_cast<std::uint32_t>(wh >> 32));
+        const float bh = static_cast<float>(static_cast<std::uint32_t>(wh));
         // The game thread leaves DisplayResized to this thread, so a RenderThread mod gets it on the render thread.
         static int s_lastW = 0, s_lastH = 0;
         if (static_cast<int>(bw) != s_lastW || static_cast<int>(bh) != s_lastH) {
@@ -9258,7 +9277,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
     // so, its deferred context, its handoff and the thread. False: the mode is Off (the log line says why) and render
-    // init runs again next frame, on the page fiber.
+    // init runs again next frame, as without the setting.
     static bool StartPageThread()
     {
         ID3D11DeviceContext* deferred = nullptr;
@@ -9304,15 +9323,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         GameBookkeeping();
         TickImageProbe();
         std::vector<std::unique_ptr<PagePacket>> packets = s_pageHandoff->TakeAll();
-        s_pageHandoff->Go();   // the next page frame overlaps this frame's execute and draws
-        // The newest page frame's views, drawn until a newer frame comes. Never freed at exit: its references are
-        // Direct3D's, which may be gone by then.
-        static PagePacket* s_held = nullptr;
-        const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
         // The views wanted now, read here rather than from the page frame: one hidden since (Escape, a mod's hide) is
         // not drawn even when the page thread is slow or stuck in a script (it never runs script under the registry's
-        // lock, invariant 16). While the page thread holds the registry's lock (a page's load or resize, the views it
-        // collects), this frame keeps the last frame's reading rather than wait.
+        // lock, invariant 16). Read before Go, while a page thread that finished its frame is waiting and the lock is
+        // free; while the page thread still holds it (a page's load or resize, the views it collects), this frame
+        // keeps the last frame's reading rather than wait.
         static std::vector<ViewId> s_wanted;
         static bool s_anyVisible = false, s_interactiveVisible = false;
         if (std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock()) {
@@ -9325,6 +9340,11 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_wanted.push_back(v->id);
             }
         }
+        s_pageHandoff->Go();   // the next page frame overlaps this frame's execute and draws
+        // The newest page frame's views, drawn until a newer frame comes. Never freed at exit: its references are
+        // Direct3D's, which may be gone by then.
+        static PagePacket* s_held = nullptr;
+        const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
         const bool anyVisible = s_anyVisible, interactiveVisible = s_interactiveVisible;
         const CompositeTarget target = ChooseCompositeTarget(interactiveVisible);
         std::vector<QueuedQuad> queued;
@@ -9338,11 +9358,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             StateBackup backup;
             backup.Capture(s_context);
             // Each list with the game's whole state saved and put back around it (PageThread::RunRecordedList), and the
-            // immediate context flushed after each part a flush split off, where the in-frame driver flushes.
-            for (auto& p : packets) {
+            // immediate context flushed after each part a flush split off, where the in-frame driver flushes, and
+            // between two page frames, which in the frame always have a Present between them.
+            for (std::size_t k = 0; k < packets.size(); ++k) {
+                auto& p = packets[k];
                 for (std::size_t i = 0; i < p->lists.size(); ++i) {
                     PageThread::RunRecordedList(s_context, p->lists[i]);
-                    if (i + 1 < p->lists.size()) s_context->Flush();
+                    if (i + 1 < p->lists.size() || k + 1 < packets.size()) s_context->Flush();
                     p->lists[i]->Release();
                 }
                 p->lists.clear();
@@ -10224,6 +10246,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // dispatch, one batch at a time, on whichever thread its input job runs.
     static Gamepad::Router            s_gamepadRouter;
     static Gamepad::BatchIn           s_gamepadIn;              // this batch's, for EndGamepadBatch
+    static Gamepad::Mode              s_gamepadLastMode = Gamepad::Mode::Navigation;   // the last batch's out.mode
     static bool                       s_gamepadHostDirty = false;
     static std::uint64_t              s_gamepadSequence = 0;
     static ViewId                     s_gamepadPacketView = 0;  // the view the last packet went to
@@ -10330,9 +10353,21 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_gamepadHostDirty = false;
         if (in.connected && s_focused.load() && !s_renderDead.load() && ForegroundIsGame() && !MenuInputAboveFocusMenu()) {
             const auto uiView = static_cast<ViewId>(s_uiModeView.load());
-            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-            MlView* v = FindViewLocked(uiView);
-            if (v && !v->destroyPending && v->gamepad.enabled && !v->gamepadPage.empty()) {
+            // With pageThread the page thread can hold the registry across a page load: a batch whose view already
+            // held the pad keeps the last batch's reading rather than wait (a gamepadDirty stays for the next one).
+            // A view taking the pad waits, so its first presses never reach the game unowned.
+            std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::defer_lock);
+            bool busy = false;
+            if (uiView != 0 && s_gamepadIn.owner == uiView) busy = !lk.try_lock();
+            else lk.lock();
+            if (busy) {
+                in.owner = s_gamepadIn.owner;
+                in.ownerEpoch = s_gamepadIn.ownerEpoch;
+                in.config = s_gamepadIn.config;
+                in.mode = s_gamepadLastMode;
+                in.escapeCaptured = s_gamepadIn.escapeCaptured;
+            } else if (MlView* v = FindViewLocked(uiView);
+                       v && !v->destroyPending && v->gamepad.enabled && !v->gamepadPage.empty()) {
                 in.owner = uiView;
                 in.ownerEpoch = v->gamepadEpoch;
                 in.config = v->gamepad;
@@ -10366,6 +10401,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_gamepadOwner.store(owner);
         s_gamepadGeneration.store(out.generation);
         s_gamepadConnected.store(s_gamepadIn.connected);
+        s_gamepadLastMode = out.mode;
         if (s_gamepadPacketView && s_gamepadPacketView != owner) {   // its page cancels what it holds
             SendGamepadPacket(s_gamepadPacketView, false, out);
             s_gamepadPacketView = 0;

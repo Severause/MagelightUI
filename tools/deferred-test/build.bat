@@ -1,7 +1,7 @@
 @echo off
 rem The GPU driver on a deferred context (the page thread, invariant 27) against the immediate context (the in-frame
 rem path): builds deferred_test.exe against extern\ultralight, then renders each page both ways, MSAA off and 4x, and
-rem compares the View's resolved target byte for byte; then once on WARP (its DriverCommandLists says whether the
+rem compares the View's resolved target byte for byte; then on WARP, plain and with flush splits (its DriverCommandLists says whether the
 rem runtime's emulated command lists, and the driver's UpdateSubresource adjustment for them, were exercised); then the
 rem upload case (a box away from the texture's origin), the state case (the game's bindings survive each page frame)
 rem and the release case (a View freed while a list that drew it waits and the main thread still holds its target).
@@ -39,6 +39,11 @@ echo == WARP, mixed.html, msaa 4
 "%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode immediate --msaa 4 --warp --out "%OUT%\a.raw" || (echo FAIL: WARP immediate run& set /a FAILS+=1)
 "%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode thread --msaa 4 --warp --out "%OUT%\b.raw" || (echo FAIL: WARP thread run& set /a FAILS+=1)
 "%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: WARP differs& set /a FAILS+=1)
+echo.
+echo == WARP, translucent-borders.html, msaa 4: the flush splits on emulated command lists
+"%EXE%" "%UL%" "%ROOT%\tools\desktop-harness\pages\translucent-borders.html" --gpu "%BUILD%" --mode immediate --msaa 4 --warp --out "%OUT%\a.raw" || (echo FAIL: WARP splits immediate run& set /a FAILS+=1)
+"%EXE%" "%UL%" "%ROOT%\tools\desktop-harness\pages\translucent-borders.html" --gpu "%BUILD%" --mode thread --msaa 4 --warp --out "%OUT%\b.raw" || (echo FAIL: WARP splits thread run& set /a FAILS+=1)
+"%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: WARP splits differ& set /a FAILS+=1)
 for %%D in (hardware warp) do (
   set "DEV="
   if "%%D"=="warp" set "DEV=--warp"

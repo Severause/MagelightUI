@@ -224,10 +224,12 @@ namespace mggpu {
             // UpdateSubresource's source from another place (UpdateTexture).
             deferred_ = immediate_context_->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED;
             if (deferred_) {
+                // Only a runtime that answers the query and says it emulates gets the adjustment, as Microsoft's
+                // documented workaround does; a device that fails it is taken as running lists natively.
                 D3D11_FEATURE_DATA_THREADING threading{};
-                native_lists_ = SUCCEEDED(device_->CheckFeatureSupport(D3D11_FEATURE_THREADING, &threading,
-                                                                       sizeof(threading)))
-                                && threading.DriverCommandLists;
+                native_lists_ = FAILED(device_->CheckFeatureSupport(D3D11_FEATURE_THREADING, &threading,
+                                                                    sizeof(threading)))
+                                || threading.DriverCommandLists;
             }
             feature_level_ = device_->GetFeatureLevel();
             uav_slots_ = (feature_level_ >= D3D_FEATURE_LEVEL_11_1 && context1_) ? D3D11_1_UAV_SLOT_COUNT
