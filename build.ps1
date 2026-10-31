@@ -115,12 +115,13 @@ if (-not $cmake) { Write-Host "cmake.exe not found" -ForegroundColor Red; exit 1
 Write-Host "  CMake: $cmake"
 
 # One vcpkg tree per set of library inputs, shared by every build directory: a copy is 3 GB and they are identical. The
-# name hashes what picks the libraries, so a tree is never rewritten in place by a build of other inputs. MG_VCPKG_INSTALLED_DIR
-# overrides. A build directory that already holds its own tree keeps it: moving it would recompile everything.
+# name hashes what picks the libraries, so other inputs get another tree. A compiler or vcpkg update rebuilds a tree in
+# place, so let that finish before starting another build. MG_VCPKG_INSTALLED_DIR overrides. A build
+# directory that already holds its own tree keeps it: moving it would recompile everything.
 function Get-SharedVcpkgDir([string]$root, [string]$prefix) {
     $o = [Environment]::GetEnvironmentVariable('MG_VCPKG_INSTALLED_DIR')
     if ($o) { return $o }
-    $files = @(Join-Path $root 'vcpkg.json'; Join-Path $root 'vcpkg-configuration.json') | Where-Object { Test-Path $_ }
+    $files = @(@(Join-Path $root 'vcpkg.json'; Join-Path $root 'vcpkg-configuration.json') | Where-Object { Test-Path $_ })
     $ports = Join-Path $root 'ports'
     if (Test-Path $ports) { $files += @(Get-ChildItem $ports -Recurse -File | Sort-Object FullName | ForEach-Object { $_.FullName }) }
     $sum = ($files | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash }) -join ''
@@ -146,11 +147,20 @@ $cmakeArgs = @(
     "-DCMAKE_CXX_COMPILER=cl.exe"
 )
 
-$vcpkgCache = Join-Path $buildDir "CMakeCache.txt"
-$ownTree = (Test-Path $vcpkgCache) -and
-           (Select-String -Path $vcpkgCache -Pattern '^VCPKG_INSTALLED_DIR:[A-Z]*=.*/vcpkg_installed$' -Quiet)
-if (-not $ownTree -and -not $env:CI) {   # CI caches the tree in the build directory
-    $cmakeArgs += "-DVCPKG_INSTALLED_DIR=$((Get-SharedVcpkgDir $PSScriptRoot 'mgl') -replace '\\', '/')"
+$cacheFile = Join-Path $buildDir "CMakeCache.txt"
+$cachedTree = ''
+if (Test-Path $cacheFile) {
+    $treeLine = Select-String -Path $cacheFile -Pattern '^VCPKG_INSTALLED_DIR:[A-Z]*=(.*)$' | Select-Object -First 1
+    if ($treeLine) { $cachedTree = $treeLine.Matches[0].Groups[1].Value.Trim() }
+}
+if (-not $env:CI -and $cachedTree -notmatch '/vcpkg_installed$') {   # CI caches the tree in the build directory
+    $tree = (Get-SharedVcpkgDir $PSScriptRoot 'mgl') -replace '\\', '/'
+    # Every cached <pkg>_DIR names the old tree, so CMake would go on building against it. The objects survive.
+    if ($cachedTree -and $cachedTree -ne $tree) {
+        Write-Host "Library tree changed, dropping the CMake cache: $cachedTree -> $tree"
+        Remove-Item -Force $cacheFile
+    }
+    $cmakeArgs += "-DVCPKG_INSTALLED_DIR=$tree"
 }
 & $cmake $cmakeArgs
 if ($LASTEXITCODE -ne 0) { Write-Host "CMake configure FAILED" -ForegroundColor Red; exit 1 }
