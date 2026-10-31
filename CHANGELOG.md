@@ -75,6 +75,10 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   turns the thread off for the session, with a log line saying why, on Skyrim VR, on a graphics device that cannot be
   used from a second thread, or when the device (or a wrapper of it) refuses a deferred context; pages then run in
   the game's frame as before.
+- A page no longer ignores the keyboard until you alt-tab. Keys that reach DirectInput but never reach the game's
+  window (seen on Windows 26300 builds) are passed to the page, so Escape, a page's own key and typing keep working.
+  It only acts in a UI-mode session where the window has had no key press. `Magelight.json` `"keyFallback": false`
+  turns it off, and `Magelight.log` says where keyboard focus was (`keyboard at UI mode entry`, `keyboard key lost`).
 - With the thread on, `Magelight.log`'s cost line every 2 s is the game thread's (`prelude`, `execute`,
   `composite`), and a second line gives the page thread's own (`ul.update`, `ul.render`, frames per second).
   `tools/load-test` is a page that burns a chosen load, with the before/after protocol.

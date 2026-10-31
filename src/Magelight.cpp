@@ -96,6 +96,7 @@ namespace Magelight {
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "pageThread": false   // 1.7.0: pages run on a thread of their own, not in the game's frame (flat only)
+    //   "keyFallback": true   // 1.7.0: keys that reach DirectInput but not the window go to the page anyway (flat only)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
     //            "suppressRuntimeLaser": true, "aimUseTip": true, "aimPitchDeg": -35,
@@ -166,6 +167,8 @@ namespace Magelight {
     // maxPerThreadStackUsage is 5 MB) fall to the fiber's end, so its error path commits into the 64 KB guarantee
     // UlFiberMain sets and a page's first uncaught error is 0xC00000FD. tools/fiber-gc-test checks 8 MB.
     static constexpr int kMinFiberMb = 8;
+    // Magelight.json "keyFallback" (1.7.0): see LostKeys in the keyboard poll.
+    static bool s_keyFallback = true;
     // Magelight.json "pageThread" (1.7.0): Ultralight on a thread of its own (PageThreadMain), the game thread only
     // running its recorded GPU work and drawing its views. Wanted until render init asks the device
     // (StartPageThread), then On or Off for the session. Its stack is ulFiberMB (8 when that is 0).
@@ -415,6 +418,14 @@ namespace Magelight {
     // of it. VR is exempt: the VR keyboards own text there.
     // wparam: 1 attach, 0 detach, 2 reposition the candidates, 3 cancel the IME's copy of a composition the page kept.
     static constexpr UINT kImeCtlMsg = WM_APP + 0x4F46;
+    // Lost keys (Input::LostKeys): the message that gives the game window keyboard focus back, and the one that carries
+    // a key the poll passed on (wparam vk, lparam as WM_KEYDOWN / WM_KEYUP have it). A message of our own, not a posted
+    // WM_KEYDOWN: TranslateMessage would make its text from the thread's key state, which is stale here.
+    static constexpr UINT kKeyFocusMsg = WM_APP + 0x4F4A;
+    static constexpr UINT kPassedKeyMsg = WM_APP + 0x4F4B;
+    static bool s_handlingPassedKey = false;   // window thread
+    static std::atomic<std::uint64_t> s_windowKeyPresses{ 0 };   // first presses through the window proc
+    static std::atomic<std::uint32_t> s_keySession{ 0 };         // bumped on UI-mode entry
     static std::atomic<bool> s_imeAttached{ false };
     static std::atomic<bool> s_imeComposing{ false };
     // Between IMN_OPENCANDIDATE and IMN_CLOSECANDIDATE (window thread): the list is read only while it is open, and a
@@ -553,6 +564,7 @@ namespace Magelight {
                 else
                     s_pageThreadMode.store(PageThread::Mode::Wanted);
             }
+            if (auto it = j.find("keyFallback"); it != j.end() && it->is_boolean()) s_keyFallback = it->get<bool>();
             if (auto it = j.find("logLevel"); it != j.end() && it->is_string()) {
                 const std::string l = HotkeyNames::Lower(it->get<std::string>());
                 const auto lvl = l == "trace" ? spdlog::level::trace : l == "debug" ? spdlog::level::debug
@@ -2828,6 +2840,25 @@ namespace Magelight {
     // synthesises at the driver level (OpenComposite's virtual keyboard sends scancodes beside its own paths).
     // Game thread (the input sink).
     enum class KeyPhase { Down, Repeat, Up };
+    // The text a key makes, if any. Printable? Ask the active layout, with the live modifier state. It keeps the key's
+    // lParam, as the window's WM_CHAR does, so its keypress carries the key's code. Returns the characters made.
+    static int QueueKeyText(UINT vk, std::uint32_t make, LPARAM down)
+    {
+        BYTE ks[256]{};
+        if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
+        if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
+        if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
+        if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
+        wchar_t buf[8]{};
+        const int n = ToUnicode(vk, make, ks, buf, 7, 0);
+        for (int i = 0; i < n && i < 7; ++i) {
+            const wchar_t ch = buf[i];
+            if (ch >= 0x20 || ch == L'\t' || ch == L'\r')
+                QueueInput(WM_CHAR, static_cast<WPARAM>(ch), down);
+        }
+        return n;
+    }
+
     static void QueueScancodeAsText(std::uint32_t scan, KeyPhase phase)
     {
         const Input::ScancodeKey key = Input::FromScancode(scan, (MlGetKeyState(VK_NUMLOCK) & 1) != 0);
@@ -2837,23 +2868,10 @@ namespace Magelight {
             QueueInput(WM_KEYUP, vk, key.lparam | 1 | (1 << 30) | (1 << 31));
             return;
         }
-        // Repeat count 1 in both; a repeat sets bit 30 (the key was already down). The text keeps the key's lParam,
-        // as the window's WM_CHAR does, so its keypress carries the key's code.
+        // Repeat count 1 in both; a repeat sets bit 30 (the key was already down).
         const LPARAM down = key.lparam | 1 | (phase == KeyPhase::Repeat ? (1 << 30) : 0);
         QueueInput(WM_KEYDOWN, vk, down);
-        // Printable? Ask the active layout, with the live modifier state.
-        BYTE ks[256]{};
-        if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
-        if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
-        if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
-        if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
-        wchar_t buf[8]{};
-        const int n = ToUnicode(vk, key.make, ks, buf, 7, 0);
-        for (int i = 0; i < n && i < 7; ++i) {
-            const wchar_t ch = buf[i];
-            if (ch >= 0x20 || ch == L'\t' || ch == L'\r')
-                QueueInput(WM_CHAR, static_cast<WPARAM>(ch), down);
-        }
+        const int n = QueueKeyText(vk, key.make, down);
         static std::atomic<int> s_typeLog{ 0 };
         if (phase == KeyPhase::Down && s_typeLog.fetch_add(1) < 12)
             SKSE::log::info("Magelight: VR typing — scancode 0x{:02X} -> vk 0x{:02X}, {} char(s)", scan, vk, n);
@@ -3555,7 +3573,7 @@ namespace Magelight {
         SKSE::log::info("Magelight: SetUIMode({}{}) begin - {}", on, (on && pauseGame) ? ", paused" : "",
                         s_uiModeLabel);
         s_focused.store(on);
-        if (on) s_escLogSession.store(20);
+        if (on) { s_escLogSession.store(20); s_keySession.fetch_add(1); }
         s_focusMenuHideSeen.store(false);   // a hide from an earlier session is no news about this one
         if (on) s_uiModeEnteredMs.store(GetTickCount64());
         if (!on && s_hwnd) { s_imeCaretX.store(-1); PostMessageW(s_hwnd, kImeCtlMsg, 0, 0); }   // IME follows UI mode off
@@ -4013,7 +4031,7 @@ namespace Magelight {
                                                   : "IME committed on this key -> to the page, and UI mode closes")
                           : captured ? "to the page (it captured Escape)" : "to the page, and UI mode closes");
             }
-            QueueInput(msg, wparam, lparam, CaptureKeyBits(true));
+            QueueInput(msg, wparam, lparam, CaptureKeyBits(!s_handlingPassedKey));
             // Editing-key trace (Backspace/Delete): a field report of
             // "Backspace does nothing in text fields" needs to know whether
             // the key reaches the window at all (rate-limited).
@@ -4154,9 +4172,35 @@ namespace Magelight {
         return false;
     }
 
+    // Lost keys: the window has no key messages, so try what an alt-tab does. Window thread.
+    static void RestoreKeyFocus()
+    {
+        const HWND before = GetFocus();
+        if (before == s_hwnd || GetForegroundWindow() != s_hwnd) return;
+        SetFocus(s_hwnd);
+        SKSE::log::info("Magelight: keyboard focus was {:#x}, given to the game's window: {}",
+                        reinterpret_cast<std::uintptr_t>(before), GetFocus() == s_hwnd ? "took" : "refused");
+    }
+
+    // A key from the poll, through the path a window key takes, so Escape and bound hotkeys decide as usual. Window thread.
+    static void HandlePassedKey(WPARAM vk, LPARAM lparam)
+    {
+        const bool down = !((lparam >> 31) & 1);
+        s_handlingPassedKey = true;
+        GuardedHandleFocusedMsg(down ? WM_KEYDOWN : WM_KEYUP, vk, lparam);
+        s_handlingPassedKey = false;
+        if (down) QueueKeyText(static_cast<UINT>(vk), static_cast<std::uint32_t>((lparam >> 16) & 0x7F), lparam);
+    }
+
     static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     {
         GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
+        if (msg == kKeyFocusMsg) { RestoreKeyFocus(); return 0; }
+        if (msg == kPassedKeyMsg) {
+            if (s_focused.load() && !s_renderDead.load()) HandlePassedKey(wparam, lparam);
+            return 0;
+        }
+        if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && !(lparam & (1 << 30))) s_windowKeyPresses.fetch_add(1);
         if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) s_imeWindowFocused = msg == WM_SETFOCUS;
         // A game that stops presenting in the background would otherwise leave the clip on the desktop.
         if (msg == WM_KILLFOCUS || (msg == WM_ACTIVATEAPP && !wparam) || msg == WM_DESTROY)
@@ -10832,6 +10876,63 @@ float4 ps_straight(VSOut i) : SV_Target {
     namespace {
         using KeyboardPollFn = void(*)(RE::BSWin32KeyboardDevice*, float);
         KeyboardPollFn s_origKeyboardPoll = nullptr;
+        Input::LostKeys s_lostKeys;        // the poll's thread
+        std::uint32_t   s_lostKeysSession = 0;
+
+        std::string KeyWindowForLog(HWND h)
+        {
+            if (!h) return "none";
+            char cls[64]{};
+            GetClassNameA(h, cls, sizeof(cls));
+            DWORD pid = 0;
+            GetWindowThreadProcessId(h, &pid);
+            return std::format("{:#x} {}{}", reinterpret_cast<std::uintptr_t>(h), cls,
+                               h == s_hwnd ? " (the game's)" : pid == GetCurrentProcessId() ? "" : " (another process)");
+        }
+
+        // Where Windows sends keys right now. Any thread.
+        void LogKeyFocus(const char* when)
+        {
+            static std::atomic<int> s_left{ 40 };
+            if (s_left.fetch_sub(1) <= 0) return;
+            GUITHREADINFO g{};
+            g.cbSize = sizeof(g);
+            const DWORD thread = s_hwnd ? GetWindowThreadProcessId(s_hwnd, nullptr) : 0;
+            const bool read = thread && GetGUIThreadInfo(thread, &g);
+            SKSE::log::info("Magelight: keyboard {}: foreground {}; window thread's focus {}, active {}, capture {}{}",
+                            when, KeyWindowForLog(GetForegroundWindow()), KeyWindowForLog(g.hwndFocus),
+                            KeyWindowForLog(g.hwndActive), KeyWindowForLog(g.hwndCapture),
+                            read ? "" : " (thread state not readable)");
+        }
+
+        // Forward for Input::LostKeys.
+        bool PassLostKey(std::uint8_t scan, bool down)
+        {
+            if (!s_hwnd || GetForegroundWindow() != s_hwnd) return false;
+            const Input::ScancodeKey key = Input::FromScancode(scan, (MlGetKeyState(VK_NUMLOCK) & 1) != 0);
+            if (!key.vk) return false;
+            const LPARAM l = key.lparam | 1 | (down ? 0 : (static_cast<LPARAM>(3) << 30));
+            if (!PostMessageW(s_hwnd, kPassedKeyMsg, key.vk, l)) return false;
+            if (down && s_lostKeys.Passed() == 0) {
+                LogKeyFocus("key lost");
+                PostMessageW(s_hwnd, kKeyFocusMsg, 0, 0);
+            }
+            static std::atomic<int> s_left{ 30 };
+            if (down && s_left.fetch_sub(1) > 0)
+                SKSE::log::info("Magelight: key scan 0x{:02X} reached DirectInput but not the window - passed on", scan);
+            return true;
+        }
+
+        // A change in what the device answers while muted: DIERR_NOTACQUIRED after an alt-tab, say.
+        void LogKeyDeviceRead(std::int32_t hr)
+        {
+            static std::int32_t s_last = 1;
+            static int s_left = 24;
+            if (hr == s_last) return;
+            s_last = hr;
+            if (s_left-- > 0)
+                SKSE::log::info("Magelight: keyboard device read answers {:#x}", static_cast<std::uint32_t>(hr));
+        }
 
         void Hook_KeyboardPoll(RE::BSWin32KeyboardDevice* self, float dt)
         {
@@ -10856,19 +10957,39 @@ float4 ps_straight(VSOut i) : SV_Target {
                 // generated for a key typed into a page. Both arrays carry
                 // static offset asserts in CommonLib. (0.27.0)
                 if (self) {
+                    const std::uint64_t now = GetTickCount64();
+                    // A key in the session's first read may already have been through the window, before Begin.
+                    const auto session = s_keySession.load();
+                    const bool firstRead = session != s_lostKeysSession;
+                    if (firstRead) {
+                        s_lostKeysSession = session;
+                        s_lostKeys.Begin(s_windowKeyPresses.load());
+                        LogKeyFocus("at UI mode entry");
+                    }
                     auto& rd = self->GetRuntimeData();
                     if (auto* dev = reinterpret_cast<REX::W32::IDirectInputDevice8A*>(rd.dInputDevice)) {
                         REX::W32::DIDEVICEOBJECTDATA buf[32];
                         for (int guard = 0; guard < 16; ++guard) {
                             std::uint32_t n = 32;
                             const auto hr = dev->GetDeviceData(sizeof(REX::W32::DIDEVICEOBJECTDATA), buf, &n, 0);
+                            LogKeyDeviceRead(static_cast<std::int32_t>(hr));
                             if (hr < 0 || n == 0) break;   // not acquired / input lost: nothing to drain
                             for (std::uint32_t i = 0; i < n; ++i) {
                                 const std::uint32_t k = buf[i].ofs;
-                                if (k < 0x100) rd.curState[k] = rd.prevState[k] = (buf[i].data & 0x80) ? 0x80 : 0;
+                                if (k >= 0x100) continue;
+                                const bool down = (buf[i].data & 0x80) != 0;
+                                rd.curState[k] = rd.prevState[k] = down ? 0x80 : 0;
+                                if (!firstRead) s_lostKeys.Note(static_cast<std::uint8_t>(k), down, now);
                             }
                             if (n < 32) break;
                         }
+                    }
+                    if (s_keyFallback) {
+                        const bool heard = s_lostKeys.WindowHeard();
+                        s_lostKeys.Poll(s_windowKeyPresses.load(), now, PassLostKey);
+                        if (!heard && s_lostKeys.WindowHeard() && s_lostKeys.Passed() > 0)
+                            SKSE::log::info("Magelight: the window hears keys again, after {} passed on",
+                                            s_lostKeys.Passed());
                     }
                 }
                 return;
