@@ -1109,7 +1109,6 @@ namespace Magelight::Api4 {
         if (n == "cursortint") return 1;    // SetViewCursorTint (0.31.1)
         if (n == "rebuildscale") return 1;  // RebuildViewAtScale (0.31.7)
         if (n == "keyboardtheme") return 1; // SetViewKeyboardTheme / magelight.hostTheme (0.31.9)
-        if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
         if (n == "prepaint") return 1;      // SetViewPrepaint / __prepaint / manifest "prepaint" (0.31.11)
         if (n == "uimodecancel") return 1;  // CancelUIModeRequest / kUIModeFlagReclaim (1.1.0)
         if (n == "hostthemereply") return 1; // hostTheme per-part refusal and its "reply" (1.1.0)
@@ -1122,6 +1121,7 @@ namespace Magelight::Api4 {
         if (n == "gamepad") return Magelight::GamepadAvailable() ? 1 : 0;   // SetViewGamepad / manifest "gamepad" / magelight.gamepad (1.6.0); flat only
         if (n == "pagethread") return Magelight::PageThreadActive() ? 1 : 0;   // render-thread callbacks run on the page thread (1.7.0); flat only
         if (n == "vrgaze") return 1;        // VRPlacementDesc::flags kVRPlacementAtGaze / manifest vr.atGaze (1.6.1)
+        if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1210,8 +1210,9 @@ namespace Magelight::Api4 {
         bool EngineBlocksHotkey(ViewId view)
         {
             if (auto* ui = RE::UI::GetSingleton()) {
-                // The main menu pauses the game, and a main-menu page opens over it.
-                if (ui->GameIsPaused() && !Magelight::ViewOpensAtMainMenu(view)) return true;
+                // The main menu pauses the game and a main-menu page opens over it, but over nothing else: a second
+                // pause is another menu on top of it, or the load.
+                if (ui->GameIsPaused() && !(Magelight::ViewOpensAtMainMenu(view) && ui->numPausesGame <= 1)) return true;
                 if (ui->IsMenuOpen(RE::Console::MENU_NAME)) return true;
             }
             if (auto* cm = RE::ControlMap::GetSingleton()) {

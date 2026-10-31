@@ -568,13 +568,6 @@ after a reload or resize), so the first show composites a finished texture.
 One view is painted per frame, never on a frame already over the load budget.
 
 ```cpp
-// 1.7.1: asking for UI mode at the main menu opens a page there, so guard the ask if your page needs a world. This
-// call goes further: the page loads at the main menu and a hotkey opens it there; a manifest view sets "mainMenu": true.
-// Neither works on VR or with "pageThread": false. There is no world at the main menu: no player, no cell, and a page
-// shown without UI mode is yours to hide when the menu closes (UI mode closes by itself when a load starts).
-if (v4()->hostVersionNumber >= 10701 && v4()->QueryCapability("mainMenu") == 1)
-    v4()->SetViewMainMenu(mainView, true);
-
 if (v4()->hostVersionNumber >= 3111 && v4()->QueryCapability("prepaint") == 1)
     v4()->SetViewPrepaint(mainView, true);   // any time; the paint waits for the page
 ```
@@ -633,6 +626,30 @@ if (v4()->hostVersionNumber >= 3111 && v4()->QueryCapability("prepaint") == 1)
   mean the player opened the page (do not mark notifications read or send an
   "opened" from there); read the state in a `visibilitychange` handler, or
   outside those callbacks, rather than counting events ("Hidden pages").
+
+## Pages at the main menu (1.7.1)
+
+Asking for UI mode at the main menu opens your page there, on flat with the page thread. The view becomes a main-menu
+page for the session and Ultralight starts if it has not. **So guard the ask if your page needs a world:** there is no
+player or cell yet, and a mod that sends its key there unguarded opens with nothing behind it.
+
+To go further, make the view a main-menu page ahead of time. Its page then loads at the main menu and a hotkey opens it
+there, as long as no other menu is up. A manifest view sets `"mainMenu": true`.
+
+```cpp
+if (v4()->hostVersionNumber >= 10701 && v4()->QueryCapability("mainMenu") == 1)
+    v4()->SetViewMainMenu(mainView, true);
+```
+
+- A request in the first seconds of the main menu, before the game's main thread presents it, is refused with
+  `UIModeRefused`. Asking again works.
+- On VR and with `"pageThread": false` the capability is 0: a request needs a renderer, as before, and the call does
+  nothing.
+- If the page thread cannot start, UI mode ends again (`UIModeExited`) and pages start with the game.
+- UI mode closes when a load starts. A page shown without UI mode is yours to hide when the main menu closes.
+- A world freeze is ignored at the main menu.
+- With the page thread, any view that is not a main-menu page waits for the first in-game frame and is not drawn over
+  the main menu, a return to it included.
 
 ## Hidden pages (1.5.0)
 

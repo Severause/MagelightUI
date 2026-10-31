@@ -178,16 +178,14 @@ namespace Magelight {
     static std::atomic<PageThread::Mode> s_pageThreadMode{ PageThread::Mode::Off };
     static bool PageThreadOn() { return s_pageThreadMode.load() == PageThread::Mode::On; }
     // Main-menu pages (1.7.1, page thread only). A view is one once a mod asks for UI mode on it at the main menu, or
-    // calls SetViewMainMenu; that also starts Ultralight there. The first frames of the main menu come from the engine's
-    // own thread, the rest from the game's main thread, so both run page work (PageThread::PresentRuns), draw at Present
-    // and touch no menu there: engine UI state stays with the game thread. MenuSink keeps s_mainMenuOpen; s_viewsReleased
-    // turns on at the first in-game frame, when the other views load, as they did with Ultralight starting there.
+    // calls SetViewMainMenu; that also starts Ultralight there. All of it runs on the main thread's Presents, which take
+    // over from the engine's own thread after the Main Menu opens; s_mainPresenting says they have. The carrier menu
+    // stays closed there, so frames draw at Present, or in the UI pass in engine mode. MenuSink keeps s_mainMenuOpen;
+    // s_viewsReleased turns on at the first in-game frame, when the other views load.
     static std::atomic<bool> s_mainMenuOpen{ false };
-    static std::atomic<bool> s_anyMainMenuPage{ false };
+    static std::atomic<bool> s_anyMainMenuPage{ false };   // written under s_viewsMutex
     static std::atomic<bool> s_viewsReleased{ false };
-    // Set by the frame that holds the Present-side statics. The present thread changes during a load, and the two must
-    // not meet in ThreadModeFrame.
-    static std::atomic_flag s_presentBusy = ATOMIC_FLAG_INIT;
+    static std::atomic<bool> s_mainPresenting{ false };
     // Cursor art: the flat cursor is drawn in code (MagelightCursorArt.h) and follows the page's CSS cursor.
     // "cursorFile" (relative to the runtime dir, or absolute; default none) replaces it with a still image,
     // "cursorHeight" is the drawn height in px at 1080p (scaled with resolution) and "cursorHotspotX/Y"
@@ -1140,7 +1138,15 @@ namespace Magelight {
 
     static bool ViewShows(const MlView& v)
     {
-        return PageThread::ViewShowsNow(v.mainMenu, s_mainMenuOpen.load(), s_viewsReleased.load());
+        return PageThread::ViewShowsNow(s_pageThreadMode.load() == PageThread::Mode::Off, v.mainMenu,
+                                        s_mainMenuOpen.load(), s_viewsReleased.load());
+    }
+
+    static void NoteMainMenuPagesLocked()
+    {
+        bool any = false;
+        for (const auto& v : s_views) any = any || (v->mainMenu && !v->destroyPending);
+        s_anyMainMenuPage.store(any);
     }
 
     // True when any view wants pixels this frame.
@@ -2605,7 +2611,7 @@ namespace Magelight {
     static void SyncOverlayMenu(bool wanted)
     {
         if (!s_overlayMenuRegistered) return;
-        if (s_mainMenuOpen.load()) wanted = false;   // main-menu pages draw at Present
+        if (s_mainMenuOpen.load()) wanted = false;   // main-menu pages take no carrier
         if (wanted && s_renderDead.load()) return;   // FrameWork stops at render death: nothing would close it again
         auto* ui = RE::UI::GetSingleton();
         auto* q = RE::UIMessageQueue::GetSingleton();
@@ -3596,9 +3602,11 @@ namespace Magelight {
         if (s_focused.load() == on) return;
         const ViewId uiView = static_cast<ViewId>(s_uiModeView.load());
         // A mod asking at the main menu makes the view a main-menu page, and the next frame starts the renderer if it
-        // is not up: it comes up in a frame or two, so the entry goes on rather than being refused.
-        const bool mainMenuAsk = on && s_mainMenuOpen.load() && s_pageThreadMode.load() != PageThread::Mode::Off &&
-                                 !s_renderDead.load();
+        // is not up: it comes up in a frame or two, so the entry goes on rather than being refused. If it cannot come
+        // up, FrameWork ends UI mode.
+        const bool mainMenuAsk = on && PageThread::MainMenuAskOpens(
+            s_runtimeReady.load() && s_hookInstalled.load() && MainMenuPagesAvailable(), s_mainMenuOpen.load(),
+            s_mainPresenting.load(), s_renderDead.load());
         if (mainMenuAsk) SetViewMainMenu(uiView, true);
         if (on && !s_rendererUp.load() && !mainMenuAsk) {
             // No renderer = nothing to show: entering UI mode here would only
@@ -3615,9 +3623,9 @@ namespace Magelight {
                 if (const MlView* v = FindViewLocked(uiView)) shows = ViewShows(*v);
             }
             if (!shows) {
-                SKSE::log::info("Magelight: UI mode refused - view {} does not show here (no page thread at the main "
-                                "menu, or the game is still loading)", uiView);
-                Emit(HostEvent::UIModeRefused, uiView, 0, 0, "renderer not ready");
+                SKSE::log::info("Magelight: UI mode refused - view {} does not show here (the main menu has not reached "
+                                "the main thread, or the game is still loading)", uiView);
+                Emit(HostEvent::UIModeRefused, uiView, 0, 0, "view does not show here");
                 return;
             }
         }
@@ -5863,7 +5871,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         bool inside = false;
         for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
             const MlView& v = **it;
-            if (!v.ul || !v.visible || v.clickThrough) continue;
+            if (!v.ul || !v.visible || v.clickThrough || !ViewShows(v)) continue;
             float ex = 0, ey = 0;
             EffectivePos(v, bw, bh, ex, ey);
             if (x >= ex && y >= ey && x < ex + v.w && y < ey + v.h) { view = &v; inside = true; break; }
@@ -7091,7 +7099,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
                 const MlView& v = **it;
-                if (!v.ul || !v.visible || v.clickThrough) continue;
+                if (!v.ul || !v.visible || v.clickThrough || !ViewShows(v)) continue;
                 float ex = 0, ey = 0;
                 EffectivePos(v, bw, bh, ex, ey);
                 if (mx >= ex && my >= ey && mx < ex + v.w && my < ey + v.h) {
@@ -8485,10 +8493,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         static int offFrames = -1;   // frames since the last exit; -1 = no exit sample pending
         ConfineCursor(s_focused.load());
         if (s_focused.load()) {
-            if (s_focusMenuHideSeen.load()) {
-                if (GetCurrentThreadId() == s_mainThreadId) CheckFocusMenuClosed();
-                else GameTask::Post([]() { CheckFocusMenuClosed(); });
-            }
+            if (s_focusMenuHideSeen.load()) CheckFocusMenuClosed();
             s_memAfterUiMs.store(0);   // back in UI mode: the after-UI memory line waits for this exit
             ++uiFrames;
             offFrames = -1;
@@ -8705,7 +8710,8 @@ float4 ps_straight(VSOut i) : SV_Target {
     };
     static CompositeTarget ChooseCompositeTarget(bool interactiveVisible)
     {
-        if (s_mainMenuOpen.load() || GetCurrentThreadId() != s_mainThreadId) {   // see s_mainMenuOpen
+        // Main-menu pages draw at Present, but for engine mode, where Present is not ours to draw into.
+        if (s_mainMenuOpen.load() && !s_engineComposite.load()) {
             s_compositeFrames.fetch_add(1);
             return {};
         }
@@ -8826,10 +8832,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         // SECONDS of stable frames, so a stability streak passes on the wrong
         // thread too (0.3.7). Thread identity is the deterministic signal.
         // Taken: this frame already passed the page fiber by, so the next one starts Ultralight, as after a refusal.
-        if (TakePageInitFailure()) return;
         const bool onMain = tid == s_mainThreadId;
-        const bool runs = PageThread::PresentRuns(onMain, s_pageThreadMode.load() == PageThread::Mode::Off,
-                                                  s_anyMainMenuPage.load(), s_mainMenuOpen.load());
+        s_mainPresenting.store(onMain);
+        if (onMain && TakePageInitFailure()) return;
         // World-ready FALLBACK (0.17.9): SKSEVR never delivered kNewGame for
         // an Alternate Perspective new game (field 2026-09-03: SKSE dispatched
         // 4 and 5 only; no 3, no 7), so the renderer never started and every
@@ -8852,21 +8857,31 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         if (onMain && s_worldReady.load()) s_viewsReleased.store(true);
         if (!s_renderInit) {
-            // A main-menu page starts Ultralight at the main menu, on whichever thread is presenting it.
-            const bool early = s_anyMainMenuPage.load() && s_mainMenuOpen.load() &&
-                               s_pageThreadMode.load() == PageThread::Mode::Wanted;
-            if (!early && (!s_worldReady.load() || !onMain)) return;
+            if (!onMain) return;
+            if (!s_worldReady.load() &&
+                !PageThread::StartsAtMainMenu(s_pageThreadMode.load() == PageThread::Mode::Wanted,
+                                              s_anyMainMenuPage.load(), s_mainMenuOpen.load())) {
+                // The page thread was refused after a main-menu page asked: no page runs until the world does, so the
+                // UI mode entered for it would hold the controls over nothing.
+                if (s_focused.load() && s_mainMenuOpen.load()) {
+                    static std::atomic<bool> s_exitPosted{ false };
+                    if (!s_exitPosted.exchange(true)) {
+                        SKSE::log::warn("Magelight: UI mode ended - no page can run at the main menu");
+                        GameTask::Post([]() { ForceExitUIMode(); s_exitPosted.store(false); });
+                    }
+                }
+                return;
+            }
             EnsureRenderInit(sc);
-            // The page thread was refused (StartPageThread said why): the next frame starts Ultralight here, on the
-            // page fiber, as without pageThread.
+            // The page thread was refused (StartPageThread said why): the next frame the gate lets through starts
+            // Ultralight here, on the page fiber, as without pageThread.
             if (!s_renderInit) return;
         }
         if (s_renderDead.load()) return;
-        if (!runs) {
+        if (!onMain) {
             // A frame from a foreign thread (loading screens etc.): touching
             // Ultralight here is the fastfail. Skip the whole frame. (The main
-            // thread is the one that composites, with or without the page thread,
-            // but for main-menu pages, which run no page work on this thread either.)
+            // thread is the one that composites, with or without the page thread.)
             static bool warned = false;
             if (!warned) {
                 warned = true;
@@ -9476,8 +9491,6 @@ float4 ps_straight(VSOut i) : SV_Target {
     // simply nothing new to draw.
     static void ThreadModeFrame(IDXGISwapChain* sc, float bw, float bh)
     {
-        if (s_presentBusy.test_and_set(std::memory_order_acquire)) return;   // the other present thread is in here
-        struct Busy { ~Busy() { s_presentBusy.clear(std::memory_order_release); } } busy;
         using ClockT = std::chrono::steady_clock;
         const auto t0 = ClockT::now();
         GameBookkeeping();
@@ -11387,12 +11400,15 @@ float4 ps_straight(VSOut i) : SV_Target {
                 Emit(HostEvent::UIModeRefused, view, 0, 0, "switch: UI mode is not active");
                 return;
             }
+            // As a request at the main menu: the view it moves to becomes a main-menu page.
+            if (s_mainMenuOpen.load() && MainMenuPagesAvailable()) SetViewMainMenu(view, true);
             const char* refusal = nullptr;
             {
                 std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 MlView* v = FindViewLocked(view);
                 if (!v || v->destroyPending) refusal = "switch: no such view";
                 else if (v->clickThrough) refusal = "switch: click-through views cannot take UI mode";
+                else if (!ViewShows(*v)) refusal = "switch: view does not show here";
             }
             if (refusal) {
                 SKSE::log::warn("Magelight: SwitchUIModeView({}) — {}", view, refusal);
@@ -11662,6 +11678,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!v || v->destroyPending) return false;
         v->visible = false;
         v->destroyPending = true;
+        NoteMainMenuPagesLocked();
         v->kbTheme.reset();
         if (s_toggleView.load() == view) s_toggleView.store(0);
         if (s_uiModeView.load() == view) s_uiModeView.store(0);
@@ -11751,15 +11768,13 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
     bool SetViewMainMenu(ViewId view, bool on)
     {
-        bool any = false;
         {
             std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v || v->destroyPending || v->isInspector) return false;
             v->mainMenu = on;
-            for (const auto& o : s_views) any = any || o->mainMenu;
+            NoteMainMenuPagesLocked();
         }
-        s_anyMainMenuPage.store(any);
         SKSE::log::info("Magelight: view {} main-menu page {}{}", view, on ? "on" : "off",
                         MainMenuPagesAvailable() ? "" : " (needs the page thread: it stays off this session)");
         return true;
