@@ -95,7 +95,8 @@ namespace Magelight {
     //   "msaa": 4             // GPU path: MSAA samples for page targets Ultralight antialiases (1 = off, 2, 4, 8)
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
-    //   "pageThread": false   // 1.7.0: pages run on a thread of their own, not in the game's frame (flat only)
+    //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
+    //   "keyFallback": true   // 1.7.0: keys that reach DirectInput but not the window go to the page anyway (flat only)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
     //            "suppressRuntimeLaser": true, "aimUseTip": true, "aimPitchDeg": -35,
@@ -166,9 +167,13 @@ namespace Magelight {
     // maxPerThreadStackUsage is 5 MB) fall to the fiber's end, so its error path commits into the 64 KB guarantee
     // UlFiberMain sets and a page's first uncaught error is 0xC00000FD. tools/fiber-gc-test checks 8 MB.
     static constexpr int kMinFiberMb = 8;
-    // Magelight.json "pageThread" (1.7.0): Ultralight on a thread of its own (PageThreadMain), the game thread only
-    // running its recorded GPU work and drawing its views. Wanted until render init asks the device
-    // (StartPageThread), then On or Off for the session. Its stack is ulFiberMB (8 when that is 0).
+    // Magelight.json "keyFallback" (1.7.0): see LostKeys in the keyboard poll.
+    static bool s_keyFallback = true;
+    // Magelight.json "pageThread" (1.7.0, default on, flat only): Ultralight on a thread of its own (PageThreadMain),
+    // the game thread only running its recorded GPU work and drawing its views. LoadHostSettings makes it Wanted; render
+    // init asks the device (StartPageThread), then it is On or Off for the session. Its stack is ulFiberMB (8 when that
+    // is 0). The in-frame path has a bug the thread avoids: pages behind a frame-generation swapchain paint rounded,
+    // hover-only rows black.
     static std::atomic<PageThread::Mode> s_pageThreadMode{ PageThread::Mode::Off };
     static bool PageThreadOn() { return s_pageThreadMode.load() == PageThread::Mode::On; }
     // Cursor art: the flat cursor is drawn in code (MagelightCursorArt.h) and follows the page's CSS cursor.
@@ -398,6 +403,9 @@ namespace Magelight {
     static std::atomic<bool> s_mouseDown{ false };
     // Backbuffer size: the game thread writes it at Present; the input sink's cursor clamp and the page work read it.
     static std::atomic<int> s_backbufferW{ 0 }, s_backbufferH{ 0 };
+    // The same size as one value (width high, height low), for the page thread: two loads of the pair above can
+    // straddle a resize and read a size that never existed.
+    static std::atomic<std::uint64_t> s_backbufferWH{ 0 };
 
     // ── IME (0.27.0): native composition for CJK input ──────────────────
     // The window's IME context is ATTACHED only while a field in the UI-mode
@@ -412,6 +420,17 @@ namespace Magelight {
     // of it. VR is exempt: the VR keyboards own text there.
     // wparam: 1 attach, 0 detach, 2 reposition the candidates, 3 cancel the IME's copy of a composition the page kept.
     static constexpr UINT kImeCtlMsg = WM_APP + 0x4F46;
+    // Lost keys (Input::LostKeys): the message that gives the game window keyboard focus back, and the one that carries
+    // a key the poll passed on (wparam vk, lparam as WM_KEYDOWN / WM_KEYUP have it). A message of our own, not a posted
+    // WM_KEYDOWN: TranslateMessage would make its text from the thread's key state, which is stale here.
+    static constexpr UINT kKeyFocusMsg = WM_APP + 0x4F4A;
+    static constexpr UINT kPassedKeyMsg = WM_APP + 0x4F4B;
+    static bool s_handlingPassedKey = false;   // window thread
+    // The modifiers and lock keys a passed key is read with (Input::NotePassedKey): the live state has moved on by the
+    // time it goes out, and the thread's key state is stale here. The window thread writes it; the poll reads NumLock.
+    static std::atomic<std::uint16_t> s_passedBits{ 0 };
+    static std::atomic<std::uint64_t> s_windowKeyPresses{ 0 };   // first presses through the window proc
+    static std::atomic<std::uint32_t> s_keySession{ 0 };         // bumped on UI-mode entry
     static std::atomic<bool> s_imeAttached{ false };
     static std::atomic<bool> s_imeComposing{ false };
     // Between IMN_OPENCANDIDATE and IMN_CLOSECANDIDATE (window thread): the list is read only while it is open, and a
@@ -464,6 +483,8 @@ namespace Magelight {
     // top of the file for the schema). Missing/corrupt file = defaults.
     static void LoadHostSettings()
     {
+        // Before the file: the default holds with no file, and with a corrupt one.
+        if (!REL::Module::IsVR()) s_pageThreadMode.store(PageThread::Mode::Wanted);
         try {
             // User config lives in the SKSE user-data dir (My Games/.../SKSE/
             // Magelight.json — beside the log and the cache, independent of
@@ -544,12 +565,15 @@ namespace Magelight {
                     SKSE::log::warn("Magelight: ulFiberMB {} is outside {}..64 - using {}", asked, kMinFiberMb,
                                     s_ulFiberMb);
             }
-            if (auto it = j.find("pageThread"); it != j.end() && it->is_boolean() && it->get<bool>()) {
-                if (REL::Module::IsVR())
+            if (auto it = j.find("pageThread"); it != j.end() && it->is_boolean()) {
+                if (!it->get<bool>()) {
+                    s_pageThreadMode.store(PageThread::Mode::Off);
+                    SKSE::log::info("Magelight: pageThread false - pages run in the game's frame");
+                } else if (REL::Module::IsVR()) {
                     SKSE::log::info("Magelight: pageThread is ignored on Skyrim VR - pages run in the game's frame");
-                else
-                    s_pageThreadMode.store(PageThread::Mode::Wanted);
+                }
             }
+            if (auto it = j.find("keyFallback"); it != j.end() && it->is_boolean()) s_keyFallback = it->get<bool>();
             if (auto it = j.find("logLevel"); it != j.end() && it->is_string()) {
                 const std::string l = HotkeyNames::Lower(it->get<std::string>());
                 const auto lvl = l == "trace" ? spdlog::level::trace : l == "debug" ? spdlog::level::debug
@@ -1875,6 +1899,25 @@ namespace Magelight {
     // fragment added or changed, or a navigation stopped below), and no DOM ready follows.
     static std::uint64_t s_mainLoadsBegun = 0;
 
+    // A page's settle, under s_viewsMutex: marks a hidden prepaint view for its settle repaint and logs it.
+    static void ApplyPageSettledLocked(ultralight::View* caller)
+    {
+        static std::atomic<int> s_logged{ 0 };
+        MlView* v = FindViewByUlLocked(caller);
+        if (!v) return;
+        const bool repaint = !VR::IsLive() && v->prepaint && v->prepainted && !v->visible && !v->settleRepainted;
+        v->settleRepaint = repaint;
+        if (s_logged.fetch_add(1) < 64)
+            SKSE::log::info("Magelight: view {} page settled{}", v->id,
+                            repaint ? " - its prepaint is painted once more while hidden" : "");
+    }
+    // Settles that found the registry busy, applied by the next PageWorkBegin. Ultralight's thread only (the settle
+    // fires in its Update and PageWorkBegin runs there too); no view is erased between the two, as ApplyPendingLifecycle
+    // runs after the apply.
+    static std::vector<ultralight::View*> s_pendingSettles;
+    // GameBookkeeping's page-cursor reset after UI mode, when the registry was busy: PageWorkBegin does it.
+    static std::atomic<bool> s_pageCursorResetPending{ false };
+
     class MlLoadListener final : public ultralight::LoadListener {
     public:
         // Ultralight fires OnBeginLoading SYNCHRONOUSLY inside LoadURL, which
@@ -2018,34 +2061,17 @@ namespace Magelight {
         // a resize does not reset it (tools/visibility-test section H). The repaint it asks for is latched until the
         // next DOM ready or kept host request (settleRepainted), and never asked in VR, where TakePrepaintView paints
         // nothing. It fires inside Renderer::Update, outside s_viewsMutex, but the header promises no call it runs
-        // in, so try_lock (as OnChangeCursor). A settle that finds the lock held (an API call on another thread)
-        // loses its repaint for the load, as the page settles once per navigation, and says so in the log (no view
-        // id: the registry cannot be read without the lock).
+        // in, so try_lock (as OnChangeCursor). A settle that finds the lock held (another thread's API call, or with
+        // pageThread the game thread's registry reads) waits for the next PageWorkBegin (s_pendingSettles): the page
+        // settles once per navigation, so a dropped one would lose its repaint for the load.
         void OnPageSettled(ultralight::View* caller, const ultralight::String&) override
         {
-            // Two budgets: the busy line is the only trace of a lost repaint, so the settle lines must not use it up.
-            static std::atomic<int> s_logged{ 0 };
-            static std::atomic<int> s_busyLogged{ 0 };
-            ViewId id = 0;
-            bool repaint = false;
-            const bool vr = VR::IsLive();
-            {
-                std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock);
-                if (!lk) {
-                    if (s_busyLogged.fetch_add(1) < 64)
-                        SKSE::log::info("Magelight: a page settled while the view registry was busy - no settle "
-                                        "repaint for it this load");
-                    return;
-                }
-                if (MlView* v = FindViewByUlLocked(caller)) {
-                    id = v->id;
-                    repaint = !vr && v->prepaint && v->prepainted && !v->visible && !v->settleRepainted;
-                    v->settleRepaint = repaint;
-                }
+            std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock);
+            if (!lk) {
+                s_pendingSettles.push_back(caller);
+                return;
             }
-            if (id && s_logged.fetch_add(1) < 64)
-                SKSE::log::info("Magelight: view {} page settled{}", id,
-                                repaint ? " - its prepaint is painted once more while hidden" : "");
+            ApplyPageSettledLocked(caller);
         }
     };
     static constinit NeverDestroyed<MlLoadListener> s_loadListener;
@@ -2823,6 +2849,31 @@ namespace Magelight {
     // synthesises at the driver level (OpenComposite's virtual keyboard sends scancodes beside its own paths).
     // Game thread (the input sink).
     enum class KeyPhase { Down, Repeat, Up };
+    // The text a key makes, if any. Printable? Ask the active layout, with the live modifier state, or `bits` when
+    // given. It keeps the key's lParam, as the window's WM_CHAR does, so its keypress carries the key's code. Returns
+    // the characters made.
+    static int QueueKeyText(UINT vk, std::uint32_t make, LPARAM down, const std::uint16_t* bits = nullptr)
+    {
+        BYTE ks[256]{};
+        if (bits) {
+            Input::ApplyKeyBits(ks, *bits);
+            if (*bits & Input::kKbRAlt) ks[VK_CONTROL] = ks[VK_LCONTROL] = 0x80;   // Windows types AltGr as Ctrl+Alt
+        } else {
+            if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
+            if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
+            if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
+            if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
+        }
+        wchar_t buf[8]{};
+        const int n = ToUnicode(vk, make, ks, buf, 7, 0);
+        for (int i = 0; i < n && i < 7; ++i) {
+            const wchar_t ch = buf[i];
+            if (ch >= 0x20 || ch == L'\t' || ch == L'\r')
+                QueueInput(WM_CHAR, static_cast<WPARAM>(ch), down);
+        }
+        return n;
+    }
+
     static void QueueScancodeAsText(std::uint32_t scan, KeyPhase phase)
     {
         const Input::ScancodeKey key = Input::FromScancode(scan, (MlGetKeyState(VK_NUMLOCK) & 1) != 0);
@@ -2832,23 +2883,10 @@ namespace Magelight {
             QueueInput(WM_KEYUP, vk, key.lparam | 1 | (1 << 30) | (1 << 31));
             return;
         }
-        // Repeat count 1 in both; a repeat sets bit 30 (the key was already down). The text keeps the key's lParam,
-        // as the window's WM_CHAR does, so its keypress carries the key's code.
+        // Repeat count 1 in both; a repeat sets bit 30 (the key was already down).
         const LPARAM down = key.lparam | 1 | (phase == KeyPhase::Repeat ? (1 << 30) : 0);
         QueueInput(WM_KEYDOWN, vk, down);
-        // Printable? Ask the active layout, with the live modifier state.
-        BYTE ks[256]{};
-        if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
-        if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
-        if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
-        if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
-        wchar_t buf[8]{};
-        const int n = ToUnicode(vk, key.make, ks, buf, 7, 0);
-        for (int i = 0; i < n && i < 7; ++i) {
-            const wchar_t ch = buf[i];
-            if (ch >= 0x20 || ch == L'\t' || ch == L'\r')
-                QueueInput(WM_CHAR, static_cast<WPARAM>(ch), down);
-        }
+        const int n = QueueKeyText(vk, key.make, down);
         static std::atomic<int> s_typeLog{ 0 };
         if (phase == KeyPhase::Down && s_typeLog.fetch_add(1) < 12)
             SKSE::log::info("Magelight: VR typing — scancode 0x{:02X} -> vk 0x{:02X}, {} char(s)", scan, vk, n);
@@ -3550,7 +3588,7 @@ namespace Magelight {
         SKSE::log::info("Magelight: SetUIMode({}{}) begin - {}", on, (on && pauseGame) ? ", paused" : "",
                         s_uiModeLabel);
         s_focused.store(on);
-        if (on) s_escLogSession.store(20);
+        if (on) { s_escLogSession.store(20); s_keySession.fetch_add(1); }
         s_focusMenuHideSeen.store(false);   // a hide from an earlier session is no news about this one
         if (on) s_uiModeEnteredMs.store(GetTickCount64());
         if (!on && s_hwnd) { s_imeCaretX.store(-1); PostMessageW(s_hwnd, kImeCtlMsg, 0, 0); }   // IME follows UI mode off
@@ -4008,7 +4046,7 @@ namespace Magelight {
                                                   : "IME committed on this key -> to the page, and UI mode closes")
                           : captured ? "to the page (it captured Escape)" : "to the page, and UI mode closes");
             }
-            QueueInput(msg, wparam, lparam, CaptureKeyBits(true));
+            QueueInput(msg, wparam, lparam, s_handlingPassedKey ? s_passedBits.load() : CaptureKeyBits(true));
             // Editing-key trace (Backspace/Delete): a field report of
             // "Backspace does nothing in text fields" needs to know whether
             // the key reaches the window at all (rate-limited).
@@ -4149,9 +4187,53 @@ namespace Magelight {
         return false;
     }
 
+    // Lost keys: the window has no key messages, so try what an alt-tab does. Window thread.
+    static void RestoreKeyFocus()
+    {
+        const HWND before = GetFocus();
+        if (before == s_hwnd || GetForegroundWindow() != s_hwnd) return;
+        SetFocus(s_hwnd);
+        SKSE::log::info("Magelight: keyboard focus was {:#x}, given to the game's window: {}",
+                        reinterpret_cast<std::uintptr_t>(before), GetFocus() == s_hwnd ? "took" : "refused");
+    }
+
+    // A key from the poll, through the path a window key takes, so Escape and bound hotkeys decide as usual. Window thread.
+    static void HandlePassedKey(WPARAM vk, LPARAM lparam)
+    {
+        const bool down = !((lparam >> 31) & 1);
+        static auto s_session = s_keySession.load() - 1;
+        const auto session = s_keySession.load();
+        const std::uint16_t was = session == s_session ? s_passedBits.load() : CaptureKeyBits(false);
+        s_session = session;
+        const std::uint16_t bits = Input::NotePassedKey(was, vk, lparam, down);
+        s_passedBits.store(bits);
+        if (vk == VK_MENU) return;   // only right Alt comes this far, for its state
+        s_handlingPassedKey = true;
+        GuardedHandleFocusedMsg(down ? WM_KEYDOWN : WM_KEYUP, vk, lparam);
+        s_handlingPassedKey = false;
+        if (down) QueueKeyText(static_cast<UINT>(vk), static_cast<std::uint32_t>((lparam >> 16) & 0x7F), lparam, &bits);
+    }
+
+    // Page thread. A key event reads this thread's keyboard layout, and Windows switches only the window thread's.
+    static void SyncPageKeyboardLayout()
+    {
+        static HKL s_last = nullptr;
+        if (!s_hwnd) return;
+        const HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(s_hwnd, nullptr));
+        if (!layout || layout == s_last) return;
+        s_last = layout;
+        ActivateKeyboardLayout(layout, 0);
+    }
+
     static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     {
         GameTask::Scope pumpScope;   // posts from here go through the pump (MagelightGameTask.h)
+        if (msg == kKeyFocusMsg) { RestoreKeyFocus(); return 0; }
+        if (msg == kPassedKeyMsg) {
+            if (s_focused.load() && !s_renderDead.load()) HandlePassedKey(wparam, lparam);
+            return 0;
+        }
+        if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && !(lparam & (1 << 30))) s_windowKeyPresses.fetch_add(1);
         if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) s_imeWindowFocused = msg == WM_SETFOCUS;
         // A game that stops presenting in the background would otherwise leave the clip on the desktop.
         if (msg == WM_KILLFOCUS || (msg == WM_ACTIVATEAPP && !wparam) || msg == WM_DESTROY)
@@ -7030,6 +7112,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // Every key event is made by Input::MakeKeyEvent (never the bare constructor: on VR it would lose every
         // modifier), with the state the key was queued with.
         auto keyEvent = [](ultralight::KeyEvent::Type type, WPARAM w, LPARAM l, bool sys, std::uint16_t keys) {
+            if (PageThreadOn()) SyncPageKeyboardLayout();
             bool applied = true;
             ultralight::KeyEvent evt = Input::MakeKeyEvent(type, w, l, sys, keys, &applied);
             static bool s_warned = false;
@@ -8035,7 +8118,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         InvalidateImage(s_probeImage);
     }
 
-    static bool StartPageThread();   // fwd (the page thread, below)
+    static bool StartPageThread();        // fwd (the page thread, below)
+    static bool TakePageInitFailure();    // fwd
 
     static void EnsureRenderInit(IDXGISwapChain* sc)
     {
@@ -8045,7 +8129,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool deviceReady = CreateDeviceResources(sc);
         if (deviceReady && s_pageThreadMode.load() == PageThread::Mode::Wanted) {
             // Started: the page thread makes the renderer itself and raises s_rendererUp. Refused: the mode is Off and
-            // the next frame starts Ultralight here, on the page fiber (FrameWork).
+            // the next frame starts Ultralight here, as without the setting (FrameWork: the fiber, or the game stack).
             if (!StartPageThread()) s_renderInit = false;
             return;
         }
@@ -8288,6 +8372,15 @@ float4 ps_straight(VSOut i) : SV_Target {
     // the input, edit-state, tooltip and bridge drains. Ultralight's thread.
     static void PageWorkBegin(float bw, float bh)
     {
+        if (!s_pendingSettles.empty()) {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            for (ultralight::View* caller : s_pendingSettles) ApplyPageSettledLocked(caller);
+            s_pendingSettles.clear();
+        }
+        if (s_pageCursorResetPending.exchange(false)) {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            for (auto& vp : s_views) vp->pageCursor = 0;
+        }
         // Fullscreen views track the backbuffer: sized here BEFORE
         // materialization (a 0x0 view never materializes), re-Resized via
         // the boundsDirty path if the backbuffer ever changes.
@@ -8407,8 +8500,11 @@ float4 ps_straight(VSOut i) : SV_Target {
                 offFrames = 0;
                 // A page that hid the pointer (cursor: none) must not keep it hidden into the next UI mode: forget
                 // every page's cursor; each reports again on the first mouse move (the core re-sends it per move).
-                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-                for (auto& vp : s_views) vp->pageCursor = 0;
+                // A registry the page thread holds is not waited for: its next PageWorkBegin does the reset.
+                if (std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock())
+                    for (auto& vp : s_views) vp->pageCursor = 0;
+                else
+                    s_pageCursorResetPending.store(true);
             }
             uiFrames = 0;
             if (offFrames >= 0 && ++offFrames == 30) {
@@ -8684,6 +8780,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         // still presenting (0.3.6), and that loading screen presents many
         // SECONDS of stable frames, so a stability streak passes on the wrong
         // thread too (0.3.7). Thread identity is the deterministic signal.
+        // Taken: this frame already passed the page fiber by, so the next one starts Ultralight, as after a refusal.
+        if (tid == s_mainThreadId && TakePageInitFailure()) return;
         if (!s_renderInit) {
             // World-ready FALLBACK (0.17.9): SKSEVR never delivered kNewGame for
             // an Alternate Perspective new game (field 2026-09-03: SKSE dispatched
@@ -8731,6 +8829,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             bh = static_cast<float>(scd.BufferDesc.Height);
             const int prevW = s_backbufferW.exchange(static_cast<int>(bw));  // for the cursor clamp (input sink)
             const int prevH = s_backbufferH.exchange(static_cast<int>(bh));
+            s_backbufferWH.store((static_cast<std::uint64_t>(scd.BufferDesc.Width) << 32) | scd.BufferDesc.Height);
             // With the page thread it sends this itself (PageThreadFrame), so a RenderThread mod still gets it on the
             // render thread.
             if (prevW > 0 && prevH > 0 && (prevW != static_cast<int>(bw) || prevH != static_cast<int>(bh)) &&
@@ -9065,6 +9164,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     };
     static ID3D11DeviceContext*             s_pageContext = nullptr;   // the page thread's deferred context
+    // Set by a page thread that got no renderer, after it let go of the driver; TakePageInitFailure takes it from there.
+    static std::atomic<bool>                s_pageInitFailed{ false };
     static PageThread::Handoff<PagePacket>* s_pageHandoff = nullptr;   // made once and never freed (invariant 3)
     static std::atomic<long long>           s_pageFrameSinceMs{ 0 };   // when the running page frame began; 0 = waiting
     static std::atomic<const char*>         s_pageStage{ "" };         // where the running page frame is
@@ -9079,8 +9180,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         using ClockT = std::chrono::steady_clock;
         const auto t0 = ClockT::now();
         s_pageFrameSinceMs.store(SteadyNowMs());
-        const float bw = static_cast<float>(s_backbufferW.load());
-        const float bh = static_cast<float>(s_backbufferH.load());
+        const std::uint64_t wh = s_backbufferWH.load();
+        const float bw = static_cast<float>(static_cast<std::uint32_t>(wh >> 32));
+        const float bh = static_cast<float>(static_cast<std::uint32_t>(wh));
         // The game thread leaves DisplayResized to this thread, so a RenderThread mod gets it on the render thread.
         static int s_lastW = 0, s_lastH = 0;
         if (static_cast<int>(bw) != s_lastW || static_cast<int>(bh) != s_lastH) {
@@ -9246,19 +9348,25 @@ float4 ps_straight(VSOut i) : SV_Target {
                     SKSE::log::info("Magelight: WebKit's VM is up ({}); the page thread holds its lock between frames",
                                     s_vmLock.Vm());
             }
-        } else {
-            NoteRenderFailure("the page thread could not start Ultralight");   // a no-op when a step already said why
-            s_renderDead.store(true);
+        } else if (s_renderDead.load()) {
+            // A fault: Ultralight may be half built, so nothing tries it again.
             SKSE::log::error("Magelight: render-thread init failed on the page thread — overlay disabled");
+        } else {
+            // No renderer and no fault: the game thread starts Ultralight in its own frame with a driver of its own.
+            ultralight::Platform::instance().set_gpu_driver(nullptr);
+            if (s_gpu && s_gpuDestroy) s_gpuDestroy(s_gpu);
+            s_gpu = nullptr;
+            s_gpuActive = false;
+            s_pageInitFailed.store(true);
         }
-        // The overlay is off: the thread never touches Ultralight again, and never returns (WebKit's per-thread state
-        // would be torn down on the way out).
+        // Done with Ultralight: the thread never touches it again, and never returns (WebKit's per-thread state would
+        // be torn down on the way out).
         for (;;) Sleep(INFINITE);
     }
 
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
     // so, its deferred context, its handoff and the thread. False: the mode is Off (the log line says why) and render
-    // init runs again next frame, on the page fiber.
+    // init runs again next frame, as without the setting.
     static bool StartPageThread()
     {
         ID3D11DeviceContext* deferred = nullptr;
@@ -9293,6 +9401,22 @@ float4 ps_straight(VSOut i) : SV_Target {
         return true;
     }
 
+    // Game thread, every main-thread Present. A page thread that could not make a renderer hands render init back: the
+    // mode is Off and render init runs again, as when the thread is refused. True when it took one. The note the
+    // failure left is cleared, or a later death of the overlay would report this one.
+    static bool TakePageInitFailure()
+    {
+        if (!s_pageInitFailed.exchange(false)) return false;
+        if (s_pageContext) s_pageContext->Release();
+        s_pageContext = nullptr;
+        s_pageThreadMode.store(PageThread::Mode::Off);
+        s_ulThreadId = GetCurrentThreadId();
+        s_renderInit = false;
+        s_renderDeadReasonState.store(0);
+        SKSE::log::warn("Magelight: the page thread could not start Ultralight; pages run in the game's frame");
+        return true;
+    }
+
     // The frame at Present with the page thread: the game thread's bookkeeping, every page frame finished since the
     // last Present taken and the next one let go at once (it records while this frame runs the taken frames' lists in
     // order and draws the newest one's views). Never waits on the page thread: until it has finished a frame there is
@@ -9304,15 +9428,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         GameBookkeeping();
         TickImageProbe();
         std::vector<std::unique_ptr<PagePacket>> packets = s_pageHandoff->TakeAll();
-        s_pageHandoff->Go();   // the next page frame overlaps this frame's execute and draws
-        // The newest page frame's views, drawn until a newer frame comes. Never freed at exit: its references are
-        // Direct3D's, which may be gone by then.
-        static PagePacket* s_held = nullptr;
-        const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
         // The views wanted now, read here rather than from the page frame: one hidden since (Escape, a mod's hide) is
         // not drawn even when the page thread is slow or stuck in a script (it never runs script under the registry's
-        // lock, invariant 16). While the page thread holds the registry's lock (a page's load or resize, the views it
-        // collects), this frame keeps the last frame's reading rather than wait.
+        // lock, invariant 16). Read before Go, while a page thread that finished its frame is waiting and the lock is
+        // free; while the page thread still holds it (a page's load or resize, the views it collects), this frame
+        // keeps the last frame's reading rather than wait.
         static std::vector<ViewId> s_wanted;
         static bool s_anyVisible = false, s_interactiveVisible = false;
         if (std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock()) {
@@ -9325,6 +9445,11 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_wanted.push_back(v->id);
             }
         }
+        s_pageHandoff->Go();   // the next page frame overlaps this frame's execute and draws
+        // The newest page frame's views, drawn until a newer frame comes. Never freed at exit: its references are
+        // Direct3D's, which may be gone by then.
+        static PagePacket* s_held = nullptr;
+        const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
         const bool anyVisible = s_anyVisible, interactiveVisible = s_interactiveVisible;
         const CompositeTarget target = ChooseCompositeTarget(interactiveVisible);
         std::vector<QueuedQuad> queued;
@@ -9338,11 +9463,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             StateBackup backup;
             backup.Capture(s_context);
             // Each list with the game's whole state saved and put back around it (PageThread::RunRecordedList), and the
-            // immediate context flushed after each part a flush split off, where the in-frame driver flushes.
-            for (auto& p : packets) {
+            // immediate context flushed after each part a flush split off, where the in-frame driver flushes, and
+            // between two page frames, which in the frame always have a Present between them.
+            for (std::size_t k = 0; k < packets.size(); ++k) {
+                auto& p = packets[k];
                 for (std::size_t i = 0; i < p->lists.size(); ++i) {
                     PageThread::RunRecordedList(s_context, p->lists[i]);
-                    if (i + 1 < p->lists.size()) s_context->Flush();
+                    if (i + 1 < p->lists.size() || k + 1 < packets.size()) s_context->Flush();
                     p->lists[i]->Release();
                 }
                 p->lists.clear();
@@ -10224,6 +10351,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     // dispatch, one batch at a time, on whichever thread its input job runs.
     static Gamepad::Router            s_gamepadRouter;
     static Gamepad::BatchIn           s_gamepadIn;              // this batch's, for EndGamepadBatch
+    static Gamepad::Mode              s_gamepadLastMode = Gamepad::Mode::Navigation;   // the last batch's out.mode
     static bool                       s_gamepadHostDirty = false;
     static std::uint64_t              s_gamepadSequence = 0;
     static ViewId                     s_gamepadPacketView = 0;  // the view the last packet went to
@@ -10330,9 +10458,21 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_gamepadHostDirty = false;
         if (in.connected && s_focused.load() && !s_renderDead.load() && ForegroundIsGame() && !MenuInputAboveFocusMenu()) {
             const auto uiView = static_cast<ViewId>(s_uiModeView.load());
-            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-            MlView* v = FindViewLocked(uiView);
-            if (v && !v->destroyPending && v->gamepad.enabled && !v->gamepadPage.empty()) {
+            // With pageThread the page thread can hold the registry across a page load: a batch whose view already
+            // held the pad keeps the last batch's reading rather than wait (a gamepadDirty stays for the next one).
+            // A view taking the pad waits, so its first presses never reach the game unowned.
+            std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::defer_lock);
+            bool busy = false;
+            if (uiView != 0 && s_gamepadIn.owner == uiView) busy = !lk.try_lock();
+            else lk.lock();
+            if (busy) {
+                in.owner = s_gamepadIn.owner;
+                in.ownerEpoch = s_gamepadIn.ownerEpoch;
+                in.config = s_gamepadIn.config;
+                in.mode = s_gamepadLastMode;
+                in.escapeCaptured = s_gamepadIn.escapeCaptured;
+            } else if (MlView* v = FindViewLocked(uiView);
+                       v && !v->destroyPending && v->gamepad.enabled && !v->gamepadPage.empty()) {
                 in.owner = uiView;
                 in.ownerEpoch = v->gamepadEpoch;
                 in.config = v->gamepad;
@@ -10366,6 +10506,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_gamepadOwner.store(owner);
         s_gamepadGeneration.store(out.generation);
         s_gamepadConnected.store(s_gamepadIn.connected);
+        s_gamepadLastMode = out.mode;
         if (s_gamepadPacketView && s_gamepadPacketView != owner) {   // its page cancels what it holds
             SendGamepadPacket(s_gamepadPacketView, false, out);
             s_gamepadPacketView = 0;
@@ -10796,6 +10937,65 @@ float4 ps_straight(VSOut i) : SV_Target {
     namespace {
         using KeyboardPollFn = void(*)(RE::BSWin32KeyboardDevice*, float);
         KeyboardPollFn s_origKeyboardPoll = nullptr;
+        Input::LostKeys s_lostKeys;        // the poll's thread
+        std::uint32_t   s_lostKeysSession = 0;
+
+        std::string KeyWindowForLog(HWND h)
+        {
+            if (!h) return "none";
+            char cls[64]{};
+            GetClassNameA(h, cls, sizeof(cls));
+            DWORD pid = 0;
+            GetWindowThreadProcessId(h, &pid);
+            return std::format("{:#x} {}{}", reinterpret_cast<std::uintptr_t>(h), cls,
+                               h == s_hwnd ? " (the game's)" : pid == GetCurrentProcessId() ? "" : " (another process)");
+        }
+
+        // Where Windows sends keys right now. Any thread.
+        void LogKeyFocus(const char* when)
+        {
+            static std::atomic<int> s_left{ 40 };
+            if (s_left.fetch_sub(1) <= 0) return;
+            GUITHREADINFO g{};
+            g.cbSize = sizeof(g);
+            const DWORD thread = s_hwnd ? GetWindowThreadProcessId(s_hwnd, nullptr) : 0;
+            const bool read = thread && GetGUIThreadInfo(thread, &g);
+            SKSE::log::info("Magelight: keyboard {}: foreground {}; window thread's focus {}, active {}, capture {}{}",
+                            when, KeyWindowForLog(GetForegroundWindow()), KeyWindowForLog(g.hwndFocus),
+                            KeyWindowForLog(g.hwndActive), KeyWindowForLog(g.hwndCapture),
+                            read ? "" : " (thread state not readable)");
+        }
+
+        // Forward for Input::LostKeys.
+        bool PassLostKey(std::uint8_t scan, bool down)
+        {
+            if (!s_hwnd || GetForegroundWindow() != s_hwnd) return false;
+            const bool numLock = s_lostKeys.Passed() ? (s_passedBits.load() & Input::kKbNumLock) != 0
+                                                     : (MlGetKeyState(VK_NUMLOCK) & 1) != 0;
+            const Input::ScancodeKey key = Input::FromScancode(scan, numLock);
+            if (!key.vk) return false;
+            const LPARAM l = key.lparam | 1 | (down ? 0 : (static_cast<LPARAM>(3) << 30));
+            if (!PostMessageW(s_hwnd, kPassedKeyMsg, key.vk, l)) return false;
+            if (down && s_lostKeys.Passed() == 0) {
+                LogKeyFocus("key lost");
+                PostMessageW(s_hwnd, kKeyFocusMsg, 0, 0);
+            }
+            static std::atomic<int> s_left{ 30 };
+            if (down && s_left.fetch_sub(1) > 0)
+                SKSE::log::info("Magelight: key scan 0x{:02X} reached DirectInput but not the window - passed on", scan);
+            return true;
+        }
+
+        // A change in what the device answers while muted: DIERR_NOTACQUIRED after an alt-tab, say.
+        void LogKeyDeviceRead(std::int32_t hr)
+        {
+            static std::int32_t s_last = 1;
+            static int s_left = 24;
+            if (hr == s_last) return;
+            s_last = hr;
+            if (s_left-- > 0)
+                SKSE::log::info("Magelight: keyboard device read answers {:#x}", static_cast<std::uint32_t>(hr));
+        }
 
         void Hook_KeyboardPoll(RE::BSWin32KeyboardDevice* self, float dt)
         {
@@ -10820,19 +11020,39 @@ float4 ps_straight(VSOut i) : SV_Target {
                 // generated for a key typed into a page. Both arrays carry
                 // static offset asserts in CommonLib. (0.27.0)
                 if (self) {
+                    const std::uint64_t now = GetTickCount64();
+                    // A key in the session's first read may already have been through the window, before Begin.
+                    const auto session = s_keySession.load();
+                    const bool firstRead = session != s_lostKeysSession;
+                    if (firstRead) {
+                        s_lostKeysSession = session;
+                        s_lostKeys.Begin(s_windowKeyPresses.load());
+                        LogKeyFocus("at UI mode entry");
+                    }
                     auto& rd = self->GetRuntimeData();
                     if (auto* dev = reinterpret_cast<REX::W32::IDirectInputDevice8A*>(rd.dInputDevice)) {
                         REX::W32::DIDEVICEOBJECTDATA buf[32];
                         for (int guard = 0; guard < 16; ++guard) {
                             std::uint32_t n = 32;
                             const auto hr = dev->GetDeviceData(sizeof(REX::W32::DIDEVICEOBJECTDATA), buf, &n, 0);
+                            LogKeyDeviceRead(static_cast<std::int32_t>(hr));
                             if (hr < 0 || n == 0) break;   // not acquired / input lost: nothing to drain
                             for (std::uint32_t i = 0; i < n; ++i) {
                                 const std::uint32_t k = buf[i].ofs;
-                                if (k < 0x100) rd.curState[k] = rd.prevState[k] = (buf[i].data & 0x80) ? 0x80 : 0;
+                                if (k >= 0x100) continue;
+                                const bool down = (buf[i].data & 0x80) != 0;
+                                rd.curState[k] = rd.prevState[k] = down ? 0x80 : 0;
+                                if (!firstRead) s_lostKeys.Note(static_cast<std::uint8_t>(k), down, now);
                             }
                             if (n < 32) break;
                         }
+                    }
+                    if (s_keyFallback) {
+                        const bool heard = s_lostKeys.WindowHeard();
+                        s_lostKeys.Poll(s_windowKeyPresses.load(), now, PassLostKey);
+                        if (!heard && s_lostKeys.WindowHeard() && s_lostKeys.Passed() > 0)
+                            SKSE::log::info("Magelight: the window hears keys again, after {} passed on",
+                                            s_lostKeys.Passed());
                     }
                 }
                 return;

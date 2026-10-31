@@ -7,6 +7,7 @@
 //   guard    the page core's pointer guard, Input::kPointerGuardScript (checked)
 //   routes   which view each pointer source's events go to, Input::PointerRoutes, with two VR hands (checked)
 //   queue    the input queue a page frame drains, Input::QueueRule: moves merged, releases and markers kept (checked)
+//   lostkeys what the muted keyboard poll passes on, Input::LostKeys: only keys the window never got (checked)
 //   keys, dead, state, mouse, wheel   the matrix the design was made from (printed, a few checks): the events
 //            Magelight 1.x built by hand, the bare 2.0 constructor and MakeKeyEvent side by side; the es-419 layout's
 //            AltGr, ñ and dead key, and the dead key a layout holds; when the constructor reads the keyboard state;
@@ -1265,9 +1266,169 @@ static void WheelTest()
     WDump("x beyond the view width:");
 }
 
+// One UI-mode session of Input::LostKeys: each poll 20 ms after the last, what went out as "<scan><d|u>".
+struct LostKeysRun {
+    In::LostKeys keys;
+    std::uint64_t now = 1000, window = 7;
+    bool refuse = false;
+    std::string sent;
+    LostKeysRun() { keys.Begin(window); }
+    void Key(std::uint8_t k, bool down) { keys.Note(k, down, now); }
+    void Polls(int n)
+    {
+        for (int i = 0; i < n; ++i) {
+            now += 20;
+            keys.Poll(window, now, [&](std::uint8_t k, bool down) {
+                if (refuse) return false;
+                char b[16];
+                std::snprintf(b, sizeof(b), "%s%02X%c", sent.empty() ? "" : " ", k, down ? 'd' : 'u');
+                sent += b;
+                return true;
+            });
+        }
+    }
+};
+
+static void LostKeysTest()
+{
+    std::printf("== lost keys: In::LostKeys\n");
+    {
+        LostKeysRun r;
+        r.Key(0x01, true);
+        r.Polls(2);
+        Expect("a key the window has not had yet waits", r.sent, "");
+        r.Polls(1);
+        Expect("three polls and 60 ms: passed on", r.sent, "01d");
+        r.Key(0x01, false);
+        r.Polls(3);
+        Expect("its release follows", r.sent, "01d 01u");
+        Expect("one press counted", std::to_string(r.keys.Passed()), "1");
+    }
+    {
+        LostKeysRun r;
+        r.Key(0x40, true);
+        r.Polls(1);
+        ++r.window;
+        r.Polls(5);
+        Expect("the window got it in time: nothing passed on", r.sent, "");
+        r.Key(0x01, true);
+        r.Polls(5);
+        Expect("and nothing for the rest of the session", r.sent, "");
+        Expect("the window hears keys", r.keys.WindowHeard() ? "yes" : "no", "yes");
+    }
+    {
+        LostKeysRun r;
+        r.Key(0x1E, true);
+        r.keys.Poll(r.window, r.now + 1, [](std::uint8_t, bool) { return true; });
+        r.keys.Poll(r.window, r.now + 2, [](std::uint8_t, bool) { return true; });
+        r.keys.Poll(r.window, r.now + 3, [](std::uint8_t, bool) { return true; });
+        r.Polls(1);
+        r.Polls(1);
+        Expect("many polls in one instant still wait for 60 ms", r.sent, "");
+        r.Polls(1);
+        Expect("then it goes", r.sent, "1Ed");
+    }
+    {
+        LostKeysRun r;
+        r.Key(0x1E, true);
+        r.Polls(3);
+        ++r.window;
+        r.Polls(1);
+        Expect("the window starts hearing keys: the owed release goes out", r.sent, "1Ed 1Eu");
+        r.Key(0x1E, false);
+        r.Polls(4);
+        Expect("and no second one", r.sent, "1Ed 1Eu");
+    }
+    {
+        LostKeysRun r;
+        r.Key(0x40, false);
+        r.Polls(4);
+        Expect("the release of the key that opened the page stays", r.sent, "");
+    }
+    {
+        LostKeysRun r;
+        r.Key(0x38, true);
+        r.Key(0x0F, true);
+        r.Polls(4);
+        r.Key(0x0F, false);
+        r.Key(0x38, false);
+        r.Polls(4);
+        Expect("Alt+Tab stays with the system", r.sent, "");
+        r.Key(0xDB, true);
+        r.Key(0x20, true);
+        r.Key(0xDB, false);
+        r.Key(0x20, false);
+        r.Polls(4);
+        Expect("so does Win+D", r.sent, "");
+        r.Key(0xB7, true);
+        r.Key(0xB7, false);
+        r.Polls(4);
+        Expect("and Print Screen", r.sent, "");
+        r.Key(0x20, true);
+        r.Polls(3);
+        Expect("a plain key after them goes", r.sent, "20d");
+    }
+    {
+        LostKeysRun r;
+        r.Key(0xB8, true);
+        r.Key(0x10, true);
+        r.Key(0x0F, true);
+        r.Key(0x3E, true);
+        r.Polls(3);
+        Expect("right Alt goes through for AltGr, without Alt's system keys", r.sent, "B8d 10d");
+        r.Key(0x0F, false);
+        r.Polls(3);
+        Expect("and a key held back gets no release", r.sent, "B8d 10d");
+    }
+    {
+        using In::NotePassedKey;
+        const auto l = [](unsigned scan, bool extended) {
+            return static_cast<LPARAM>((scan << 16) | (extended ? 1u << 24 : 0u));
+        };
+        auto bits = NotePassedKey(0, VK_SHIFT, l(0x36, false), true);
+        Expect("right Shift down", std::to_string(bits), std::to_string(In::kKbRShift));
+        bits = NotePassedKey(bits, VK_SHIFT, l(0x36, false), false);
+        bits = NotePassedKey(bits, VK_CONTROL, l(0x1D, true), true);
+        Expect("right Ctrl down, Shift up", std::to_string(bits), std::to_string(In::kKbRCtrl));
+        bits = NotePassedKey(0, VK_CAPITAL, l(0x3A, false), true);
+        bits = NotePassedKey(bits, VK_CAPITAL, l(0x3A, false), false);
+        Expect("Caps Lock flips on the press only", std::to_string(bits), std::to_string(In::kKbCaps));
+        Expect("a letter changes nothing", std::to_string(NotePassedKey(bits, 'A', l(0x1E, false), true)),
+               std::to_string(In::kKbCaps));
+    }
+    {
+        LostKeysRun r;
+        r.refuse = true;
+        r.Key(0x01, true);
+        r.Polls(3);
+        r.refuse = false;
+        r.Key(0x01, false);
+        r.Polls(3);
+        Expect("a press that did not go gets no release", r.sent, "");
+        Expect("and is not counted", std::to_string(r.keys.Passed()), "0");
+    }
+    {
+        LostKeysRun r;
+        r.Key(0x02, true); r.Key(0x02, false); r.Key(0x03, true); r.Key(0x03, false);
+        r.Polls(3);
+        Expect("a quick run keeps its order", r.sent, "02d 02u 03d 03u");
+        r.keys.Begin(r.window);
+        r.Key(0x04, true);
+        r.Polls(3);
+        Expect("a new session starts clean", r.sent, "02d 02u 03d 03u 04d");
+    }
+    {
+        LostKeysRun r;
+        for (int i = 0; i < 40; ++i) r.Key(static_cast<std::uint8_t>(0x10 + ((i / 2) & 7)), (i & 1) == 0);
+        r.Polls(3);
+        Expect("a burst past the queue's cap is cut, never wrapped", std::to_string(std::count(r.sent.begin(), r.sent.end(), ' ') + 1),
+               std::to_string(In::LostKeys::kCap));
+    }
+}
+
 static int ToolMain(int argc, char** argv)
 {
-    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|queue|keys|dead|state|mouse|wheel ...]\n"); return 2; }
+    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|queue|lostkeys|keys|dead|state|mouse|wheel ...]\n"); return 2; }
     const std::string sdk = argv[1];
     std::vector<std::string> want;
     for (int i = 2; i < argc; ++i) want.push_back(argv[i]);
@@ -1293,6 +1454,7 @@ static int ToolMain(int argc, char** argv)
     if (on("guard")) GuardTest();
     if (on("routes")) RoutesTest();
     if (on("queue")) QueueTest();
+    if (on("lostkeys")) LostKeysTest();
     if (on("keys")) { NewView(); KeysTest(); }
     if (on("dead")) { NewView(); DeadTest(); }
     if (on("state")) { NewView(); StateTest(); }

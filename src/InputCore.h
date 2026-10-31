@@ -161,6 +161,92 @@ namespace Magelight::Input {
         return k;
     }
 
+    // The key state after one key of LostKeys' stream: bits, with vk and lparam as the window's key message has them.
+    // The stream is what is known in order, as a key goes out frames after its press.
+    inline std::uint16_t NotePassedKey(std::uint16_t bits, WPARAM vk, LPARAM lparam, bool down)
+    {
+        const bool extended = (lparam >> 24) & 1;
+        unsigned mask = 0;
+        switch (vk) {
+        case VK_SHIFT:   mask = ((lparam >> 16) & 0xFF) == 0x36 ? kKbRShift : kKbLShift; break;
+        case VK_CONTROL: mask = extended ? kKbRCtrl : kKbLCtrl; break;
+        case VK_MENU:    mask = extended ? kKbRAlt : kKbLAlt; break;
+        case VK_CAPITAL: return static_cast<std::uint16_t>(down ? bits ^ kKbCaps : bits);
+        case VK_NUMLOCK: return static_cast<std::uint16_t>(down ? bits ^ kKbNumLock : bits);
+        default:         return bits;
+        }
+        return static_cast<std::uint16_t>(down ? bits | mask : bits & ~mask);
+    }
+
+    // Keys DirectInput saw that the window never got. On some systems a page in UI mode gets no key message until the
+    // player alt-tabs, and the muted keyboard poll is then the only thing that sees the keys. The poll notes every key
+    // here and passes on what falls due. One key press through the window proves the window hears keys, so nothing is
+    // passed on for the rest of the session: a session that works never gets a key twice. A key waits kWaitPolls polls
+    // and kWaitMs first, because a press can reach the device a frame ahead of its message. Left Alt, the Windows keys,
+    // what is pressed with them held (Alt+Tab) and Print Screen, which never makes a key press, stay with the system.
+    // Right Alt goes through for AltGr typing, without the keys the system takes with Alt. One thread.
+    class LostKeys {
+    public:
+        static constexpr int kWaitPolls = 3;
+        static constexpr std::uint64_t kWaitMs = 60;
+        static constexpr std::size_t kCap = 32;
+
+        // A new UI-mode session. windowPresses: the host's count of key presses the window has had.
+        void Begin(std::uint64_t windowPresses) { *this = LostKeys{}; base_ = windowPresses; }
+
+        // key: the DirectInput scancode.
+        void Note(std::uint8_t key, bool down, std::uint64_t nowMs)
+        {
+            if (key == 0x38) { alt_ = down; return; }
+            if (key == 0xB8) altGr_ = down;
+            if (key == 0xDB || key == 0xDC) { win_ = down; return; }
+            if (key == 0xB7) return;
+            const bool altSystem = key == 0x01 || key == 0x0F || key == 0x39 || key == 0x3E;   // Esc, Tab, Space, F4
+            if (heard_ || count_ == kCap || (down && (alt_ || win_ || (altGr_ && altSystem)))) return;
+            queue_[(head_ + count_++) % kCap] = { nowMs, 0, key, down };
+        }
+
+        // Once a poll, after the Notes. forward(key, down) sends one key and returns whether it went; a key whose
+        // press went gets its release, and the releases still owed go out when the window starts hearing keys.
+        template <class F>
+        void Poll(std::uint64_t windowPresses, std::uint64_t nowMs, F&& forward)
+        {
+            if (heard_) return;
+            if (windowPresses != base_) {
+                heard_ = true;
+                count_ = 0;
+                for (int k = 0; k < 256; ++k)
+                    if (held_[k]) { held_[k] = false; forward(static_cast<std::uint8_t>(k), false); }
+                return;
+            }
+            for (std::size_t i = 0; i < count_; ++i) ++queue_[(head_ + i) % kCap].polls;
+            while (count_) {
+                const Entry& e = queue_[head_];
+                if (e.polls < kWaitPolls || nowMs - e.ms < kWaitMs) break;
+                if (e.down) {
+                    if (forward(e.key, true)) { held_[e.key] = true; ++passed_; }
+                } else if (held_[e.key]) {
+                    held_[e.key] = false;
+                    forward(e.key, false);
+                }
+                head_ = (head_ + 1) % kCap;
+                --count_;
+            }
+        }
+
+        bool WindowHeard() const { return heard_; }
+        int Passed() const { return passed_; }   // key presses passed on this session
+
+    private:
+        struct Entry { std::uint64_t ms = 0; int polls = 0; std::uint8_t key = 0; bool down = false; };
+        Entry queue_[kCap]{};
+        std::size_t head_ = 0, count_ = 0;
+        std::uint64_t base_ = 0;
+        bool held_[256]{};
+        bool heard_ = false, alt_ = false, altGr_ = false, win_ = false;
+        int passed_ = 0;
+    };
+
     // The polled-keys filter's test of a module's file path, lower case: another mod's SKSE plugin, a DLL under
     // SKSE\Plugins outside Magelight's runtime folder. By folder name, not the runtime path the host knows: under MO2
     // a module's file name is its real path in the mod's folder, while the host's is the virtual Data path. WebCore,

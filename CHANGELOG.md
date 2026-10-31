@@ -65,16 +65,23 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **Pages can run on a thread of their own** (`Magelight.json` `"pageThread": true`, flat only; off by default in
-  this release). A page's scripts, layout and painting then no longer take time out of the game's frame: the game
+- **Pages run on a thread of their own** (flat only; `Magelight.json` `"pageThread": false` puts them back in the
+  game's frame). A page's scripts, layout and painting no longer take time out of the game's frame: the game
   thread only runs the GPU work the page thread recorded and draws the result, so a page that runs heavy script every
   frame costs its own frame rate, not the game's. A page stuck in a script freezes every page (they share the one
   page thread) but not the game: the game keeps running, the page's key and the toggle key still close it (Escape
   too, unless the page took Escape), and
   `Magelight.log` names the stall once with the page thread's stack. A page shows each frame one game frame later than in the game's frame; the cursor does not lag. Magelight
-  turns the thread off for the session, with a log line saying why, on Skyrim VR, on a graphics device that cannot be
-  used from a second thread, or when the device (or a wrapper of it) refuses a deferred context; pages then run in
-  the game's frame as before.
+  turns the thread off for the session on Skyrim VR, and, with a log line saying why, on a graphics device that cannot
+  be used from a second thread, when the device (or a wrapper of it) refuses a deferred context, or when Ultralight
+  gets no renderer on the thread; pages then run in the game's frame as before. A crash while it starts Ultralight
+  turns the UI off for the session: set `"pageThread": false`.
+- Page rows no longer turn black behind Community Shaders' frame generation (the thread avoids it). It still happens
+  with `"pageThread": false`.
+- A page no longer ignores the keyboard until you alt-tab. Keys that reach DirectInput but never reach the game's
+  window (seen on a few PCs, cause unknown) are passed to the page, so Escape, a page's own key and typing keep working.
+  It only acts in a UI-mode session where the window has had no key press. `Magelight.json` `"keyFallback": false`
+  turns it off, and `Magelight.log` says where keyboard focus was (`keyboard at UI mode entry`, `keyboard key lost`).
 - With the thread on, `Magelight.log`'s cost line every 2 s is the game thread's (`prelude`, `execute`,
   `composite`), and a second line gives the page thread's own (`ul.update`, `ul.render`, frames per second).
   `tools/load-test` is a page that burns a chosen load, with the before/after protocol.
@@ -85,8 +92,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 ### For mod authors
 
 - `QueryCapability("pagethread")` (`capabilities.pageThread` on a page) is 1 while the render thread is Magelight's
-  page thread: from the settings' load when the player turned it on, until a refusal at render init turns it 0 for
-  the session; always 0 on VR. Log it, or refuse the mode until your callbacks follow the rules below.
+  page thread: from the settings' load unless the player set `"pageThread": false`, until a refusal or a failed start
+  at render init turns it 0 for the session; always 0 on VR. Log it, or refuse the mode until your callbacks follow the rules below.
 - A page event can still enter a `RenderThread` mod's handler after `UnregisterMod` has returned on another thread:
   keep `user` and the handler alive for the rest of the process. Read `GetLastErrorMessage` on the thread that made
   the failing call: a failing call from a render-thread callback can replace it meanwhile (`ModDesc.onLog` hands
@@ -117,6 +124,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   pages on a real thread need no VM lock (its `build.bat` gates it), and `FiberRun.h`'s `MG_PAGE_THREAD=1` runs any
   page-facing tool there.
 - `tools/load-test/MgLoadTest`: the in-game load kit (`package.ps1` zips it).
+
 ## 1.6.1 - Unreleased
 
 ### What players notice
@@ -126,6 +134,12 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   page"). Magelight read some of its paths in Windows' ANSI code page and some as UTF-8, so a Chinese, Japanese,
   Cyrillic or accented folder name either threw on the first file a page asked for or left the page unfound. Every
   path is UTF-8 now, and a page's `file:///` URL is plain ASCII whatever the folder is called.
+- **In VR, the grip grabs a page.** Point at a page and squeeze the grip: the page hangs on your laser and goes where
+  you point until you let go, then stays there while it is open, even with `panelFollow` on. While you hold it, the
+  same hand's stick turns it left or right (up to 60 degrees either way) and pushes it away (up) or pulls it closer
+  (down), and does not scroll the page. A grip that points at no page still brings every page back in front of you.
+- **In VR, the game's red quill pointer no longer shows at the edges of a page** while a page holds UI mode, whichever
+  mod's page it is (SeverActions hid it for its own pages only).
 
 ### For mod authors
 
@@ -136,12 +150,6 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   `std::filesystem::path(std::u8string(...))` or `MultiByteToWideChar(CP_UTF8, ...)`, never `path(std::string)`.
 - The C++ quick start (`docs/CPP.md`) and the two C++ examples built their page path with `path::string()`, which
   throws in your own plugin for such a folder: they use `u8string()` now; copy that.
-- **In VR, the grip grabs a page.** Point at a page and squeeze the grip: the page hangs on your laser and goes where
-  you point until you let go, then stays there while it is open, even with `panelFollow` on. While you hold it, the
-  same hand's stick turns it left or right (up to 60 degrees either way) and pushes it away (up) or pulls it closer
-  (down), and does not scroll the page. A grip that points at no page still brings every page back in front of you.
-- **In VR, the game's red quill pointer no longer shows at the edges of a page** while a page holds UI mode, whichever
-  mod's page it is (SeverActions hid it for its own pages only).
 
 ### For mod authors: new API and capabilities
 

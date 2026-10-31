@@ -99,8 +99,8 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
   `v4()->PostGameTask(fn, user)` (host 0.30.1+) before you touch anything
   `RE::`, never SKSE's `AddTask`: these callbacks run inside the game's Present,
   where on Skyrim VR an `AddTask` can hang the game (the threading contract in
-  `MagelightUI_API.h` says why). With `Magelight.json` `"pageThread": true`
-  (host 1.7.0+, flat) the render thread is Magelight's own page thread instead,
+  `MagelightUI_API.h` says why). By default on host 1.7.0+ (flat; `Magelight.json`
+  `"pageThread": false` opts out) the render thread is Magelight's own page thread instead,
   running beside the game: the same rules hold there, and `RE::` from a
   listener is then a race with the game, not merely bad form.
   `QueryCapability("pagethread")` is 1 in that mode. Magelight's own functions are safe to call from

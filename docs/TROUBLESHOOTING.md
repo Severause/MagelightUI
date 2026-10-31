@@ -191,11 +191,11 @@ links or run double-click handlers.
 Each visible view costs a texture and a paint when it changes; idle pages cost nothing. Keep
 HUD widgets small, avoid `position: fixed` full-screen containers on HUD layers, and prefer
 `startVisible: false` for panels. Fullscreen views repaint on resolution change. A page's
-JavaScript runs on the game's main thread by default, so heavy script work, or console output in a loop,
-costs frame time; strip console logging from release builds.
+JavaScript runs on the game's main thread in VR and with `"pageThread": false`, so there heavy script work, or
+console output in a loop, costs frame time; strip console logging from release builds.
 
-With `"pageThread": true` (1.7.0, flat only) a page's script, layout, loading, prepaints and painting run on
-Magelight's own page thread instead, beside the game: the game thread only runs the GPU work the page recorded and
+By default since 1.7.0 (flat only; `"pageThread": false` turns it off) a page's script, layout, loading, prepaints
+and painting run on Magelight's own page thread instead, beside the game: the game thread only runs the GPU work the page recorded and
 draws it, and a page shows each frame one game frame later (the cursor does not lag). The log's cost line every 2 s
 then comes in two: `present cost over N frames - prelude ..., execute ..., composite ..., total avg ...` is all the
 game thread spends on pages, and `page thread over N frames - page work ..., ul.update ..., ul.render ..., total avg
@@ -429,7 +429,8 @@ it read, or says that defaults are in effect.
 | `msaa` | `4` | 0.31.0: MSAA samples for the page targets Ultralight asks to antialias on the GPU path. `1` turns it off, `2`, `4` or `8`; a count the graphics card cannot do steps down, any other number rounds down to one of these. On Ultralight 2.0 (1.5.0) pages draw their shapes analytically and no page target measured has asked for it, so it costs nothing unless one does; the memory line says (see "Memory"). A target that takes it holds that many more copies of itself in video memory (about 15 MB each at 2560x1440) |
 | `memoryLogMinutes` | `10` | 1.5.0: minutes between the periodic memory lines (0-1440; `0` = none). The lines after UI mode and on request stay. See "Memory" |
 | `ulFiberMB` | `8` | 1.3.0: the stack pages run on, in MB (8-64; since 1.5.0 a smaller number is raised to 8, with a line in the log, because on Ultralight 2.0 a page's first uncaught error overflows a page stack under about 6 MB): a fiber on the game's main thread, so a page that recurses or nests deeply, or leaves an error uncaught, cannot run out the game's own stack. `0` runs pages on the game's stack, as Magelight 1.2 did; since 1.5.0 the engine's stack reserve is then set past the main thread's stack guarantee. See "A page error ends the UI or the game". With `pageThread` it sizes the page thread's stack instead (`0` = 8) |
-| `pageThread` | `false` | 1.7.0, flat only: pages run on a thread of their own, so their scripts, layout and painting take no time out of the game's frame (the game thread only runs the GPU work they recorded and draws them). A page stuck in a script freezes every page (they share the one page thread) but not the game, and the log names it. Pages show one frame later. Turned off for the session, with a line in the log saying why, on VR, on a graphics device that cannot be used from a second thread, or when the device (or a wrapper of it, ENB's or ReShade's, say) refuses a deferred context, or when the thread cannot be created: `the page thread is off - <why>; pages run in the game's frame` (on VR, `pageThread is ignored on Skyrim VR`). When it runs: `pages run on a thread of their own (<thread>, N MB stack); the graphics driver's command lists are native` (or `emulated by Direct3D`). Set it back to `false` if pages misbehave with it on, and report it with the log |
+| `keyFallback` | `true` | 1.7.0, flat only: while UI mode is on the game's keyboard is muted and pages get keys from the window. If a key reaches DirectInput and no key press has reached the window this session, the key is passed to the page anyway (`key scan 0x.. reached DirectInput but not the window - passed on`), without auto-repeat. Set it to `false` if a page gets a key twice, and report it with the log |
+| `pageThread` | `true` | 1.7.0, flat only: pages run on a thread of their own, so their scripts, layout and painting take no time out of the game's frame (the game thread only runs the GPU work they recorded and draws them). A page stuck in a script freezes every page (they share the one page thread) but not the game, and the log names it. Pages show one frame later. Turned off for the session, with a line in the log saying why, on VR, on a graphics device that cannot be used from a second thread, or when the device (or a wrapper of it, ENB's or ReShade's, say) refuses a deferred context, or when the thread cannot be created: `the page thread is off - <why>; pages run in the game's frame` (on VR, `pageThread is ignored on Skyrim VR`, when the file asks for it). A thread that starts but gets no renderer from Ultralight logs `the page thread could not start Ultralight; pages run in the game's frame`. `false` puts pages back in the game's frame, for a mod whose page callbacks touch game state (the threading rules in `CPP.md`) or a graphics problem only the thread shows. In the game's frame, behind Community Shaders' frame generation, rounded page rows that only have a hover background can paint black. When it runs: `pages run on a thread of their own (<thread>, N MB stack); the graphics driver's command lists are native` (or `emulated by Direct3D`). Set it back to `false` if pages misbehave with it on, and report it with the log |
 | `fontHinting`, `fontGamma` | `"normal"`, unset | Text rendering: `smooth`, `normal`, `monochrome` or `none`; gamma 1.0-3.0. Since 1.5.0 `normal` and an unset gamma keep Ultralight's font profile's (gamma 2.2; 1.8 before 1.5.0) |
 | `animationTimerDelay` | none | Ignored since 1.5.0, with a warning in the log: Ultralight 2.0 has no animation timer, and pages animate at most 60 times a second (see "Performance") |
 | `cursorFile`, `cursorHeight` | `""`, `24` | The cursor is drawn in code (it glows over a clickable element and becomes an I-beam over text); `cursorFile` replaces it with your own image (relative to the runtime folder, or absolute, placed by `cursorHotspotX/Y`). `cursorHeight` is its height in pixels at 1080p (8-256), scaled with the resolution: 24 is 48 px at 4K |
@@ -468,7 +469,9 @@ was a PC where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near t
 name the last-resort font the session uses and, when Arial could not be used, why. An exception
 `0xC00000FD` is a stack overflow: see the next section. With `pageThread` the line reads `... in page frame work`
 (or `in the page thread's start`), and may be followed by `the page thread faulted holding the view registry ...;
-given back`; the game thread keeps running either way.
+given back`; the game thread keeps running either way. A fault while the page thread starts Ultralight logs
+`render-thread init failed on the page thread — overlay disabled`: nothing falls back to the game's frame after a
+fault, so set `pageThread` to `false` for that session and report it with the log.
 
 ## A page error ends the UI or the game (stack overflow, 0xC00000FD)
 
@@ -491,12 +494,12 @@ Magelight's page stack do not.
 thread (`pages run on a stack of their own (8 MB, a fiber on the game's main thread)` in the log, then
 `WebKit's VM is up ...; the main thread holds its lock whenever it is off the page stack` once the first
 page loads), where an uncaught error reaches the page's `error` event and a runaway script ends in
-`RangeError: Maximum call stack size exceeded`, as in a browser. With `"pageThread": true` (1.7.0) pages
+`RangeError: Maximum call stack size exceeded`, as in a browser. With the page thread (the default since 1.7.0) pages
 run on Magelight's page thread instead, whose own stack is `ulFiberMB` (8 MB when 0) with no fiber
 (`pages run on a thread of their own ...`, then `WebKit's VM is up ...; the page thread holds its lock between
 frames`), and behave the same. `ulFiberMB` below 8 is raised to 8
 (`ulFiberMB 4 is below 8, ...` in the log). With `"ulFiberMB": 0` in
-`Magelight.json`, pages run on the game's stack, and Magelight sizes the engine's stack reserve past the
+`Magelight.json` and pages in the game's frame (VR, or `"pageThread": false`), pages run on the game's stack, and Magelight sizes the engine's stack reserve past the
 guarantee the main thread holds when the first save loads (`JavaScript stack zones for pages on the game's stack, past a
 64 KB stack guarantee ...` in the log): those errors are survived there too, but a page that lays itself
 out from the bottom of a deep recursion, or one nested hundreds of elements deep, can still run the game's

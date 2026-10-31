@@ -3,7 +3,8 @@ rem Builds and runs inputprobe.exe: what a page sees from the input Magelight ha
 rem offline on CPU views, no game. Keys through Input::MakeKeyEvent as the flat window and the VR paths queue them,
 rem the polled-keys filter around the constructor, the releases sent when focus goes, the leave sent to a view the
 rem pointer left, the page core's pointer guard, which view each pointer source's events go to (two VR hands), the
-rem input queue's rule (moves merged, releases and markers kept past its cap), and (printed) the matrix the design
+rem input queue's rule (moves merged, releases and markers kept past its cap), the keys the muted keyboard poll passes
+rem on (LostKeys), and (printed) the matrix the design
 rem came from. Re-run it at every SDK
 rem bump. %1 = output folder (default C:\b\mgl-inputtest). The polled-keys sections need MinHook from the build dir's
 rem vcpkg (MG_BUILD_DIR, default C:\b\mgl); the es-419 cases need that keyboard layout installed (skipped otherwise).
