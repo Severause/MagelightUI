@@ -8,9 +8,14 @@
 // the headset and the mirror drift; this struct is the single reading.
 //
 // Internal only (not part of api/MagelightUI_API.h). Built on the Ultralight
-// thread inside FrameWork, consumed on the same thread, never stored across
-// frames: `ul` is a strong ref for the duration of the frame so no consumer
-// can outlive the view it is presenting (the tearing-down-texture rule).
+// thread inside FrameWork (CollectView). In the frame, it is consumed on the
+// same thread and never stored across frames: `ul` is a strong ref for the
+// duration of the frame so no consumer can outlive the view it is presenting
+// (the tearing-down-texture rule). With the page thread (pageThread) it rides
+// a page frame's packet to the game thread instead: `ul` is left empty there
+// (a View's reference count is Ultralight's, never touched off its thread;
+// the VR presenter, the only reader of `ul`, never runs with the page
+// thread) and `srv` holds a reference the packet releases.
 
 #include <cstdint>
 #include <vector>
@@ -32,6 +37,7 @@ namespace Magelight {
         float u0 = 0, v0 = 0, u1 = 1, v1 = 1;      // rt.uv_coords on the GPU path; 0..1 on CPU
         float x = 0, y = 0;                        // swapchain pixels (EffectivePos)
         int w = 0, h = 0;                          // view pixels
+        float qx = 0, qy = 0, qw = 0, qh = 0;      // the flat quad drawn over the back buffer (the mirror fit on VR)
         bool hasCutout = false;
         float cutUV[4] = { 0, 0, 0, 0 };           // {x0,y0,x1,y1} in this view's uv space
         int layer = 1;                             // Layer enum value (z-order tier)

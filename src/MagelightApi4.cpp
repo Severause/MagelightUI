@@ -14,8 +14,9 @@
 //
 // Delivery threads: GameThread mods get events as posted SKSE tasks (never
 // inside a lock). RenderThread mods are called inline on the EMITTING
-// thread (render thread for page/console/resize events; game thread for
-// UI-mode events; the requester's thread for FocusDenied) under a small SEH
+// thread (render thread for page/console/resize events, the page thread with
+// pageThread; game thread for UI-mode events; the requester's thread for
+// FocusDenied) under a small SEH
 // guard, so one mod's fault disables that mod's sink, not the overlay.
 
 #include <RE/Skyrim.h>
@@ -415,8 +416,9 @@ namespace Magelight::Api4 {
                 });
         }
 
-        // The host's event sink (render thread for page/console/resize/render
-        // death, game thread for UI mode). Routes to the owning mod, the
+        // The host's event sink (render thread for page/console/resize, the page
+        // thread with pageThread; the present thread for render death; game thread
+        // for UI mode). Routes to the owning mod, the
         // UI-mode owner, or everyone.
         void HostSink(HostEvent type, ViewId view, int x, int y, const char* detail)
         {
@@ -497,7 +499,7 @@ namespace Magelight::Api4 {
                 }
                 const std::string detail = "queued request for view " + std::to_string(q.view);
                 if (RequestUIMode(q.view, q.flags & ~kUIModeFlagQueue) == Result::Ok) return;
-                SKSE::log::info("Magelight[v4]: {} skipped — {}", detail, GetLastErrorMessage(OwnerOf(q.view)));
+                SKSE::log::info("Magelight[v4]: {} skipped — {}", detail, LastErrorText(OwnerOf(q.view)));
             }
         }
 
@@ -1117,6 +1119,7 @@ namespace Magelight::Api4 {
         if (n == "auxbuttons") return 1;    // mouse back/forward as buttons 3/4 and auxclick, no click or dblclick; no middle-click autoscroll (1.5.0)
         if (n == "imecandidates") return Magelight::VR::IsLive() ? 0 : 1;   // the page core draws the IME's candidate list (1.5.0); flat only
         if (n == "gamepad") return Magelight::GamepadAvailable() ? 1 : 0;   // SetViewGamepad / manifest "gamepad" / magelight.gamepad (1.6.0); flat only
+        if (n == "pagethread") return Magelight::PageThreadActive() ? 1 : 0;   // render-thread callbacks run on the page thread (1.7.0); flat only
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1126,6 +1129,15 @@ namespace Magelight::Api4 {
         std::lock_guard<std::mutex> lk(s_mutex);
         Mod* m = FindLocked(mod);
         return m ? m->lastError.c_str() : "";
+    }
+
+    // The host's own reading of a mod's last error, copied under the lock: the pointer GetLastErrorMessage hands out
+    // lives only until the mod's next failing call, which with pageThread can come from the page thread meanwhile.
+    std::string LastErrorText(ModId mod)
+    {
+        std::lock_guard<std::mutex> lk(s_mutex);
+        Mod* m = FindLocked(mod);
+        return m ? m->lastError : std::string();
     }
 
     Result BindHotkey(ViewId view, std::uint32_t dxScancode, std::uint32_t action)
@@ -1242,7 +1254,7 @@ namespace Magelight::Api4 {
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
-                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad" };
+                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1804,7 +1816,7 @@ namespace Magelight::Api4 {
                 if (Magelight::GetUIModeView() == hk.view) {
                     const Result r = ReleaseUIModeAs(OwnerOf(hk.view), false);
                     if (r != Result::Ok)
-                        SKSE::log::warn("Magelight[v4]: hotkey close refused — {}", GetLastErrorMessage(OwnerOf(hk.view)));
+                        SKSE::log::warn("Magelight[v4]: hotkey close refused — {}", LastErrorText(OwnerOf(hk.view)));
                     // A toggle key's close means HIDE. ReleaseUIMode alone keeps
                     // the page rendered (the Free Look contract: leaving UI mode
                     // never hides), which is right for a mod that asked for it
@@ -1888,7 +1900,7 @@ namespace Magelight::Api4 {
         vd.layer = Layer::Panel;
         ViewId id = 0;
         if (CreateViewEx(s_hostMod, &vd, &id) != Result::Ok) {
-            SKSE::log::warn("Magelight[v4]: host probe view failed — {}", GetLastErrorMessage(s_hostMod));
+            SKSE::log::warn("Magelight[v4]: host probe view failed — {}", LastErrorText(s_hostMod));
             return 0;
         }
         return id;

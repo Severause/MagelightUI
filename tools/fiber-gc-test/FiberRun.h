@@ -3,8 +3,11 @@
 // MG_PAGE_FIBER=1: a 1 MB thread holding back 64 KB of its stack (CrashLogger's stack guarantee) runs main on an 8 MB
 // fiber with a 64 KB guarantee of its own, and BetweenFrames(), called from the tool's frame pump, takes the thread
 // off the fiber once and back, holding the page VM's lock while it is off, as the host does (src/PageStackCore.h).
-// Without MG_PAGE_FIBER, Run calls main directly and BetweenFrames does nothing. The tool's build puts src\ on the
-// include path.
+// With MG_PAGE_THREAD=1 instead (it wins when both are set), main runs as Magelight's page thread runs pages
+// (pageThread, invariant 27): on a thread of its own with an 8 MB stack and a 64 KB guarantee, made by the process's
+// main thread, which loaded the runtime and goes on with work of its own until main returns; BetweenFrames does
+// nothing there. Without either, Run calls main directly and BetweenFrames does nothing. The tool's build puts src\
+// on the include path.
 
 #ifndef NOMINMAX
 #define NOMINMAX   // a no-op when the tool included <windows.h> already; otherwise keeps std::min / std::max usable
@@ -65,16 +68,46 @@ namespace FiberRun {
             }
             return static_cast<DWORD>(g_result);
         }
+
+        inline DWORD WINAPI PageThread(LPVOID)
+        {
+            SetThreadDescription(GetCurrentThread(), L"FiberRun page thread");
+            ULONG g = 64 * 1024;
+            SetThreadStackGuarantee(&g);
+            g_result = g_main(g_argc, g_argv);
+            return static_cast<DWORD>(g_result);
+        }
+
+        inline bool EnvIs1(const char* name)
+        {
+            char b[8] = {};
+            return GetEnvironmentVariableA(name, b, sizeof b) > 0 && b[0] == '1';
+        }
     }
 
-    inline bool Enabled()
-    {
-        char b[8] = {};
-        return GetEnvironmentVariableA("MG_PAGE_FIBER", b, sizeof b) > 0 && b[0] == '1';
-    }
+    inline bool ThreadEnabled() { return detail::EnvIs1("MG_PAGE_THREAD"); }
+    inline bool Enabled() { return !ThreadEnabled() && detail::EnvIs1("MG_PAGE_FIBER"); }
 
     inline int Run(int argc, char** argv, int (*main)(int, char**))
     {
+        if (ThreadEnabled()) {
+            std::printf("FiberRun: main on a thread of its own (8 MB stack, 64 KB guarantee), as Magelight's page "
+                        "thread (MG_PAGE_THREAD=1)\n");
+            detail::g_main = main;
+            detail::g_argc = argc;
+            detail::g_argv = argv;
+            HANDLE t = CreateThread(nullptr, static_cast<SIZE_T>(8) << 20, &detail::PageThread, nullptr,
+                                    STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+            if (!t) return 99;
+            while (WaitForSingleObject(t, 1) == WAIT_TIMEOUT) detail::GameWork();   // the game goes on meanwhile
+            DWORD code = 0;
+            GetExitCodeThread(t, &code);
+            CloseHandle(t);
+            std::fflush(nullptr);
+            // The tool's Ultralight objects belong to that thread: their static destructors must not run on this one.
+            TerminateProcess(GetCurrentProcess(), code);
+            return static_cast<int>(code);
+        }
         if (!Enabled()) return main(argc, argv);
         std::printf("FiberRun: main on an 8 MB fiber of a 1 MB thread (64 KB guarantees), the page VM's lock held "
                     "whenever the thread is off it (MG_PAGE_FIBER=1)\n");

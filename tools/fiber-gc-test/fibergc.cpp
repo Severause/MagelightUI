@@ -10,10 +10,15 @@
 //   --lock none     never: a collector helper thread then scans the thread off the fiber with the fiber's bounds
 //                   and crashes the process; build.bat requires that it still does
 //
+// --thread is the page thread's model instead (pageThread, invariant 27): every job, Renderer::Create included, runs
+// on a thread of its own with an 8 MB stack (--fibermb sizes it) and a 64 KB guarantee, while the game thread, which
+// loaded the runtime, goes on with its own work until the job is done. Between jobs the page thread waits on its own
+// stack, whose bounds are WebKit's, so --lock none must pass there; the lock modes apply on the page thread.
+//
 // Options: --gpu <dir> (MagelightGPU.dll from there on a D3D11 device; accelerated views), --rounds N (3),
 // --used KB (600 of the game's 1 MB in use at each switch), --guarantee KB (64), --fibermb N (8), --bench N (frame
-// jobs timed after the rounds). Exit 0 when every test passed; a crash exits with its exception code, after a line
-// naming it.
+// jobs timed after the rounds), --thread. Exit 0 when every test passed; a crash exits with its exception code,
+// after a line naming it.
 //   fibergc.exe <sdkDir> <stack-tests.js> [options]
 
 #define NOMINMAX
@@ -50,6 +55,7 @@ namespace
     int         g_guaranteeKb = 64;
     int         g_fiberMb = 8;
     int         g_bench = 0;
+    bool        g_thread = false;
     std::string g_sdk;
     std::string g_script;
 
@@ -295,13 +301,47 @@ namespace
         return g_jobResult;
     }
 
+    // ---- the page thread: as Magelight's PageThreadMain ------------------------------------------------------------
+    HANDLE g_go = nullptr;     // auto-reset: the game hands the page thread a job
+    HANDLE g_done = nullptr;   // auto-reset: the job is done
+
+    DWORD WINAPI PageThread(void*)
+    {
+        SetThreadDescription(GetCurrentThread(), L"fibergc page thread");
+        ULONG g = 64 * 1024;
+        SetThreadStackGuarantee(&g);
+        for (;;) {
+            WaitForSingleObject(g_go, INFINITE);
+            const Job job = g_job;
+            // Here, at the top of the thread's own stack, the lock modes as on the fiber.
+            if (g_lock == LockMode::Frame) g_vmLock.Release(g_exports);
+            g_jobResult = GuardedJob();
+            if (g_lock != LockMode::None && job != Job::Shutdown) g_vmLock.Hold(g_exports);
+            SetEvent(g_done);
+            if (job == Job::Shutdown) return 0;
+        }
+    }
+
+    // The game thread hands the job over and goes on with its own work until it is done, as the host's game thread
+    // goes on with its frame.
+    int RunOnPageThread()
+    {
+        SetEvent(g_go);
+        while (WaitForSingleObject(g_done, 0) == WAIT_TIMEOUT) {
+            volatile unsigned x = 0;
+            for (int i = 0; i < 20000; ++i) x += i;
+        }
+        return g_jobResult;
+    }
+
     int Run(Job j, int test = 0)
     {
         g_job = j;
         g_testIndex = test;
-        const int r = Deep(g_usedKb);
+        const int r = g_thread ? RunOnPageThread() : Deep(g_usedKb);
         if (r == 1) {
-            std::printf("STACK OVERFLOW on the page fiber (job %d, test %d)\n", static_cast<int>(j), test);
+            std::printf("STACK OVERFLOW on the page %s (job %d, test %d)\n", g_thread ? "thread" : "fiber",
+                        static_cast<int>(j), test);
             std::fflush(stdout);
             TerminateProcess(GetCurrentProcess(), 3);
         }
@@ -341,13 +381,28 @@ namespace
         }
         g_exports = PS::Resolve(GetModuleHandleA("WebCore.dll"));
         if (!g_exports.LockReady()) { std::printf("WebCore does not export %s\n", g_exports.missingLock); return 4; }
-        g_gameFiber = ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
-        g_pageFiber = CreateFiberEx(256 * 1024, static_cast<SIZE_T>(g_fiberMb) << 20, FIBER_FLAG_FLOAT_SWITCH, PageFiber, nullptr);
-        if (!g_gameFiber || !g_pageFiber) { std::printf("no fiber\n"); return 2; }
+        if (g_thread) {
+            g_go = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            g_done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!g_go || !g_done || !CreateThread(nullptr, static_cast<SIZE_T>(g_fiberMb) << 20, PageThread, nullptr,
+                                                  STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr)) {
+                std::printf("no page thread\n");
+                return 2;
+            }
+        } else {
+            g_gameFiber = ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
+            g_pageFiber = CreateFiberEx(256 * 1024, static_cast<SIZE_T>(g_fiberMb) << 20, FIBER_FLAG_FLOAT_SWITCH, PageFiber, nullptr);
+            if (!g_gameFiber || !g_pageFiber) { std::printf("no fiber\n"); return 2; }
+        }
         if (Run(Job::Init)) { std::printf("init failed\n"); return 2; }
         const char* lockName = g_lock == LockMode::Session ? "session" : g_lock == LockMode::Frame ? "frame" : "none";
-        std::printf("lock %s, %s, %d KB of the game's 1 MB used, guarantee %d KB, %d MB fiber, %d round(s)\n", lockName,
-                    g_mg ? "GPU (MagelightGPU.dll)" : "CPU", g_usedKb, g_guaranteeKb, g_fiberMb, g_rounds);
+        if (g_thread)
+            std::printf("lock %s, %s, pages on a thread of their own (%d MB stack, 64 KB guarantee), the game's guarantee "
+                        "%d KB, %d round(s)\n", lockName, g_mg ? "GPU (MagelightGPU.dll)" : "CPU", g_fiberMb, g_guaranteeKb,
+                        g_rounds);
+        else
+            std::printf("lock %s, %s, %d KB of the game's 1 MB used, guarantee %d KB, %d MB fiber, %d round(s)\n", lockName,
+                        g_mg ? "GPU (MagelightGPU.dll)" : "CPU", g_usedKb, g_guaranteeKb, g_fiberMb, g_rounds);
         std::fflush(stdout);
         int failures = 0;
         for (int round = 0; round < g_rounds; ++round) {
@@ -392,8 +447,8 @@ namespace
                 seen.push_back(QpcUs() - t0);
                 inside.push_back(g_jobUs);
             }
-            Stats("frame job (Update, RefreshDisplay, Render) as the game sees it", seen);
-            Stats("frame job on the fiber", inside);
+            if (!g_thread) Stats("frame job (Update, RefreshDisplay, Render) as the game sees it", seen);
+            Stats(g_thread ? "frame job on the page thread" : "frame job on the fiber", inside);
         }
         std::printf("done: %d round(s), %d failure(s)\n", g_rounds, failures);
         std::fflush(stdout);
@@ -408,7 +463,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3) {
         std::printf("usage: fibergc <sdkDir> <stack-tests.js> [--lock session|frame|none] [--gpu dir] [--rounds N]\n"
-                    "               [--used KB] [--guarantee KB] [--fibermb N] [--bench N]\n");
+                    "               [--used KB] [--guarantee KB] [--fibermb N] [--bench N] [--thread]\n");
         return 2;
     }
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
@@ -426,6 +481,7 @@ int main(int argc, char** argv)
         else if (a == "--guarantee") g_guaranteeKb = std::atoi(next().c_str());
         else if (a == "--fibermb") g_fiberMb = std::atoi(next().c_str());
         else if (a == "--bench") g_bench = std::atoi(next().c_str());
+        else if (a == "--thread") g_thread = true;
         else { std::printf("unknown option %s\n", a.c_str()); return 2; }
     }
     std::ifstream in(argv[2], std::ios::binary);

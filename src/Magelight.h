@@ -362,6 +362,9 @@ namespace Magelight {
     bool GamepadAvailable();               // flat, and Magelight.json "gamepad" enabled
     bool GamepadConnected();               // as the last input batch saw it
     Gamepad::Glyphs GamepadGlyphs();       // the prompt labels Magelight.json chose
+    // Magelight.json "pageThread" on (flat) and not refused at render init: render-thread callbacks run on the page
+    // thread. True from the settings' load until a refusal turns it false for the session (1.7.0).
+    bool PageThreadActive();
     ViewId GetUIModeView();                // the current/last UI-mode target (0 = none)
     std::uint32_t GetToggleKey();          // the host's own UI-mode toggle scancode (Magelight.json)
     bool IsUIModeActive();
