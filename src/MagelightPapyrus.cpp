@@ -296,7 +296,7 @@ namespace Magelight::Papyrus {
             vd.layer = ParseLayer(Str(layer));
             ViewId id = 0;
             if (Api4::CreateViewEx(mod, &vd, &id) != Result::Ok) {
-                SKSE::log::warn("Magelight[papyrus]: CreateView('{}'/'{}') — {}", slug, vname, Api4::GetLastErrorMessage(mod));
+                SKSE::log::warn("Magelight[papyrus]: CreateView('{}'/'{}') — {}", slug, vname, Api4::LastErrorText(mod));
                 return 0;
             }
             return static_cast<std::int32_t>(id);
@@ -460,7 +460,7 @@ namespace Magelight::Papyrus {
         RE::BSFixedString GetLastError(RE::StaticFunctionTag*, RE::BSFixedString modId)
         {
             const ModId mod = Api4::FindMod(Str(modId).c_str());
-            return mod ? Api4::GetLastErrorMessage(mod) : "";
+            return mod ? Api4::LastErrorText(mod).c_str() : "";
         }
 
         // "file" or "loopback" for a script-owned mod (registered here if it

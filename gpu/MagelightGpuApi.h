@@ -15,6 +15,7 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
+struct ID3D11CommandList;
 
 #ifdef MGGPU_BUILD
 #  define MGGPU_API __declspec(dllexport)
@@ -24,7 +25,7 @@ struct ID3D11ShaderResourceView;
 
 // The C ABI's revision: bump it whenever an MgGpu_* signature or meaning changes. The host refuses a backend built
 // with another revision. A backend exports every function below; the host treats a missing one as a broken build.
-#define MGGPU_CONTRACT 2u
+#define MGGPU_CONTRACT 3u
 
 extern "C" {
 
@@ -44,7 +45,10 @@ extern "C" {
 
     // Create a driver bound to the GAME's device/context (not owned). `log`
     // receives human-readable errors (may be null). Returns an opaque handle,
-    // or null on failure.
+    // or null on failure. Contract 3: the context may be a deferred context of
+    // that device (the host's page thread). Every call below then records into
+    // it, and the host runs the list on the immediate context; only the thread
+    // that owns Ultralight calls the driver, whichever context it was given.
     typedef void (*MgGpuLogFn)(const char* message);
     MGGPU_API void* MgGpu_Create(ID3D11Device* device, ID3D11DeviceContext* context, MgGpuLogFn log);
 
@@ -71,12 +75,23 @@ extern "C" {
     // ID3D11ShaderResourceView* for a driver texture id (a View's
     // render_target().texture_id) — what the host's compositor samples.
     // Null if unknown. Not a plain getter: with MSAA on, this call records
-    // the resolve on the immediate context, so its contents are current only
-    // as of this call. Render thread only, after DrawCommandList, once per
+    // the resolve on the driver's context (the immediate one, or under
+    // contract 3 the page thread's deferred one, run with its list), so its
+    // contents are current only as of this call. Render thread only, after DrawCommandList, once per
     // frame whose pixels you read; the pointer is stable for the texture's
     // life, but never reuse it across frames without calling again (a cached
     // or before-draw read shows a stale frame).
     MGGPU_API void* MgGpu_GetTextureSRV(void* handle, std::uint32_t texture_id);
+
+    // Contract 3, a deferred context only: the driver splits its recording at
+    // each CommandType::Flush, where the in-frame driver flushes the immediate
+    // context (some driver stacks, desktop NVIDIA among them, lose the order of
+    // a texture drawn into, sampled and drawn into again without one). This
+    // hands over the oldest part not yet taken, with its reference, or null.
+    // The host runs the parts in order, flushing the immediate context after
+    // each, then the list it finishes itself. Always null on an immediate
+    // context. The thread that calls the driver.
+    MGGPU_API ID3D11CommandList* MgGpu_TakeCommandList(void* handle);
 
     // ── External textures (Ultralight ImageSource) ──────────────────────
     // Register an SRV the HOST (or an embedding mod) owns under a fresh
@@ -107,7 +122,7 @@ extern "C" {
         std::uint64_t textureBytes;          // live textures that are not render targets (external ones excluded)
         std::uint64_t targetBytes;           // live render-target textures, single-sample
         std::uint64_t msaaBytes;             // live multisample surfaces
-        std::uint64_t flushes;               // CommandType::Flush commands executed since MgGpu_Create
+        std::uint64_t flushes;               // CommandType::Flush commands since MgGpu_Create (a flush, or on a deferred context a split)
     };
     // 1 when filled, 0 for a null handle or `out`. Render thread (the counters are the driver's, unlocked).
     MGGPU_API int MgGpu_GetStats(void* handle, MgGpuStats* out);

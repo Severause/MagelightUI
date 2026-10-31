@@ -211,13 +211,24 @@ namespace mggpu {
     // ── GPU context (SDK GPUContextD3D11, adapted) ──────────────────────────────
     // MG: wraps the GAME's device and immediate context (not owned) instead of creating a device; no swap chains;
     // creating it touches no pipeline state; the MSAA sample count is the host's (SetSampleCount), where the SDK
-    // fixes 8x; the capabilities are measured on the game's device.
+    // fixes 8x; the capabilities are measured on the game's device. The context may instead be a deferred context of
+    // that device (the host's page thread): everything the driver does is then recorded, and the game's thread runs
+    // the list at Present. immediate_context() names the context the driver draws through either way.
     class GPUContextD3D11 {
     public:
         GPUContextD3D11(ID3D11Device* device, ID3D11DeviceContext* context)
             : device_(device), immediate_context_(context)
         {
             immediate_context_->QueryInterface(IID_PPV_ARGS(context1_.GetAddressOf()));
+            // MG: without command lists in the graphics driver the runtime emulates them, which reads a boxed
+            // UpdateSubresource's source from another place (UpdateTexture).
+            deferred_ = immediate_context_->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED;
+            if (deferred_) {
+                D3D11_FEATURE_DATA_THREADING threading{};
+                native_lists_ = SUCCEEDED(device_->CheckFeatureSupport(D3D11_FEATURE_THREADING, &threading,
+                                                                       sizeof(threading)))
+                                && threading.DriverCommandLists;
+            }
             feature_level_ = device_->GetFeatureLevel();
             uav_slots_ = (feature_level_ >= D3D_FEATURE_LEVEL_11_1 && context1_) ? D3D11_1_UAV_SLOT_COUNT
                                                                                  : D3D11_PS_CS_UAV_REGISTER_COUNT;
@@ -243,6 +254,8 @@ namespace mggpu {
         ID3D11Device* device() { return device_; }
         ID3D11DeviceContext* immediate_context() { return immediate_context_; }
         ID3D11DeviceContext1* context1() { return context1_.Get(); }
+        bool deferred() const { return deferred_; }           // MG
+        bool native_lists() const { return native_lists_; }   // MG: meaningful only when deferred()
         UINT uav_slots() const { return uav_slots_; }
 
         // MG: the MSAA sample count of antialiased render targets created from now on (1 = off). A count the
@@ -365,6 +378,8 @@ namespace mggpu {
         ID3D11Device* device_ = nullptr;                    // MG: not owned
         ID3D11DeviceContext* immediate_context_ = nullptr;  // MG: not owned
         ComPtr<ID3D11DeviceContext1> context1_;             // MG: null below the 11.1 runtime
+        bool deferred_ = false;                             // MG: immediate_context_ is a deferred context
+        bool native_lists_ = false;                         // MG: the graphics driver runs command lists itself
         D3D_FEATURE_LEVEL feature_level_ = D3D_FEATURE_LEVEL_11_0;
         UINT uav_slots_ = D3D11_PS_CS_UAV_REGISTER_COUNT;
         UINT sample_count_ = 1;
@@ -768,12 +783,15 @@ namespace mggpu {
 
             auto pixels = bitmap->LockPixelsSafe();
             if (!pixels.data()) return;
-            const uint8_t* src = static_cast<const uint8_t*>(pixels.data())
-                + static_cast<size_t>(rect.top) * bitmap->row_bytes()
-                + static_cast<size_t>(rect.left) * bitmap->bpp();
             const D3D11_BOX box = { static_cast<UINT>(rect.left), static_cast<UINT>(rect.top), 0,
                                     static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom), 1 };
-            const ScopedNoPredication no_predication(context_->immediate_context());
+            // MG: the source points at the box's first texel, except on a deferred context whose command lists the
+            // runtime emulates: that applies the box's offset to the source a second time, so it gets the bitmap's
+            // origin instead (Microsoft's documented workaround; tools/deferred-test's upload case on WARP).
+            const uint8_t* src = static_cast<const uint8_t*>(pixels.data());
+            if (!context_->deferred() || context_->native_lists())
+                src += static_cast<size_t>(rect.top) * bitmap->row_bytes() + static_cast<size_t>(rect.left) * bitmap->bpp();
+            const ScopedNoPredication no_predication(context_->immediate_context());   // MG: a no-op on a deferred one
             context_->immediate_context()->UpdateSubresource(entry.texture.Get(), 0, &box, src,
                                                              static_cast<UINT>(bitmap->row_bytes()), 0);
         }
@@ -892,8 +910,34 @@ namespace mggpu {
         }
 
         // Some driver stacks reorder sampling draws against a following clear/draw of the same texture; submitting
-        // the pending work closes that window.
-        void Flush() override { context_->immediate_context()->Flush(); }
+        // the pending work closes that window. MG: a list cannot record a flush, so on a deferred context the
+        // recording is split here instead: the part so far becomes a list of its own (MgGpu_TakeCommandList), which
+        // the host runs and then flushes the immediate context after, as here. A part ends in the default state, so
+        // the next draw binds all of its own again.
+        void Flush() override
+        {
+            if (!context_->deferred()) {
+                context_->immediate_context()->Flush();
+                return;
+            }
+            ComPtr<ID3D11CommandList> part;
+            const HRESULT hr = context_->immediate_context()->FinishCommandList(FALSE, part.GetAddressOf());
+            if (FAILED(hr)) {
+                LogFailure("FinishCommandList (split at a flush)", hr, context_->device());
+                return;
+            }
+            parts_.push_back(std::move(part));
+            bound_.valid = false;
+        }
+
+        // MG: MgGpu_TakeCommandList: the oldest part a flush split off, with its reference, or null.
+        ID3D11CommandList* TakePart()
+        {
+            if (parts_.empty()) return nullptr;
+            ID3D11CommandList* part = parts_.front().Detach();
+            parts_.erase(parts_.begin());
+            return part;
+        }
 
         void DrawGeometry(uint32_t geometry_id, uint32_t indices_count, uint32_t indices_offset,
                           const GPUState& state) override
@@ -1009,18 +1053,22 @@ namespace mggpu {
             bound_.valid = bound_.active;
         }
 
-        // MG: the command list runs between a capture and a restore of the game's pipeline state.
+        // MG: the command list runs between a capture and a restore of the game's pipeline state. A deferred
+        // context holds no state of the game's: the host captures and restores around running the list instead.
         void DrawCommandList() override
         {
             if (command_list_.empty()) return;
-            backup_.Capture(*context_);
-            PipelineBackup::Neutralize(context_->immediate_context());
+            const bool game_state = !context_->deferred();
+            if (game_state) {
+                backup_.Capture(*context_);
+                PipelineBackup::Neutralize(context_->immediate_context());
+            }
             bound_.active = true;
             bound_.valid = false;
             GPUDriverImpl::DrawCommandList();
             bound_.active = false;
             bound_.valid = false;
-            backup_.Restore(*context_);
+            if (game_state) backup_.Restore(*context_);
         }
 
         // MG: host compositor support — the SRV for a View's target texture, resolved first when it is drawn
@@ -1533,6 +1581,7 @@ namespace mggpu {
 
         GPUContextD3D11* context_;
         PipelineBackup backup_;
+        std::vector<ComPtr<ID3D11CommandList>> parts_;   // MG: a deferred context's recording, split at each Flush
         bool shaders_loaded_ = false;
         ComPtr<ID3D11VertexShader> vs_path_;
         ComPtr<ID3D11VertexShader> vs_quad_;
@@ -1646,6 +1695,12 @@ extern "C" {
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
         if (h) h->driver->UnregisterExternal(texture_id);
+    }
+
+    ID3D11CommandList* MgGpu_TakeCommandList(void* handle)
+    {
+        auto* h = static_cast<MgGpuHandle*>(handle);
+        return h ? h->driver->TakePart() : nullptr;
     }
 
     int MgGpu_GetStats(void* handle, MgGpuStats* out)

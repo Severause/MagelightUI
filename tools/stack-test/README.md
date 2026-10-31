@@ -9,7 +9,9 @@ the session. A stack guarantee on that thread makes it worse: CrashLogger 1.23 a
 recursion limit, overflows with nothing deep on the stack at all. Since 1.3.0 the page work runs on a stack of
 its own (`"ulFiberMB"`, 8 MB by default). The Ultralight 2.0 build (1.5.0) keeps it, holding the page VM's lock
 whenever the thread is off it (`src/PageStackCore.h`; its gate is `tools/fiber-gc-test`), and with
-`"ulFiberMB": 0` sets JavaScriptCore's stack zones past the thread's guarantee.
+`"ulFiberMB": 0` sets JavaScriptCore's stack zones past the thread's guarantee. With `"pageThread": true` (1.7.0)
+pages run on Magelight's page thread instead, a thread with a stack of its own (`ulFiberMB`, 8 MB when 0): every
+test passes there as on the page stack (offline: `fiber-gc-test --thread`).
 
 ## In game: `MgStackTest/`
 

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Magelight load test</title>
+<style>
+  :root { --bg: rgba(18, 16, 20, 0.94); --ink: #ece7df; --muted: #a39d94; --line: #3a3540; --accent: #d6b25e;
+          --on: #7fc48a; --bad: #e07a6a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { background: transparent; color: var(--ink); font: 14px/1.45 "Segoe UI", Arial, sans-serif; }
+  .panel { position: absolute; inset: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+           padding: 16px 18px; overflow: hidden; }
+  h1 { margin: 0 0 2px; font-size: 18px; color: var(--accent); font-weight: 600; }
+  p { margin: 2px 0 10px; color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; align-items: center; }
+  .label { width: 64px; color: var(--muted); }
+  button { font: inherit; color: var(--ink); background: #2b2730; border: 1px solid #4a4452; border-radius: 6px;
+           padding: 5px 10px; cursor: pointer; }
+  button:hover { background: #37323d; }
+  button.on { border-color: var(--on); color: var(--on); }
+  button.armed { border-color: var(--bad); color: var(--bad); }
+  .stats { margin-top: 10px; font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--accent); font-weight: 600; }
+  #field { position: absolute; left: 0; right: 0; bottom: 0; height: 120px; overflow: hidden;
+           border-top: 1px solid var(--line); }
+  .box { position: absolute; width: 10px; height: 10px; border-radius: 3px; background: rgba(214, 178, 94, 0.55); }
+</style>
+</head>
+<body>
+<div class="panel">
+  <h1>Magelight load test</h1>
+  <p>Script: this page burns that many milliseconds of script every frame. Layout: 300 boxes move every frame. Each
+     change is logged as a <code>[MgLoadTest]</code> line in <code>Magelight.log</code>, next to the cost lines.</p>
+  <div class="row" id="script"><span class="label">Script</span></div>
+  <div class="row" id="layout"><span class="label">Layout</span></div>
+  <div class="row"><span class="label">Hang</span><button id="hang">Hang this page</button></div>
+  <div class="stats">Page: <b id="fps">-</b> frames/s, script <b id="burn">0</b> ms a frame, layout <b id="lay">off</b></div>
+  <div id="field"></div>
+</div>
+<script src="load.js"></script>
+</body>
+</html>

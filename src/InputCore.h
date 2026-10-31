@@ -187,6 +187,24 @@ namespace Magelight::Input {
         "window.addEventListener('dblclick',function(e){if(e.button!==0&&e.isTrusted){e.stopImmediatePropagation();"
         "e.preventDefault();}},true);})();";
 
+    // The input queue (QueueInput) between the threads that make input and the render thread, which drains it once a
+    // frame, or once a page frame with pageThread, where a page's script can make one seconds long while the mouse
+    // keeps moving. A move replaces a move of the same pointer source still at the tail (the page needs where the
+    // pointer is, as a browser merges its mousemoves), and past kQueueSoftCap only what ends something still goes in,
+    // up to kQueueHardCap: a release, and the host's markers (`marker`: the focus change, the release after the window
+    // lost focus). Dropping those once the queue filled left a page that came back holding a press, a modifier and key
+    // focus outside UI mode. tailIsMoveOfSource: the last message queued is a WM_MOUSEMOVE of this message's source.
+    inline constexpr std::size_t kQueueSoftCap = 512, kQueueHardCap = 4096;
+    enum class QueueStep { Append, ReplaceTail, Drop };
+    inline QueueStep QueueRule(std::size_t queued, bool tailIsMoveOfSource, UINT msg, bool marker)
+    {
+        if (msg == WM_MOUSEMOVE && tailIsMoveOfSource) return QueueStep::ReplaceTail;
+        if (queued < kQueueSoftCap) return QueueStep::Append;
+        const bool ends = marker || msg == WM_LBUTTONUP || msg == WM_RBUTTONUP || msg == WM_MBUTTONUP ||
+                          msg == WM_XBUTTONUP || msg == WM_KEYUP || msg == WM_SYSKEYUP;
+        return ends && queued < kQueueHardCap ? QueueStep::Append : QueueStep::Drop;
+    }
+
     // Pointer routing over view ids, for DrainInputQueue (render thread). Each pointer source has its own press and
     // hover: the flat mouse, and each VR hand, whose ray points on its own. A press keeps its view for that source's
     // moves and releases until all of the source's buttons are up, as in a browser; another source's events go where
