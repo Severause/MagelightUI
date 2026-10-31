@@ -23,7 +23,7 @@
 
 namespace Magelight::PageThread {
 
-    // Magelight.json "pageThread": Off (the in-frame path), Wanted (asked for, not yet checked against the device),
+    // Magelight.json "pageThread": Off (the in-frame path), Wanted (the default, not yet checked against the device),
     // On (running). VR never asks for it (the setting is ignored there when it is read).
     enum class Mode { Off, Wanted, On };
 

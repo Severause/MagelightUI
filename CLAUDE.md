@@ -88,7 +88,8 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    thread, whose stack is its own in a frame and between frames, so there is no fiber, no game-stack zones, and
    the collector crash the lock prevents cannot happen (`fiber-gc-test --thread --lock none` must pass). The page
    thread still holds the lock between frames, for speed only (an idle frame about 13 us against 235). The mode
-   is decided at render init, before the renderer exists: the fiber and the page thread are never both used, and
+   is decided at render init, before the renderer exists (a page thread that gets no renderer hands render init back
+   to the game thread, `TakePageInitFailure`; after a fault nothing does): the fiber and the page thread are never both used, and
    the tools run on it with `MG_PAGE_THREAD=1`.
 2. **Listener callbacks fire on the render thread** (JS listeners, DOM ready, console, load
    failed): the game's main thread inside Present, or the page thread with `pageThread` (invariant 27). Game state = `GameTask::Post` (`MagelightGameTask.h` says why), never a raw
@@ -414,8 +415,8 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     script must not bring a View's first one, invariant 25); the answer also gives the VR keyboard its
     decimal keypad. `tools/ime-test` and `tools/ime-box-test` check it, on the fiber too; re-run them
     at every SDK bump.
-27. **The page thread (`pageThread`, 1.7.0, flat only).** With it on, Magelight's page thread (`PageThreadMain`)
-    owns Ultralight from `Renderer::Create` on and is the render thread of invariants 2, 13, 16 and 22-26: every page
+27. **The page thread (`pageThread`, 1.7.0, flat only, on unless `false`).** With it on, Magelight's page thread
+    (`PageThreadMain`) owns Ultralight from `Renderer::Create` on and is the render thread of invariants 2, 13, 16 and 22-26: every page
     part of the frame (`PageWorkBegin`, `MaterializeImages`, Update, the second sync, the prepaint, Render,
     `CollectView`, `TickMemoryReport`) runs there (`PageThreadFrame`) and nowhere else. `MagelightGPU.dll` gets a
     deferred context of the game's device (contract 3) and only the page thread calls it; the game's immediate

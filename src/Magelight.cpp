@@ -95,7 +95,7 @@ namespace Magelight {
     //   "msaa": 4             // GPU path: MSAA samples for page targets Ultralight antialiases (1 = off, 2, 4, 8)
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
-    //   "pageThread": false   // 1.7.0: pages run on a thread of their own, not in the game's frame (flat only)
+    //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
     //   "keyFallback": true   // 1.7.0: keys that reach DirectInput but not the window go to the page anyway (flat only)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
@@ -169,9 +169,11 @@ namespace Magelight {
     static constexpr int kMinFiberMb = 8;
     // Magelight.json "keyFallback" (1.7.0): see LostKeys in the keyboard poll.
     static bool s_keyFallback = true;
-    // Magelight.json "pageThread" (1.7.0): Ultralight on a thread of its own (PageThreadMain), the game thread only
-    // running its recorded GPU work and drawing its views. Wanted until render init asks the device
-    // (StartPageThread), then On or Off for the session. Its stack is ulFiberMB (8 when that is 0).
+    // Magelight.json "pageThread" (1.7.0, default on, flat only): Ultralight on a thread of its own (PageThreadMain),
+    // the game thread only running its recorded GPU work and drawing its views. LoadHostSettings makes it Wanted; render
+    // init asks the device (StartPageThread), then it is On or Off for the session. Its stack is ulFiberMB (8 when that
+    // is 0). The in-frame path has a bug the thread avoids: pages behind a frame-generation swapchain paint rounded,
+    // hover-only rows black.
     static std::atomic<PageThread::Mode> s_pageThreadMode{ PageThread::Mode::Off };
     static bool PageThreadOn() { return s_pageThreadMode.load() == PageThread::Mode::On; }
     // Cursor art: the flat cursor is drawn in code (MagelightCursorArt.h) and follows the page's CSS cursor.
@@ -478,6 +480,8 @@ namespace Magelight {
     // top of the file for the schema). Missing/corrupt file = defaults.
     static void LoadHostSettings()
     {
+        // Before the file: the default holds with no file, and with a corrupt one.
+        if (!REL::Module::IsVR()) s_pageThreadMode.store(PageThread::Mode::Wanted);
         try {
             // User config lives in the SKSE user-data dir (My Games/.../SKSE/
             // Magelight.json — beside the log and the cache, independent of
@@ -558,11 +562,13 @@ namespace Magelight {
                     SKSE::log::warn("Magelight: ulFiberMB {} is outside {}..64 - using {}", asked, kMinFiberMb,
                                     s_ulFiberMb);
             }
-            if (auto it = j.find("pageThread"); it != j.end() && it->is_boolean() && it->get<bool>()) {
-                if (REL::Module::IsVR())
+            if (auto it = j.find("pageThread"); it != j.end() && it->is_boolean()) {
+                if (!it->get<bool>()) {
+                    s_pageThreadMode.store(PageThread::Mode::Off);
+                    SKSE::log::info("Magelight: pageThread false - pages run in the game's frame");
+                } else if (REL::Module::IsVR()) {
                     SKSE::log::info("Magelight: pageThread is ignored on Skyrim VR - pages run in the game's frame");
-                else
-                    s_pageThreadMode.store(PageThread::Mode::Wanted);
+                }
             }
             if (auto it = j.find("keyFallback"); it != j.end() && it->is_boolean()) s_keyFallback = it->get<bool>();
             if (auto it = j.find("logLevel"); it != j.end() && it->is_string()) {
@@ -8084,7 +8090,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         InvalidateImage(s_probeImage);
     }
 
-    static bool StartPageThread();   // fwd (the page thread, below)
+    static bool StartPageThread();        // fwd (the page thread, below)
+    static void TakePageInitFailure();    // fwd
 
     static void EnsureRenderInit(IDXGISwapChain* sc)
     {
@@ -8745,6 +8752,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // still presenting (0.3.6), and that loading screen presents many
         // SECONDS of stable frames, so a stability streak passes on the wrong
         // thread too (0.3.7). Thread identity is the deterministic signal.
+        if (tid == s_mainThreadId) TakePageInitFailure();
         if (!s_renderInit) {
             // World-ready FALLBACK (0.17.9): SKSEVR never delivered kNewGame for
             // an Alternate Perspective new game (field 2026-09-03: SKSE dispatched
@@ -9127,6 +9135,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     };
     static ID3D11DeviceContext*             s_pageContext = nullptr;   // the page thread's deferred context
+    // Set by a page thread that got no renderer, after it let go of the driver; TakePageInitFailure takes it from there.
+    static std::atomic<bool>                s_pageInitFailed{ false };
     static PageThread::Handoff<PagePacket>* s_pageHandoff = nullptr;   // made once and never freed (invariant 3)
     static std::atomic<long long>           s_pageFrameSinceMs{ 0 };   // when the running page frame began; 0 = waiting
     static std::atomic<const char*>         s_pageStage{ "" };         // where the running page frame is
@@ -9309,13 +9319,19 @@ float4 ps_straight(VSOut i) : SV_Target {
                     SKSE::log::info("Magelight: WebKit's VM is up ({}); the page thread holds its lock between frames",
                                     s_vmLock.Vm());
             }
-        } else {
-            NoteRenderFailure("the page thread could not start Ultralight");   // a no-op when a step already said why
-            s_renderDead.store(true);
+        } else if (s_renderDead.load()) {
+            // A fault: Ultralight may be half built, so nothing tries it again.
             SKSE::log::error("Magelight: render-thread init failed on the page thread — overlay disabled");
+        } else {
+            // No renderer and no fault: the game thread starts Ultralight in its own frame with a driver of its own.
+            ultralight::Platform::instance().set_gpu_driver(nullptr);
+            if (s_gpu && s_gpuDestroy) s_gpuDestroy(s_gpu);
+            s_gpu = nullptr;
+            s_gpuActive = false;
+            s_pageInitFailed.store(true);
         }
-        // The overlay is off: the thread never touches Ultralight again, and never returns (WebKit's per-thread state
-        // would be torn down on the way out).
+        // Done with Ultralight: the thread never touches it again, and never returns (WebKit's per-thread state would
+        // be torn down on the way out).
         for (;;) Sleep(INFINITE);
     }
 
@@ -9354,6 +9370,19 @@ float4 ps_straight(VSOut i) : SV_Target {
                         "lists are {}", s_ulThreadId, stackMb,
                         !known ? "unknown" : threading.DriverCommandLists ? "native" : "emulated by Direct3D");
         return true;
+    }
+
+    // Game thread, every main-thread Present. A page thread that could not make a renderer hands render init back: the
+    // mode is Off and render init runs again now, as when the thread is refused. Costs one atomic after that.
+    static void TakePageInitFailure()
+    {
+        if (!s_pageInitFailed.exchange(false)) return;
+        if (s_pageContext) s_pageContext->Release();
+        s_pageContext = nullptr;
+        s_pageThreadMode.store(PageThread::Mode::Off);
+        s_ulThreadId = GetCurrentThreadId();
+        s_renderInit = false;
+        SKSE::log::warn("Magelight: the page thread could not start Ultralight; pages run in the game's frame");
     }
 
     // The frame at Present with the page thread: the game thread's bookkeeping, every page frame finished since the

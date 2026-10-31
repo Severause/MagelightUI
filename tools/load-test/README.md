@@ -1,7 +1,7 @@
 # Load test kit
 
-Measures what a heavy page costs the game's frame, with `"pageThread"` off (pages run in the game's frame, the
-default) and on (1.7.0: pages run on a thread of their own and the game thread only runs their recorded GPU work and
+Measures what a heavy page costs the game's frame, with `"pageThread"` off (pages run in the game's frame) and on
+(the default since 1.7.0: pages run on a thread of their own and the game thread only runs their recorded GPU work and
 draws them).
 
 ## In game: `MgLoadTest/`
@@ -22,9 +22,9 @@ log ties each cost line to the load that produced it.
 ### Protocol
 
 1. Stand somewhere repeatable (a quiet interior is steadiest). Note the game's frame rate with the panel closed.
-2. `"pageThread": false` (or absent): open the panel, then for each of 0, 5, 10 and 20 ms hold 30 s with the camera
+2. `"pageThread": false`: open the panel, then for each of 0, 5, 10 and 20 ms hold 30 s with the camera
    still and note the game's frame rate. Turn Layout on at 0 ms for 30 s.
-3. Quit, set `"pageThread": true` in `Magelight.json`, repeat step 2 at the same spot.
+3. Quit, set `"pageThread": true` (or remove it) in `Magelight.json`, repeat step 2 at the same spot.
 4. With the thread on: **Hang**. The game must keep running and the log must say
    `the page thread has been in ... for N s - its pages are frozen; the game goes on`; Escape and F10 must still
    close the panel and give the controls back, and the next `present cost` line must say `views=0` (the frozen

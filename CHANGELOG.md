@@ -65,18 +65,20 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **Pages can run on a thread of their own** (`Magelight.json` `"pageThread": true`, flat only; off by default in
-  this release). A page's scripts, layout and painting then no longer take time out of the game's frame: the game
+- **Pages run on a thread of their own** (flat only; `Magelight.json` `"pageThread": false` puts them back in the
+  game's frame). A page's scripts, layout and painting no longer take time out of the game's frame: the game
   thread only runs the GPU work the page thread recorded and draws the result, so a page that runs heavy script every
   frame costs its own frame rate, not the game's. A page stuck in a script freezes every page (they share the one
   page thread) but not the game: the game keeps running, the page's key and the toggle key still close it (Escape
   too, unless the page took Escape), and
   `Magelight.log` names the stall once with the page thread's stack. A page shows each frame one game frame later than in the game's frame; the cursor does not lag. Magelight
   turns the thread off for the session, with a log line saying why, on Skyrim VR, on a graphics device that cannot be
-  used from a second thread, or when the device (or a wrapper of it) refuses a deferred context; pages then run in
-  the game's frame as before.
+  used from a second thread, when the device (or a wrapper of it) refuses a deferred context, or when Ultralight will
+  not start on the thread; pages then run in the game's frame as before.
+- Page rows no longer turn black behind Community Shaders' frame generation (the thread avoids it). It still happens
+  with `"pageThread": false`.
 - A page no longer ignores the keyboard until you alt-tab. Keys that reach DirectInput but never reach the game's
-  window (seen on Windows 26300 builds) are passed to the page, so Escape, a page's own key and typing keep working.
+  window (seen on a few PCs, cause unknown) are passed to the page, so Escape, a page's own key and typing keep working.
   It only acts in a UI-mode session where the window has had no key press. `Magelight.json` `"keyFallback": false`
   turns it off, and `Magelight.log` says where keyboard focus was (`keyboard at UI mode entry`, `keyboard key lost`).
 - With the thread on, `Magelight.log`'s cost line every 2 s is the game thread's (`prelude`, `execute`,

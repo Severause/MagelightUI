@@ -21,9 +21,9 @@
 //    task to the game thread).
 //  - JS listener callbacks fire on the RENDER thread mid-frame — snapshot
 //    what you need, then post the game-state work with PostGameTask (0.30.1+).
-//    The render thread is the game's main thread inside Present, or, when the
-//    player turned on Magelight.json "pageThread" (host 1.7.0+, flat only),
-//    Magelight's own page thread, running at the same time as the game
+//    The render thread is the game's main thread inside Present (VR, hosts
+//    before 1.7.0, or Magelight.json "pageThread": false), or, by default on
+//    host 1.7.0+, flat only, Magelight's own page thread, running with the game
 //    thread (QueryCapability("pageThread") == 1): never assume either, the
 //    player can change it between sessions. Never touch RE:: state or the
 //    game's D3D11 immediate context from a render-thread callback (render
