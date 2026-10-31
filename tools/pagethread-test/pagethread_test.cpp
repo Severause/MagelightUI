@@ -125,6 +125,26 @@ int main()
     Check(Decide(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, true) == nullptr,
           "decide: other creation flags do not refuse");
 
+    // ---- Main-menu pages ----------------------------------------------------------------
+    Check(StartsAtMainMenu(true, true, true), "start: the page thread starts at the main menu for a main-menu page");
+    Check(!StartsAtMainMenu(false, true, true), "start: not once it is refused or already running");
+    Check(!StartsAtMainMenu(true, false, true), "start: not with no main-menu page");
+    Check(!StartsAtMainMenu(true, true, false), "start: not once the main menu has closed");
+    Check(MainMenuAskOpens(true, true, true, false), "ask: opens the page at the main menu");
+    Check(!MainMenuAskOpens(false, true, true, false), "ask: not without the page thread");
+    Check(!MainMenuAskOpens(true, false, true, false), "ask: not away from the main menu");
+    Check(!MainMenuAskOpens(true, true, false, false), "ask: not before the main thread takes over Present");
+    Check(!MainMenuAskOpens(true, true, true, true), "ask: not on a dead overlay");
+    Check(ViewShowsNow(false, true, true, false), "view: a main-menu page shows at the first main menu");
+    Check(ViewShowsNow(false, true, true, true), "view: and on a return to it");
+    Check(ViewShowsNow(false, true, false, false), "view: and through the load");
+    Check(ViewShowsNow(false, true, false, true), "view: and in the game");
+    Check(!ViewShowsNow(false, false, true, false), "view: another page waits at the first main menu");
+    Check(!ViewShowsNow(false, false, false, false), "view: and through the load, until the first in-game frame");
+    Check(ViewShowsNow(false, false, false, true), "view: and shows in the game");
+    Check(!ViewShowsNow(false, false, true, true), "view: and is not drawn over a return to the main menu");
+    Check(ViewShowsNow(true, false, true, true), "view: without the page thread every view shows, as before");
+
     // ---- Handoff: a page of uneven weight ---------------------------------------------------------------------------
     {
         Handoff<Packet> handoff;

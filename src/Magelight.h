@@ -352,6 +352,9 @@ namespace Magelight {
     // is complete (HostTheme::ResolveKeyboard); nullptr clears. False = no such view, or the keyboard's own. Any
     // thread. A page sets the same slot through magelight.hostTheme (the reserved '__hosttheme' channel).
     bool SetViewKeyboardTheme(ViewId view, const HostTheme::KbTheme* theme);
+    bool SetViewMainMenu(ViewId view, bool on);   // 1.7.1 false: the view is gone or an inspector
+    bool ViewOpensAtMainMenu(ViewId view);        // 1.7.1 the main menu is open and this view may show over it
+    bool MainMenuPagesAvailable();                // 1.7.1 the "mainMenu" capability: the page thread is on or wanted
     bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)
     // Gamepad layer (1.6.0, GamepadCore.h). The view's opt-in, kept across reloads; a config with enabled false
     // turns it off. False = no such view, or an inspector. Any thread: the input sink applies it at its next batch.

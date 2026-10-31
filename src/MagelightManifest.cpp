@@ -275,7 +275,7 @@ namespace Magelight::Manifest {
                     const std::string vctx = Magelight::SysInfo::ForLog(file) + " — view '" + vname + "': ";
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
-                                         "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad" }, vctx);
+                                         "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad", "mainMenu" }, vctx);
                     const std::string path = MJStr(v, "path", "", vctx);
                     if (!SafeRelative(path)) {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
@@ -314,6 +314,7 @@ namespace Magelight::Manifest {
                     // 0.31.0: manifest views exist before the world loads, so this always lands before the first load.
                     if (MJBool(v, "loadOnShow", false, vctx)) Api4::SetViewLoadOnShow(id, true);
                     if (MJBool(v, "prepaint", false, vctx)) Api4::SetViewPrepaint(id, true);   // 0.31.11
+                    if (MJBool(v, "mainMenu", false, vctx)) Api4::SetViewMainMenu(id, true);   // 1.7.1
                     // 1.6.0: the gamepad layer. true = the keys style (no script needed); "keys" | "navigation";
                     // or { "style": "keys" | "navigation", "cursor": bool }.
                     if (auto gp = v.find("gamepad"); gp != v.end()) {

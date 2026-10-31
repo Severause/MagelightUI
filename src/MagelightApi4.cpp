@@ -1121,6 +1121,7 @@ namespace Magelight::Api4 {
         if (n == "gamepad") return Magelight::GamepadAvailable() ? 1 : 0;   // SetViewGamepad / manifest "gamepad" / magelight.gamepad (1.6.0); flat only
         if (n == "pagethread") return Magelight::PageThreadActive() ? 1 : 0;   // render-thread callbacks run on the page thread (1.7.0); flat only
         if (n == "vrgaze") return 1;        // VRPlacementDesc::flags kVRPlacementAtGaze / manifest vr.atGaze (1.6.1)
+        if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1206,10 +1207,13 @@ namespace Magelight::Api4 {
     namespace {
         // A hotkey must never OPEN over an engine menu, the console, or a
         // text field the game owns; closing is always allowed.
-        bool EngineBlocksHotkey()
+        bool EngineBlocksHotkey(ViewId view)
         {
             if (auto* ui = RE::UI::GetSingleton()) {
-                if (ui->GameIsPaused() || ui->IsMenuOpen(RE::Console::MENU_NAME)) return true;
+                // The main menu pauses the game and a main-menu page opens over it, but over nothing else: a second
+                // pause is another menu on top of it, or the load.
+                if (ui->GameIsPaused() && !(Magelight::ViewOpensAtMainMenu(view) && ui->numPausesGame <= 1)) return true;
+                if (ui->IsMenuOpen(RE::Console::MENU_NAME)) return true;
             }
             if (auto* cm = RE::ControlMap::GetSingleton()) {
                 if (cm->GetRuntimeData().textEntryCount > 0) return true;
@@ -1255,7 +1259,7 @@ namespace Magelight::Api4 {
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
-                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze" };
+                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1725,6 +1729,15 @@ namespace Magelight::Api4 {
         return Result::Ok;
     }
 
+    // 1.7.1 (Magelight::SetViewMainMenu).
+    Result SetViewMainMenu(ViewId view, bool on)
+    {
+        if (const Result g = GateView(view, "SetViewMainMenu"); g != Result::Ok) return g;
+        if (!Magelight::SetViewMainMenu(view, on))
+            return Fail(OwnerOf(view), Result::InvalidView, "SetViewMainMenu: view is gone or is an inspector");
+        return Result::Ok;
+    }
+
     Result GetViewGamepadState(ViewId view, MAGELIGHT_API::GamepadState* out)
     {
         if (const Result g = GateView(view, "GetViewGamepadState"); g != Result::Ok) return g;
@@ -1833,7 +1846,7 @@ namespace Magelight::Api4 {
                 }
                 return;
             }
-            if (EngineBlocksHotkey()) { SKSE::log::info("Magelight[v4]: hotkey ignored — an engine menu, the console or text entry is open"); return; }
+            if (EngineBlocksHotkey(hk.view)) { SKSE::log::info("Magelight[v4]: hotkey ignored — an engine menu, the console or text entry is open"); return; }
             RequestUIMode(hk.view, hk.action == kHotkeyActionToggleUIModePaused ? kUIModeFlagPause : kUIModeFlagNone);
         });
     }

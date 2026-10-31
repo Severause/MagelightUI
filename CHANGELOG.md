@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.7.1 | 10701 | UI mode asked at the main menu opens the page there; `SetViewMainMenu`, manifest `"mainMenu"`, `QueryCapability("mainMenu")` (flat, page thread); `UIModeRefused` detail `view does not show here` |
 | 1.7.0 | 10700 | `QueryCapability("pagethread")`, `capabilities.pageThread`: whether render-thread callbacks run on Magelight's page thread (`Magelight.json` `"pageThread"`, flat only) |
 | 1.6.1 | 10601 | `VRPlacementDesc::flags` with `kVRPlacementAtGaze` and manifest `vr.atGaze`: a view placed where the player is looking, pitch included; `QueryCapability("vrGaze")` |
 | 1.6.0 | 10600 | The gamepad layer: `SetViewGamepad` / `GetViewGamepadState`, manifest `"gamepad"`, page `window.magelight.gamepad`; a `keys` style (A Enter, B Escape, d-pad and stick the arrows) and a `navigation` style (actions, focus scopes, prompts, an optional stick cursor); flat only; `QueryCapability("gamepad")`, `capabilities.gamepad` |
@@ -60,6 +61,26 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.7.1 - Unreleased
+
+### What players notice
+
+- **Pages can open at the main menu** when a mod asks for them there (flat only, with the page thread, which is on by
+  default). A mod that does not ask behaves as before: its pages start with the game, and they are not drawn over the
+  main menu when you quit back to it.
+
+### For mod authors
+
+- Asking for UI mode at the main menu used to be refused with "renderer not ready" until the renderer was up. It now
+  opens the page: Ultralight starts if it has not, and the view becomes a main-menu page. So guard the ask if your page
+  needs a world: there is no player or cell yet. A request before the game's main thread presents the menu, in its first
+  seconds, is still refused. If the page thread cannot start, UI mode ends again.
+- `SetViewMainMenu(view, true)` or the manifest key `"mainMenu": true` does it ahead of time: the view loads and shows
+  at the main menu, a return to it included, and its hotkey works there unless another menu is up.
+  `QueryCapability("mainMenu")` is 1 when it can (0 on VR and with `"pageThread": false`, where nothing changes). With the
+  page thread only main-menu pages load early and are drawn there, at Present, or in the UI pass in engine mode. UI mode
+  closes when a load starts; a page shown without UI mode is yours to hide. A world freeze is ignored at the main menu.
 
 ## 1.7.0 - Unreleased
 

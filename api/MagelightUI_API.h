@@ -602,10 +602,11 @@ namespace MAGELIGHT_API {
                                                             // "auxButtons" "imeCandidates" (1.5.0;
                                                             // "ime" is 0 in VR from 1.5.0), "gamepad"
                                                             // (1.6.0; 0 in VR), "vrGaze" (1.6.1), "pageThread" (1.7.0: 1 when
-                                                            // render-thread callbacks run, or once the world is
-                                                            // up will run, on Magelight's page thread; it can
-                                                            // turn 0 for the session when the world comes up,
-                                                            // never back; see the threading contract; 0 in VR). The
+                                                            // render-thread callbacks run, or once the renderer
+                                                            // starts will run, on Magelight's page thread; it can
+                                                            // turn 0 for the session when the renderer starts,
+                                                            // never back; see the threading contract; 0 in VR),
+                                                            // "mainMenu" (1.7.1: follows "pageThread"). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -898,6 +899,19 @@ namespace MAGELIGHT_API {
         // out or a size below the 1.6.0 struct; InvalidView for a view that is
         // gone or an inspector.
         Result (*GetViewGamepadState)(ViewId view, GamepadState* out);
+
+        // ── appended in 1.7.1 — gate on hostVersionNumber >= 10701 and QueryCapability("mainMenu") ──
+        // Asking for UI mode at the main menu is enough to open a view there (flat, with the page thread): the view
+        // becomes a main-menu page and Ultralight starts if it has not. So never ask there unless your page works
+        // without a world: no player, no cell. A request in the first seconds of the main menu, before the game's main
+        // thread presents it, is refused as before. This call makes a view one ahead of that: its page loads at the
+        // main menu, a shown view draws there, and a manifest or v4 hotkey opens it there (manifest "mainMenu": true
+        // does the same). A view stays one for the session; false undoes it. Any other view waits for the first
+        // in-game frame and is not drawn over the main menu. On VR or with Magelight.json "pageThread": false the call
+        // succeeds and does nothing (QueryCapability("mainMenu") is 0 there). UI mode closes when a load starts, and if
+        // the page thread cannot start; a page shown without UI mode is yours to hide when the main menu closes. Any
+        // thread. InvalidView for a view that is gone or an inspector.
+        Result (*SetViewMainMenu)(ViewId view, bool on);
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)
