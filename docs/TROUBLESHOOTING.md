@@ -446,7 +446,7 @@ it read, or says that defaults are in effect.
 | `vr` | see below | Skyrim VR only |
 
 The `vr` block: `enabled` (`true`), `mirror` (`true`: keep drawing pages on the desktop mirror),
-`panelFollow` (`false`: a panel stays where it opened; `true` glides it back when you look away,
+`panelFollow` (`false`: a panel stays where it opened; `true` glides it back when you look away, except a panel you grabbed with the grip, which stays put until it is next opened (1.6.1),
 tuned by `followAngleDeg` 45, `followMinDeg` 80 and `followDistM` 0.5), `panelDistanceM` (1.2),
 `panelWidthM` (1.6), `panelHeightOffsetM` (-0.1), `panelWidth` / `panelHeight` (1600 / 900, the
 page size of fullscreen views), `keyboard` (`true`: Magelight's own laser keyboard for text

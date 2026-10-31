@@ -14,6 +14,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | Added | Gate | Feature |
 |---|---|---|
 | 1.7.0 | 10700 | `QueryCapability("pagethread")`, `capabilities.pageThread`: whether render-thread callbacks run on Magelight's page thread (`Magelight.json` `"pageThread"`, flat only) |
+| 1.6.1 | 10601 | `VRPlacementDesc::flags` with `kVRPlacementAtGaze` and manifest `vr.atGaze`: a view placed where the player is looking, pitch included; `QueryCapability("vrGaze")` |
 | 1.6.0 | 10600 | The gamepad layer: `SetViewGamepad` / `GetViewGamepadState`, manifest `"gamepad"`, page `window.magelight.gamepad`; a `keys` style (A Enter, B Escape, d-pad and stick the arrows) and a `navigation` style (actions, focus scopes, prompts, an optional stick cursor); flat only; `QueryCapability("gamepad")`, `capabilities.gamepad` |
 | 1.5.0 | 10500 | Key events as in a browser: `KeyboardEvent.code`, a `key` from the player's layout and `location`, on flat and in VR; Alt, F10 and Alt+key reach the page; `QueryCapability("keyboardcode")`, `capabilities.keyboardCode` |
 | 1.5.0 | 10500 | Mouse buttons 4 and 5 as back / forward with `auxclick` (never `click` or `dblclick`); no middle-click autoscroll; `QueryCapability("auxbuttons")`, `capabilities.auxButtons` |
@@ -116,7 +117,6 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   pages on a real thread need no VM lock (its `build.bat` gates it), and `FiberRun.h`'s `MG_PAGE_THREAD=1` runs any
   page-facing tool there.
 - `tools/load-test/MgLoadTest`: the in-game load kit (`package.ps1` zips it).
-
 ## 1.6.1 - Unreleased
 
 ### What players notice
@@ -136,6 +136,19 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   `std::filesystem::path(std::u8string(...))` or `MultiByteToWideChar(CP_UTF8, ...)`, never `path(std::string)`.
 - The C++ quick start (`docs/CPP.md`) and the two C++ examples built their page path with `path::string()`, which
   throws in your own plugin for such a folder: they use `u8string()` now; copy that.
+- **In VR, the grip grabs a page.** Point at a page and squeeze the grip: the page hangs on your laser and goes where
+  you point until you let go, then stays there while it is open, even with `panelFollow` on. While you hold it, the
+  same hand's stick turns it left or right (up to 60 degrees either way) and pushes it away (up) or pulls it closer
+  (down), and does not scroll the page. A grip that points at no page still brings every page back in front of you.
+- **In VR, the game's red quill pointer no longer shows at the edges of a page** while a page holds UI mode, whichever
+  mod's page it is (SeverActions hid it for its own pages only).
+
+### For mod authors: new API and capabilities
+
+- **`VRPlacementDesc::flags`**, appended to the struct (an older host accepts the larger struct and ignores the field).
+  `kVRPlacementAtGaze` places a view where the player is looking, pitch included and held within 60 degrees of level,
+  tilted to face them, instead of level at eye height; manifest `"vr": { "atGaze": true }` does the same. It
+  applies at each placement (show, recentre), so pair it with WorldLocked. `QueryCapability("vrGaze")`.
 
 ## 1.6.0 - Unreleased
 

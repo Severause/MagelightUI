@@ -210,8 +210,49 @@ namespace Magelight::VR {
         return M;
     }
 
+    namespace {
+        constexpr float kGazeMaxPitchDeg = 60.0f;
+
+        // An at-gaze placement: centre on the gaze ray (its pitch held within kGazeMaxPitchDeg of level) plus
+        // heightOffset straight up, the quad turned to face back along that ray with no roll. False looking
+        // straight up or down, where the gaze has no heading to turn the quad by.
+        bool GazeMatrix(const vr::HmdMatrix34_t& hmd, const Placement& p, vr::HmdMatrix34_t& M, float fwd[2], float pos[3])
+        {
+            float hx = -hmd.m[0][2], hz = -hmd.m[2][2];
+            const float hn = std::sqrt(hx * hx + hz * hz);
+            if (hn < 1e-3f) return false;
+            hx /= hn; hz /= hn;
+            const float maxPitch = kGazeMaxPitchDeg * 0.01745329252f;
+            const float pitch = std::clamp(std::atan2(-hmd.m[1][2], hn), -maxPitch, maxPitch);
+            const float c = std::cos(pitch), s = std::sin(pitch);
+            const float f[3] = { hx * c, s, hz * c };   // unit gaze, pitch clamped
+            pos[0] = hmd.m[0][3] + f[0] * p.distanceMeters;
+            pos[1] = hmd.m[1][3] + f[1] * p.distanceMeters + p.heightOffset;
+            pos[2] = hmd.m[2][3] + f[2] * p.distanceMeters;
+            fwd[0] = hx; fwd[1] = hz;
+            // Z faces the viewer (-f); X = up x Z is level, as LevelMatrix's; Y = Z x X.
+            const float Z[3] = { -f[0], -f[1], -f[2] };
+            const float X[3] = { -hz, 0.0f, hx };
+            const float Y[3] = { Z[1] * X[2] - Z[2] * X[1], Z[2] * X[0] - Z[0] * X[2], Z[0] * X[1] - Z[1] * X[0] };
+            M = {};
+            for (int i = 0; i < 3; ++i) { M.m[i][0] = X[i]; M.m[i][1] = Y[i]; M.m[i][2] = Z[i]; M.m[i][3] = pos[i]; }
+            return true;
+        }
+    }
+
     void TickFollow(OverlayRec& r, const vr::HmdMatrix34_t& hmd, float dt)
     {
+        if (!r.placed) r.pinned = false;   // a fresh placement (show, recentre) ends a drag's pin
+        if (!r.placed && r.placement.atGaze) {
+            vr::HmdMatrix34_t M;
+            if (GazeMatrix(hmd, r.placement, M, r.fwd, r.pos)) {
+                r.world = M;
+                r.placed = true; r.following = false;
+                if (s_overlay && s_compositor && r.handle != vr::k_ulOverlayHandleInvalid)
+                    s_overlay->SetOverlayTransformAbsolute(r.handle, s_compositor->GetTrackingSpace(), &r.world);
+                return;
+            }
+        }
         float tf[2], tp[3];
         if (!LazyTarget(hmd, r.placement, tf, tp)) {
             if (!r.placed) return;   // can't place yet
@@ -225,7 +266,7 @@ namespace Magelight::VR {
             r.fwd[0] = tf[0]; r.fwd[1] = tf[1];
             r.pos[0] = tp[0]; r.pos[1] = tp[1]; r.pos[2] = tp[2];
             r.placed = true; r.following = false; write = true;
-        } else if (r.placement.mode == Mode::LazyFollow) {
+        } else if (r.placement.mode == Mode::LazyFollow && !r.pinned) {
             const float cosang = r.fwd[0] * tf[0] + r.fwd[1] * tf[1];
             const float ddx = r.pos[0] - tp[0], ddy = r.pos[1] - tp[1], ddz = r.pos[2] - tp[2];
             const float dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);

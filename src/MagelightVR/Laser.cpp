@@ -110,6 +110,8 @@ namespace Magelight::VR {
         // net edge counter which loses a press+release inside one frame).
         bool s_lastTriggerDown[2] = { false, false };
         bool s_gripWas[2] = { false, false };            // polled grip level, rising-edge latch
+        bool s_gripDrag[2] = { false, false };           // this hand's grip holds the drag (released with the grip)
+        bool s_stickOnPage[2] = { false, false };        // this hand's stick moved a held page: no scroll until centred
         bool s_gripSeeded[2] = { false, false };         // latch seeded from the live level on UI-mode entry
         int  s_lastPx[2] = { 0, 0 }, s_lastPy[2] = { 0, 0 };   // last hit pixel per hand (the UP lands here)
 
@@ -131,6 +133,45 @@ namespace Magelight::VR {
         ViewId s_dragView = 0;                           // active drag
         int    s_dragHand = -1;
         float  s_dragDist = 1.1f;
+        float  s_dragOff[2] = { 0.0f, 0.0f };            // grabbed point from the panel's centre, panel metres (x right, y up)
+        float  s_dragYawDeg = 0.0f;                      // the holding hand's stick turn, + = the face turns to the right
+        constexpr float kDragMinDistM = 0.35f, kDragMaxDistM = 6.0f;   // how near and far a held page goes
+        constexpr float kDragMaxYawDeg = 60.0f;                        // either way from facing the head
+
+        // Takes hold of view at the hit (u, v), dist metres along ctrl's ray. The page keeps the heading it has: the
+        // yaw starts at its angle from the head->grabbed point direction, which the drag rebuilds fwd from.
+        void BeginDrag(ViewId view, int hand, float dist, float u, float v, const OverlayRec& r,
+                       const vr::HmdMatrix34_t& ctrl, const vr::HmdMatrix34_t& head)
+        {
+            s_dragView = view;
+            s_dragHand = hand;
+            s_dragDist = std::clamp(dist, kDragMinDistM, kDragMaxDistM);
+            const float w = ClampWidthM(r.placement.widthMeters);
+            const float h = r.texW > 0 ? w * static_cast<float>(r.texH) / static_cast<float>(r.texW) : 0.0f;
+            s_dragYawDeg = 0.0f;
+            const float gx = ctrl.m[0][3] - ctrl.m[0][2] * dist, gz = ctrl.m[2][3] - ctrl.m[2][2] * dist;
+            float hx = gx - head.m[0][3], hz = gz - head.m[2][3];
+            const float hn = std::sqrt(hx * hx + hz * hz);
+            if (hn > 1e-3f) {
+                hx /= hn; hz /= hn;
+                // Inverts the drag's fwd = (hx c + hz s, -hx s + hz c).
+                const float deg = std::atan2(hz * r.fwd[0] - hx * r.fwd[1], hx * r.fwd[0] + hz * r.fwd[1]) * 57.2957795f;
+                s_dragYawDeg = std::clamp(deg, -kDragMaxYawDeg, kDragMaxYawDeg);
+            }
+            s_dragOff[0] = (u - 0.5f) * w;
+            s_dragOff[1] = (0.5f - v) * h;
+        }
+
+        // Ends this hand's grip grab (grip released, controller or pose lost).
+        void ReleaseGrip(int hand)
+        {
+            if (!s_gripDrag[hand]) return;
+            s_gripDrag[hand] = false;
+            if (s_dragHand == hand) {
+                SKSE::log::info("Magelight VR: view {} released by grip (hand {})", s_dragView, hand);
+                s_dragView = 0; s_dragHand = -1;
+            }
+        }
     }
 
     // ── Virtual keyboard (VR-4) ───────────────────────────────────
@@ -143,6 +184,17 @@ namespace Magelight::VR {
         constexpr float kStickDeadzone = 0.30f;
         constexpr float kScrollNotchesPerSec = 6.0f;     // at full deflection
         constexpr std::uint64_t kStickStaleMs = 250;     // no stick event this long = centred
+        // The stick of the hand holding a page: X turns it, Y pushes it away (up) or pulls it in (down).
+        constexpr float kDragTurnDegPerSec = 60.0f;      // at full deflection
+        constexpr float kDragPushMPerSec   = 0.8f;       // at full deflection
+
+        // Deadzone, then rescaled so the first step past it starts at 0.
+        float StickAxis(float v)
+        {
+            v = std::clamp(v, -1.0f, 1.0f);
+            if (std::fabs(v) < kStickDeadzone) return 0.0f;
+            return (v > 0 ? 1.0f : -1.0f) * (std::fabs(v) - kStickDeadzone) / (1.0f - kStickDeadzone);
+        }
     }
 
     HoverState s_hover[2];
@@ -376,7 +428,7 @@ namespace Magelight::VR {
     {
         for (int h = 0; h < 2; ++h) {
             HideBeam(h); s_hover[h] = HoverState{}; s_lastTriggerDown[h] = false; s_scrollAccum[h] = 0.0f;
-            s_gripWas[h] = false; s_gripSeeded[h] = false;
+            s_gripWas[h] = false; s_gripSeeded[h] = false; s_gripDrag[h] = false; s_stickOnPage[h] = false;
             s_dragRequest.store(0); s_dragView = 0; s_dragHand = -1;
             s_hands[h].stickY_mil.store(0); s_hands[h].gripEdge.store(false);
         }
@@ -414,13 +466,14 @@ namespace Magelight::VR {
             const vr::TrackedDeviceIndex_t idx = s_system->GetTrackedDeviceIndexForControllerRole(role);
             if (idx == vr::k_unTrackedDeviceIndexInvalid || idx >= vr::k_unMaxTrackedDeviceCount) {  // B4
                 ReleaseTrigger(hand);   // controller gone: a press it held ends here
+                ReleaseGrip(hand);
                 s_hover[hand].hit = false;
                 HideBeam(hand);
                 continue;
             }
             const vr::TrackedDevicePose_t& ctrlPose = render[idx];
             // No usable pose (tracking lost, a rotation-only fallback): nothing to aim, so a held press ends here.
-            if (!PoseUsable(ctrlPose)) { ReleaseTrigger(hand); s_hover[hand].hit = false; HideBeam(hand); continue; }
+            if (!PoseUsable(ctrlPose)) { ReleaseTrigger(hand); ReleaseGrip(hand); s_hover[hand].hit = false; HideBeam(hand); continue; }
 
             // Controller state straight from the runtime (the primitive the
             // game's own BSOpenVRControllerDevice polls): legacy mapping
@@ -430,13 +483,14 @@ namespace Magelight::VR {
             // (it gives one click per frame), so the laser does not depend
             // on it — the sink only swallows those events.
             vr::VRControllerState_t st{};
-            bool polled = false, trig = false, gripNow = false; float stickY = 0.0f;
+            bool polled = false, trig = false, gripNow = false; float stickX = 0.0f, stickY = 0.0f;
             if (s_system->GetControllerState(idx, &st, sizeof(st))) {
                 polled = true;
                 trig = (st.rAxis[1].x > 0.5f) ||
                        ((st.ulButtonPressed & vr::ButtonMaskFromId(vr::k_EButton_SteamVR_Trigger)) != 0);
                 gripNow = ((st.ulButtonPressed & vr::ButtonMaskFromId(vr::k_EButton_Grip)) != 0) ||
                           (st.rAxis[2].x > 0.5f);
+                stickX = st.rAxis[0].x;
                 stickY = st.rAxis[0].y;
             } else {
                 static int s_pollWarned = 0;
@@ -451,20 +505,15 @@ namespace Magelight::VR {
                     ? MatMul(ctrlPose.mDeviceToAbsoluteTracking, s_aim[hand].tip)
                     : ApplyLocalPitch(ctrlPose.mDeviceToAbsoluteTracking, s_settings.aimPitchDeg);
 
-            // Grip rising edge: bring every non-HUD panel back in front of you.
-            // A grip already held when UI mode opened is NOT an edge — it is
-            // the modifier the user is holding for a controller binding, and
-            // a grip+A binding would recentre the panels on every open.
+            // Grip rising edge, acted on after the hit test below. A grip
+            // already held when UI mode opened is NOT an edge — it is the
+            // modifier the user is holding for a controller binding, and a
+            // grip+A binding would recentre the panels on every open.
+            bool gripEdge;
             {
                 if (!s_gripSeeded[hand]) { s_gripWas[hand] = gripNow; s_gripSeeded[hand] = true; }
-                bool edge;
-                if (polled) { edge = gripNow && !s_gripWas[hand]; s_gripWas[hand] = gripNow; }
-                else edge = s_hands[hand].gripEdge.exchange(false);
-                if (edge) {
-                    for (auto& [id, r] : s_overlays)
-                        if (r.shown && r.placement.mode != Mode::HeadLocked) { r.placed = false; r.following = false; }
-                    SKSE::log::info("Magelight VR: grip (hand {}) — panels recentred", hand);
-                }
+                if (polled) { gripEdge = gripNow && !s_gripWas[hand]; s_gripWas[hand] = gripNow; }
+                else gripEdge = s_hands[hand].gripEdge.exchange(false);
             }
 
             // M5: topmost-first (reverse z-order), first ray hit wins —
@@ -493,14 +542,32 @@ namespace Magelight::VR {
             s_hover[hand].hit = hit;
             if (hit && target) { s_hover[hand].view = target->id; s_hover[hand].u = bestU; s_hover[hand].v = bestV; }
 
+            // Grip on a panel grabs it until the grip lets go; any other grip,
+            // while no panel is held, brings every non-HUD panel back in front of you.
+            // Grabbing needs the polled level (the sink's edge has no
+            // release), so without it the grip only recentres.
+            if (gripEdge) {
+                const auto hitIt = (hit && target) ? s_overlays.find(target->id) : s_overlays.end();
+                if (polled && !s_dragView && hitIt != s_overlays.end() && hitIt->second.placement.mode != Mode::HeadLocked) {
+                    BeginDrag(target->id, hand, bestDist, bestU, bestV, hitIt->second, ctrl, hmd.mDeviceToAbsoluteTracking);
+                    s_gripDrag[hand] = true;
+                    SKSE::log::info("Magelight VR: view {} grabbed by grip (hand {}) at {:.2f}m", target->id, hand, s_dragDist);
+                } else if (!s_dragView) {   // a panel in hand stays where the other hand holds it
+                    for (auto& [id, r] : s_overlays)
+                        if (r.shown && r.placement.mode != Mode::HeadLocked) { r.placed = false; r.following = false; }
+                    SKSE::log::info("Magelight VR: grip (hand {}) — panels recentred", hand);
+                }
+            }
+            if (polled && !gripNow) ReleaseGrip(hand);   // a frame without the polled level keeps the grab
+
             // ── Grab-and-move ────────────────────────────────────
             // A page asked to be dragged: adopt the hand that is pointing
             // at it and remember how far away it was grabbed.
             if (const ViewId req = static_cast<ViewId>(s_dragRequest.load())) {
-                if (!s_dragView && hit && target && target->id == req) {
-                    s_dragView = req;
-                    s_dragHand = hand;
-                    s_dragDist = std::clamp(bestDist, 0.35f, 6.0f);
+                const auto reqIt = (!s_dragView && hit && target && target->id == req) ? s_overlays.find(req) : s_overlays.end();
+                if (reqIt != s_overlays.end()) {
+                    BeginDrag(req, hand, bestDist, bestU, bestV, reqIt->second, ctrl, hmd.mDeviceToAbsoluteTracking);
+                    s_gripDrag[hand] = false;
                     s_dragRequest.store(0);
                     SKSE::log::info("Magelight VR: view {} grabbed by hand {} at {:.2f}m", req, hand, s_dragDist);
                 }
@@ -511,18 +578,33 @@ namespace Magelight::VR {
                     s_dragView = 0; s_dragHand = -1;
                 } else {
                     OverlayRec& dr = dit->second;
-                    // Hang the panel on the ray at the grab distance, then
-                    // face it back at the head so it stays readable.
+                    if (polled) {
+                        const float dt = std::clamp(s_frameDt, 0.0f, 0.1f);
+                        s_dragYawDeg = std::clamp(s_dragYawDeg + StickAxis(stickX) * kDragTurnDegPerSec * dt,
+                                                  -kDragMaxYawDeg, kDragMaxYawDeg);
+                        s_dragDist = std::clamp(s_dragDist + StickAxis(stickY) * kDragPushMPerSec * dt,
+                                                kDragMinDistM, kDragMaxDistM);
+                    }
+                    // Hang the grabbed point on the ray at the grab distance,
+                    // then face the panel back at the head, turned by the stick.
                     const float ox = ctrl.m[0][3], oy = ctrl.m[1][3], oz = ctrl.m[2][3];
                     const float dx = -ctrl.m[0][2], dy = -ctrl.m[1][2], dz = -ctrl.m[2][2];
-                    dr.pos[0] = ox + dx * s_dragDist;
-                    dr.pos[1] = oy + dy * s_dragDist;
-                    dr.pos[2] = oz + dz * s_dragDist;
-                    float fx = dr.pos[0] - hmd.mDeviceToAbsoluteTracking.m[0][3];
-                    float fz = dr.pos[2] - hmd.mDeviceToAbsoluteTracking.m[2][3];
+                    const float gx = ox + dx * s_dragDist, gy = oy + dy * s_dragDist, gz = oz + dz * s_dragDist;
+                    float fx = gx - hmd.mDeviceToAbsoluteTracking.m[0][3];
+                    float fz = gz - hmd.mDeviceToAbsoluteTracking.m[2][3];
                     const float fn = std::sqrt(fx * fx + fz * fz);
-                    if (fn > 1e-3f) { dr.fwd[0] = fx / fn; dr.fwd[1] = fz / fn; }
-                    dr.placement.mode = Mode::WorldLocked;   // stays where you put it
+                    if (fn > 1e-3f) {
+                        // Turning the face (-fwd) right turns fwd the same way about +Y.
+                        const float a = s_dragYawDeg * 0.01745329252f, c = std::cos(a), sn = std::sin(a);
+                        const float hx = fx / fn, hz = fz / fn;
+                        dr.fwd[0] = hx * c + hz * sn;
+                        dr.fwd[1] = -hx * sn + hz * c;
+                    }
+                    // The level panel's right is (-fwd.z, 0, fwd.x) and its up is world up (LevelMatrix).
+                    dr.pos[0] = gx + dr.fwd[1] * s_dragOff[0];
+                    dr.pos[1] = gy - s_dragOff[1];
+                    dr.pos[2] = gz - dr.fwd[0] * s_dragOff[0];
+                    dr.pinned = true;   // stays where you put it until the next show or recentre
                     dr.placed = true;
                     dr.following = false;
                     dr.world = LevelMatrix(dr.fwd, dr.pos);
@@ -559,10 +641,16 @@ namespace Magelight::VR {
             s_lastTriggerDown[hand] = nowDown;
 
             // Thumbstick Y -> wheel notches at the hit pixel (only while
-            // pointing at a panel). Deadzone, rate-limited via an
+            // pointing at a panel, and not while this hand holds one: the
+            // stick turns and pushes it then). Deadzone, rate-limited via an
             // accumulator, and a staleness guard so a stick that stopped
             // reporting never scrolls forever.
-            {
+            if (s_dragView && s_dragHand == hand) s_stickOnPage[hand] = true;
+            if (s_stickOnPage[hand]) {
+                s_scrollAccum[hand] = 0.0f;
+                if (!(s_dragView && s_dragHand == hand) && StickAxis(polled ? stickY : hi.stickY_mil.load() / 1000.0f) == 0.0f)
+                    s_stickOnPage[hand] = false;
+            } else {
                 float y;
                 if (polled) y = std::clamp(stickY, -1.0f, 1.0f);
                 else {
@@ -570,8 +658,8 @@ namespace Magelight::VR {
                     if (GetTickCount64() - hi.stickTick.load() > kStickStaleMs) mil = 0;
                     y = mil / 1000.0f;
                 }
-                if (std::fabs(y) < kStickDeadzone) { y = 0.0f; s_scrollAccum[hand] = 0.0f; }
-                else y = (y > 0 ? 1.0f : -1.0f) * (std::fabs(y) - kStickDeadzone) / (1.0f - kStickDeadzone);
+                y = StickAxis(y);
+                if (y == 0.0f) s_scrollAccum[hand] = 0.0f;
                 if (y != 0.0f && hit && target) {
                     s_scrollAccum[hand] += y * kScrollNotchesPerSec * std::clamp(s_frameDt, 0.0f, 0.1f);
                     const int px = static_cast<int>(std::lround(target->x + bestU * target->w));
@@ -604,8 +692,9 @@ namespace Magelight::VR {
     void BeginViewDrag(ViewId view) { s_dragRequest.store(view); }
     void EndViewDrag()
     {
-        if (s_dragView) SKSE::log::info("Magelight VR: view {} released", s_dragView);
         s_dragRequest.store(0);
+        if (s_dragHand >= 0 && s_gripDrag[s_dragHand]) return;   // the page's end does not drop a grip's grab
+        if (s_dragView) SKSE::log::info("Magelight VR: view {} released", s_dragView);
         s_dragView = 0;
         s_dragHand = -1;
     }
