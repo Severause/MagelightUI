@@ -191,8 +191,8 @@ links or run double-click handlers.
 Each visible view costs a texture and a paint when it changes; idle pages cost nothing. Keep
 HUD widgets small, avoid `position: fixed` full-screen containers on HUD layers, and prefer
 `startVisible: false` for panels. Fullscreen views repaint on resolution change. A page's
-JavaScript runs on the game's main thread by default, so heavy script work, or console output in a loop,
-costs frame time; strip console logging from release builds.
+JavaScript runs on the game's main thread in VR and with `"pageThread": false`, so there heavy script work, or
+console output in a loop, costs frame time; strip console logging from release builds.
 
 By default since 1.7.0 (flat only; `"pageThread": false` turns it off) a page's script, layout, loading, prepaints
 and painting run on Magelight's own page thread instead, beside the game: the game thread only runs the GPU work the page recorded and
@@ -499,7 +499,7 @@ run on Magelight's page thread instead, whose own stack is `ulFiberMB` (8 MB whe
 (`pages run on a thread of their own ...`, then `WebKit's VM is up ...; the page thread holds its lock between
 frames`), and behave the same. `ulFiberMB` below 8 is raised to 8
 (`ulFiberMB 4 is below 8, ...` in the log). With `"ulFiberMB": 0` in
-`Magelight.json`, pages run on the game's stack, and Magelight sizes the engine's stack reserve past the
+`Magelight.json` and pages in the game's frame (VR, or `"pageThread": false`), pages run on the game's stack, and Magelight sizes the engine's stack reserve past the
 guarantee the main thread holds when the first save loads (`JavaScript stack zones for pages on the game's stack, past a
 64 KB stack guarantee ...` in the log): those errors are survived there too, but a page that lays itself
 out from the bottom of a deep recursion, or one nested hundreds of elements deep, can still run the game's

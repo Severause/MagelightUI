@@ -426,6 +426,9 @@ namespace Magelight {
     static constexpr UINT kKeyFocusMsg = WM_APP + 0x4F4A;
     static constexpr UINT kPassedKeyMsg = WM_APP + 0x4F4B;
     static bool s_handlingPassedKey = false;   // window thread
+    // The modifiers and lock keys a passed key is read with (Input::NotePassedKey): the live state has moved on by the
+    // time it goes out, and the thread's key state is stale here. The window thread writes it; the poll reads NumLock.
+    static std::atomic<std::uint16_t> s_passedBits{ 0 };
     static std::atomic<std::uint64_t> s_windowKeyPresses{ 0 };   // first presses through the window proc
     static std::atomic<std::uint32_t> s_keySession{ 0 };         // bumped on UI-mode entry
     static std::atomic<bool> s_imeAttached{ false };
@@ -2846,15 +2849,21 @@ namespace Magelight {
     // synthesises at the driver level (OpenComposite's virtual keyboard sends scancodes beside its own paths).
     // Game thread (the input sink).
     enum class KeyPhase { Down, Repeat, Up };
-    // The text a key makes, if any. Printable? Ask the active layout, with the live modifier state. It keeps the key's
-    // lParam, as the window's WM_CHAR does, so its keypress carries the key's code. Returns the characters made.
-    static int QueueKeyText(UINT vk, std::uint32_t make, LPARAM down)
+    // The text a key makes, if any. Printable? Ask the active layout, with the live modifier state, or `bits` when
+    // given. It keeps the key's lParam, as the window's WM_CHAR does, so its keypress carries the key's code. Returns
+    // the characters made.
+    static int QueueKeyText(UINT vk, std::uint32_t make, LPARAM down, const std::uint16_t* bits = nullptr)
     {
         BYTE ks[256]{};
-        if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
-        if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
-        if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
-        if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
+        if (bits) {
+            Input::ApplyKeyBits(ks, *bits);
+            if (*bits & Input::kKbRAlt) ks[VK_CONTROL] = ks[VK_LCONTROL] = 0x80;   // Windows types AltGr as Ctrl+Alt
+        } else {
+            if (MlGetAsyncKeyState(VK_SHIFT) & 0x8000)   ks[VK_SHIFT]   = 0x80;
+            if (MlGetAsyncKeyState(VK_CONTROL) & 0x8000) ks[VK_CONTROL] = 0x80;
+            if (MlGetAsyncKeyState(VK_MENU) & 0x8000)    ks[VK_MENU]    = 0x80;
+            if (MlGetKeyState(VK_CAPITAL) & 1)           ks[VK_CAPITAL] = 1;
+        }
         wchar_t buf[8]{};
         const int n = ToUnicode(vk, make, ks, buf, 7, 0);
         for (int i = 0; i < n && i < 7; ++i) {
@@ -4037,7 +4046,7 @@ namespace Magelight {
                                                   : "IME committed on this key -> to the page, and UI mode closes")
                           : captured ? "to the page (it captured Escape)" : "to the page, and UI mode closes");
             }
-            QueueInput(msg, wparam, lparam, CaptureKeyBits(!s_handlingPassedKey));
+            QueueInput(msg, wparam, lparam, s_handlingPassedKey ? s_passedBits.load() : CaptureKeyBits(true));
             // Editing-key trace (Backspace/Delete): a field report of
             // "Backspace does nothing in text fields" needs to know whether
             // the key reaches the window at all (rate-limited).
@@ -4192,10 +4201,28 @@ namespace Magelight {
     static void HandlePassedKey(WPARAM vk, LPARAM lparam)
     {
         const bool down = !((lparam >> 31) & 1);
+        static auto s_session = s_keySession.load() - 1;
+        const auto session = s_keySession.load();
+        const std::uint16_t was = session == s_session ? s_passedBits.load() : CaptureKeyBits(false);
+        s_session = session;
+        const std::uint16_t bits = Input::NotePassedKey(was, vk, lparam, down);
+        s_passedBits.store(bits);
+        if (vk == VK_MENU) return;   // only right Alt comes this far, for its state
         s_handlingPassedKey = true;
         GuardedHandleFocusedMsg(down ? WM_KEYDOWN : WM_KEYUP, vk, lparam);
         s_handlingPassedKey = false;
-        if (down) QueueKeyText(static_cast<UINT>(vk), static_cast<std::uint32_t>((lparam >> 16) & 0x7F), lparam);
+        if (down) QueueKeyText(static_cast<UINT>(vk), static_cast<std::uint32_t>((lparam >> 16) & 0x7F), lparam, &bits);
+    }
+
+    // Page thread. A key event reads this thread's keyboard layout, and Windows switches only the window thread's.
+    static void SyncPageKeyboardLayout()
+    {
+        static HKL s_last = nullptr;
+        if (!s_hwnd) return;
+        const HKL layout = GetKeyboardLayout(GetWindowThreadProcessId(s_hwnd, nullptr));
+        if (!layout || layout == s_last) return;
+        s_last = layout;
+        ActivateKeyboardLayout(layout, 0);
     }
 
     static LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -7085,6 +7112,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // Every key event is made by Input::MakeKeyEvent (never the bare constructor: on VR it would lose every
         // modifier), with the state the key was queued with.
         auto keyEvent = [](ultralight::KeyEvent::Type type, WPARAM w, LPARAM l, bool sys, std::uint16_t keys) {
+            if (PageThreadOn()) SyncPageKeyboardLayout();
             bool applied = true;
             ultralight::KeyEvent evt = Input::MakeKeyEvent(type, w, l, sys, keys, &applied);
             static bool s_warned = false;
@@ -8091,7 +8119,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     static bool StartPageThread();        // fwd (the page thread, below)
-    static void TakePageInitFailure();    // fwd
+    static bool TakePageInitFailure();    // fwd
 
     static void EnsureRenderInit(IDXGISwapChain* sc)
     {
@@ -8752,7 +8780,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         // still presenting (0.3.6), and that loading screen presents many
         // SECONDS of stable frames, so a stability streak passes on the wrong
         // thread too (0.3.7). Thread identity is the deterministic signal.
-        if (tid == s_mainThreadId) TakePageInitFailure();
+        // Taken: this frame already passed the page fiber by, so the next one starts Ultralight, as after a refusal.
+        if (tid == s_mainThreadId && TakePageInitFailure()) return;
         if (!s_renderInit) {
             // World-ready FALLBACK (0.17.9): SKSEVR never delivered kNewGame for
             // an Alternate Perspective new game (field 2026-09-03: SKSE dispatched
@@ -9373,16 +9402,19 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // Game thread, every main-thread Present. A page thread that could not make a renderer hands render init back: the
-    // mode is Off and render init runs again now, as when the thread is refused. Costs one atomic after that.
-    static void TakePageInitFailure()
+    // mode is Off and render init runs again, as when the thread is refused. True when it took one. The note the
+    // failure left is cleared, or a later death of the overlay would report this one.
+    static bool TakePageInitFailure()
     {
-        if (!s_pageInitFailed.exchange(false)) return;
+        if (!s_pageInitFailed.exchange(false)) return false;
         if (s_pageContext) s_pageContext->Release();
         s_pageContext = nullptr;
         s_pageThreadMode.store(PageThread::Mode::Off);
         s_ulThreadId = GetCurrentThreadId();
         s_renderInit = false;
+        s_renderDeadReasonState.store(0);
         SKSE::log::warn("Magelight: the page thread could not start Ultralight; pages run in the game's frame");
+        return true;
     }
 
     // The frame at Present with the page thread: the game thread's bookkeeping, every page frame finished since the
@@ -10938,7 +10970,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         bool PassLostKey(std::uint8_t scan, bool down)
         {
             if (!s_hwnd || GetForegroundWindow() != s_hwnd) return false;
-            const Input::ScancodeKey key = Input::FromScancode(scan, (MlGetKeyState(VK_NUMLOCK) & 1) != 0);
+            const bool numLock = s_lostKeys.Passed() ? (s_passedBits.load() & Input::kKbNumLock) != 0
+                                                     : (MlGetKeyState(VK_NUMLOCK) & 1) != 0;
+            const Input::ScancodeKey key = Input::FromScancode(scan, numLock);
             if (!key.vk) return false;
             const LPARAM l = key.lparam | 1 | (down ? 0 : (static_cast<LPARAM>(3) << 30));
             if (!PostMessageW(s_hwnd, kPassedKeyMsg, key.vk, l)) return false;

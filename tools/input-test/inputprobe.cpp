@@ -1370,6 +1370,34 @@ static void LostKeysTest()
     }
     {
         LostKeysRun r;
+        r.Key(0xB8, true);
+        r.Key(0x10, true);
+        r.Key(0x0F, true);
+        r.Key(0x3E, true);
+        r.Polls(3);
+        Expect("right Alt goes through for AltGr, without Alt's system keys", r.sent, "B8d 10d");
+        r.Key(0x0F, false);
+        r.Polls(3);
+        Expect("and a key held back gets no release", r.sent, "B8d 10d");
+    }
+    {
+        using In::NotePassedKey;
+        const auto l = [](unsigned scan, bool extended) {
+            return static_cast<LPARAM>((scan << 16) | (extended ? 1u << 24 : 0u));
+        };
+        auto bits = NotePassedKey(0, VK_SHIFT, l(0x36, false), true);
+        Expect("right Shift down", std::to_string(bits), std::to_string(In::kKbRShift));
+        bits = NotePassedKey(bits, VK_SHIFT, l(0x36, false), false);
+        bits = NotePassedKey(bits, VK_CONTROL, l(0x1D, true), true);
+        Expect("right Ctrl down, Shift up", std::to_string(bits), std::to_string(In::kKbRCtrl));
+        bits = NotePassedKey(0, VK_CAPITAL, l(0x3A, false), true);
+        bits = NotePassedKey(bits, VK_CAPITAL, l(0x3A, false), false);
+        Expect("Caps Lock flips on the press only", std::to_string(bits), std::to_string(In::kKbCaps));
+        Expect("a letter changes nothing", std::to_string(NotePassedKey(bits, 'A', l(0x1E, false), true)),
+               std::to_string(In::kKbCaps));
+    }
+    {
+        LostKeysRun r;
         r.refuse = true;
         r.Key(0x01, true);
         r.Polls(3);

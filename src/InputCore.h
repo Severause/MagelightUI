@@ -161,13 +161,30 @@ namespace Magelight::Input {
         return k;
     }
 
+    // The key state after one key of LostKeys' stream: bits, with vk and lparam as the window's key message has them.
+    // The stream is what is known in order, as a key goes out frames after its press.
+    inline std::uint16_t NotePassedKey(std::uint16_t bits, WPARAM vk, LPARAM lparam, bool down)
+    {
+        const bool extended = (lparam >> 24) & 1;
+        unsigned mask = 0;
+        switch (vk) {
+        case VK_SHIFT:   mask = ((lparam >> 16) & 0xFF) == 0x36 ? kKbRShift : kKbLShift; break;
+        case VK_CONTROL: mask = extended ? kKbRCtrl : kKbLCtrl; break;
+        case VK_MENU:    mask = extended ? kKbRAlt : kKbLAlt; break;
+        case VK_CAPITAL: return static_cast<std::uint16_t>(down ? bits ^ kKbCaps : bits);
+        case VK_NUMLOCK: return static_cast<std::uint16_t>(down ? bits ^ kKbNumLock : bits);
+        default:         return bits;
+        }
+        return static_cast<std::uint16_t>(down ? bits | mask : bits & ~mask);
+    }
+
     // Keys DirectInput saw that the window never got. On some systems a page in UI mode gets no key message until the
     // player alt-tabs, and the muted keyboard poll is then the only thing that sees the keys. The poll notes every key
     // here and passes on what falls due. One key press through the window proves the window hears keys, so nothing is
     // passed on for the rest of the session: a session that works never gets a key twice. A key waits kWaitPolls polls
-    // and kWaitMs first, because a press can reach the device a frame ahead of its message. Alt, the Windows keys, what
-    // is pressed with them held (Alt+Tab) and Print Screen, which never makes a key press, stay with the system. One
-    // thread.
+    // and kWaitMs first, because a press can reach the device a frame ahead of its message. Left Alt, the Windows keys,
+    // what is pressed with them held (Alt+Tab) and Print Screen, which never makes a key press, stay with the system.
+    // Right Alt goes through for AltGr typing, without the keys the system takes with Alt. One thread.
     class LostKeys {
     public:
         static constexpr int kWaitPolls = 3;
@@ -180,10 +197,12 @@ namespace Magelight::Input {
         // key: the DirectInput scancode.
         void Note(std::uint8_t key, bool down, std::uint64_t nowMs)
         {
-            if (key == 0x38 || key == 0xB8) { alt_ = down; return; }
+            if (key == 0x38) { alt_ = down; return; }
+            if (key == 0xB8) altGr_ = down;
             if (key == 0xDB || key == 0xDC) { win_ = down; return; }
             if (key == 0xB7) return;
-            if (heard_ || count_ == kCap || (down && (alt_ || win_))) return;
+            const bool altSystem = key == 0x01 || key == 0x0F || key == 0x39 || key == 0x3E;   // Esc, Tab, Space, F4
+            if (heard_ || count_ == kCap || (down && (alt_ || win_ || (altGr_ && altSystem)))) return;
             queue_[(head_ + count_++) % kCap] = { nowMs, 0, key, down };
         }
 
@@ -224,7 +243,7 @@ namespace Magelight::Input {
         std::size_t head_ = 0, count_ = 0;
         std::uint64_t base_ = 0;
         bool held_[256]{};
-        bool heard_ = false, alt_ = false, win_ = false;
+        bool heard_ = false, alt_ = false, altGr_ = false, win_ = false;
         int passed_ = 0;
     };
 
