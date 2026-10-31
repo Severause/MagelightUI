@@ -27,6 +27,20 @@ namespace Magelight::PageThread {
     // On (running). VR never asks for it (the setting is ignored there when it is read).
     enum class Mode { Off, Wanted, On };
 
+    // Whether a Present on this thread runs page work. The game's main thread always may. The first frames of the main
+    // menu come from the engine's own thread, which may only with the page thread, there, and for a mod that asked.
+    inline bool PresentRuns(bool onMainThread, bool pageThreadOff, bool anyMenuPage, bool mainMenuOpen)
+    {
+        return onMainThread || (!pageThreadOff && anyMenuPage && mainMenuOpen);
+    }
+
+    // Whether a view counts as shown now. A main-menu page always can; any other waits for the first in-game frame
+    // (viewsReleased) and is not drawn over the main menu, a return to it included.
+    inline bool ViewShowsNow(bool menuPage, bool mainMenuOpen, bool viewsReleased)
+    {
+        return menuPage || (!mainMenuOpen && viewsReleased);
+    }
+
     // Why the page thread cannot run on this device, for the log line, or null when it can. A single-threaded device
     // may not be used from a second thread; a device (or a wrapper of one) that refuses a deferred context leaves the
     // driver nothing to record into. Named in that order.

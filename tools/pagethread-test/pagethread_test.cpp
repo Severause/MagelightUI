@@ -125,6 +125,19 @@ int main()
     Check(Decide(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, true) == nullptr,
           "decide: other creation flags do not refuse");
 
+    // ---- Main-menu pages ----------------------------------------------------------------
+    Check(PresentRuns(true, true, false, false), "present: the game's main thread always runs page work");
+    Check(!PresentRuns(false, false, true, false), "present: another thread does not, away from the main menu");
+    Check(!PresentRuns(false, false, false, true), "present: nor at the main menu with no mod asking");
+    Check(!PresentRuns(false, true, true, true), "present: nor without the page thread");
+    Check(PresentRuns(false, false, true, true), "present: with the page thread, at the main menu, for a mod that asked");
+    Check(ViewShowsNow(true, true, false), "view: a main-menu page shows at the first main menu");
+    Check(ViewShowsNow(true, false, true), "view: and in the game");
+    Check(!ViewShowsNow(false, true, false), "view: another page waits at the first main menu");
+    Check(!ViewShowsNow(false, false, false), "view: and through the load, until the first in-game frame");
+    Check(ViewShowsNow(false, false, true), "view: and shows in the game");
+    Check(!ViewShowsNow(false, true, true), "view: and is not drawn over a return to the main menu");
+
     // ---- Handoff: a page of uneven weight ---------------------------------------------------------------------------
     {
         Handoff<Packet> handoff;

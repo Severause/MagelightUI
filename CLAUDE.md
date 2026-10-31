@@ -62,7 +62,8 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
 
 1. **Ultralight lives on ONE thread**: created on the game's main thread (= in-game present
    thread) after `kPostLoadGame`/`kNewGame` (`s_worldReady`, `s_mainThreadId`); frames from any
-   other thread skip all Ultralight work (the gate compares with `s_mainThreadId`, the thread that composites;
+   other thread skip all Ultralight work (the gate compares with `s_mainThreadId`, the thread that composites, but for
+   main-menu pages, invariant 27, whose frames run no Ultralight on the presenting thread either;
    `s_ulThreadId` is the thread that owns Ultralight, the page thread with `pageThread`). Violations fastfail with no crashlog. Since 1.3.0
    the frame work runs on an 8 MB fiber of that thread (`UlFiberMain`, `"ulFiberMB"`; never less, `kMinFiberMb`:
    under about 6 MB JavaScriptCore's default 5 MB script limit lies past the fiber's end, so its error path commits
@@ -453,7 +454,15 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     (`StartPageThread`, `PageThread::Decide`) a single-threaded device, a refused deferred context or a failed thread
     turn it Off with a log line, and the next frame starts Ultralight as without the setting (on the fiber, or the
     game's stack with `ulFiberMB` 0). A thread that gets no renderer from Ultralight hands render init back the same way (`TakePageInitFailure`, the frame ends there so the next one reaches the fiber); after a fault, or once the thread runs, a failure turns the overlay off. The page thread holds a
-    `GameTask::Scope` for its whole life, so its posts go through the pump as posts made inside Present do. With
+    `GameTask::Scope` for its whole life, so its posts go through the pump as posts made inside Present do.
+    **Main-menu pages (1.7.1):** the engine presents the start of the main menu and loading screens from a thread of
+    its own, and the rest of the main menu from the main thread. Only with the page thread, only while the Main Menu is
+    open and only for a view a mod asked UI mode for there (or set with `SetViewMainMenu` or manifest `mainMenu`;
+    `PageThread::PresentRuns`), either thread runs `ThreadModeFrame` and starts Ultralight (the page thread still owns it). Those frames draw at Present (`ChooseCompositeTarget`) and must touch no menu or other engine UI state:
+    such work is posted (`GameTask::Post`) or skipped, and the carrier stays closed there (`SyncOverlayMenu`). A view that
+    is not one neither loads nor shows until the first in-game frame (`s_viewsReleased`, `ViewShows`), and is not drawn
+    over a return to the main menu. `s_presentBusy` keeps two present threads out of `ThreadModeFrame`'s statics at the
+    handover. No world freeze at the main menu. With
     the setting off `FrameWork` is unchanged (the input queue's rule above applies in both modes). Today's single
     thread no longer serializes the page parts against the input sinks (`InputSink`, and `GamepadSink` on whichever
     thread the engine's input job runs), the window procedure, game tasks, Papyrus natives and API calls: state they

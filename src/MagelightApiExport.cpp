@@ -153,6 +153,8 @@ namespace {
         // 1.6.0 appendix
         &Magelight::Api4::SetViewGamepad,
         &Magelight::Api4::GetViewGamepadState,
+        // 1.7.1 appendix
+        &Magelight::Api4::SetViewMainMenu,
     };
 
 }  // namespace

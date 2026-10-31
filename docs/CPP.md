@@ -568,6 +568,13 @@ after a reload or resize), so the first show composites a finished texture.
 One view is painted per frame, never on a frame already over the load budget.
 
 ```cpp
+// 1.7.1: asking for UI mode at the main menu opens a page there, so guard the ask if your page needs a world. This
+// call goes further: the page loads at the main menu and a hotkey opens it there; a manifest view sets "mainMenu": true.
+// Neither works on VR or with "pageThread": false. There is no world at the main menu: no player, no cell, and a page
+// shown without UI mode is yours to hide when the menu closes (UI mode closes by itself when a load starts).
+if (v4()->hostVersionNumber >= 10701 && v4()->QueryCapability("mainMenu") == 1)
+    v4()->SetViewMainMenu(mainView, true);
+
 if (v4()->hostVersionNumber >= 3111 && v4()->QueryCapability("prepaint") == 1)
     v4()->SetViewPrepaint(mainView, true);   // any time; the paint waits for the page
 ```
