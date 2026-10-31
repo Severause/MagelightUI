@@ -24,6 +24,7 @@ src/MagelightFonts.cpp      the font loader: wraps the SDK's Windows loader (com
 src/MagelightVR.h           the VR presenter's interface to the host (docs/VR_PRESENTER.md)
 src/MagelightVR/            the VR presenter: Runtime, Overlays, Laser, Input, Bindings, Lifecycle; State.h = the state they share and its rules
 src/GamepadCore.h           the gamepad layer's rules (1.6.0): who holds the pad, dead zones, repeat, held buttons, the keys style, the page packet; engine-free
+src/PathTextCore.h          paths as text: every std::string path is UTF-8 (FromUtf8 / ToUtf8, ToFileUrl, what the file system is asked for); never path(std::string) or path::string()
 src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
 src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
@@ -41,6 +42,7 @@ tools/tooltip-test/         src/TooltipCore.h's coalescing, clipping and payload
 tools/memreport-test/       src/MemoryReportCore.h against captured GetMemoryUsage reports (build.bat builds and runs it)
 tools/bridge-test/          src/JsBridgeCore.h and the page's __mlNative on a CPU view (build.bat builds and runs it)
 tools/visibility-test/      View::set_visible on CPU and GPU views: hidden pages, the prepaint, the frame order SyncViewVisibility relies on (build.bat)
+tools/pathtext-test/        src/PathTextCore.h's conversions, and a page loaded through Ultralight from a folder named in Chinese and Cyrillic with # and % (build.bat)
 tools/input-test/           src/InputCore.h's key events on the flat and VR paths, the polled-keys exemption, the releases, the leave, the pointer guard and the input queue's rule (build.bat; MinHook from the build dir)
 tools/ime-test/             src/ImeCore.h's candidate-list parsing and '__ime' payload rules (ime_test), the Editor calls the native composition relies on (imeprobe); build.bat builds and runs both
 tools/ime-box-test/         the page core's IME candidate box in Ultralight's own WebKit: a reading the Editor composed, zoom, an iframe editor, device scale, the opt-outs (build.bat; needs node)
@@ -122,9 +124,10 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    includes `<AppCore/...>` and AppCore.dll is not shipped: 2.0's imports CoreMessaging.dll and the
    WinRT api-sets, which no other runtime DLL needs, and `PreloadRuntime` fails on any DLL it cannot load.
 5. **Own FileSystem** (`MlFileSystem`): fixed MIME table (AppCore's has no `.mjs`, and module
-   scripts refuse a non-JS MIME), query-string strip, percent-decode, absolute drive-letter paths,
-   the page-root union, and the Content-Security-Policy injected into every page. `resources/` must
-   resolve.
+   scripts refuse a non-JS MIME), the path Ultralight asks for read as UTF-8 (`PathText::PathOfFileRequest`:
+   Ultralight has already decoded it and dropped the query, so it is never decoded again and a `#` is part of
+   the name), absolute drive-letter paths, the page-root union, and the Content-Security-Policy injected into
+   every page. `resources/` must resolve.
 6. **Mouse rides the SKSE input sink + MenuCursor**; the window never gets WM mouse messages.
    `ToggleControls(..., storeState=false)`; `ForceExitUIMode` on every load boundary. The Windows cursor is
    not what a page follows, so while a page holds the mouse it is clipped to the game window (`ConfineCursor`,

@@ -77,6 +77,8 @@
 // (tracks the backbuffer). htmlPath is relative to Magelight's runtime dir,
 // or an absolute Windows path (drive-letter form). v4's ViewDesc carries an
 // explicit Anchor instead of the sign convention.
+// Every path argument is UTF-8 (1.6.1; text that is not valid UTF-8 is read
+// in the ANSI code page, which is how earlier hosts read all of them).
 //
 // Texture images (v2): render into a D3D11 texture you own on the GAME's
 // device, register its SRV under a name, place ImageUrl(id) in an <img> or
@@ -569,7 +571,9 @@ namespace MAGELIGHT_API {
         Result (*RaiseView)(ViewId view);                   // to the top of its layer
         Result (*GetViewInfo)(ViewId view, ViewDesc* out);  // v4-owned views; out->size set by caller; anchor
                                                             // reconstructed so the desc round-trips; startVisible
-                                                            // = current visibility; strings live until DestroyView
+                                                            // = current visibility; strings live until DestroyView;
+                                                            // htmlPath is UTF-8 (1.6.1; earlier hosts gave ANSI
+                                                            // for manifest and Papyrus views)
         void   (*GetDisplaySize)(std::int32_t* w, std::int32_t* h);   // 0,0 before the first frame
         std::int32_t (*QueryCapability)(const char* name);  // 1/0. Case-insensitive here. The authoritative
                                                             // name list is QueryCapability() in the host; as of
