@@ -44,7 +44,8 @@ static std::string PagePath()
     GetModuleFileNameW(nullptr, buf, MAX_PATH);
     auto p = std::filesystem::path(buf).parent_path()
            / L"Data" / L"Magelight" / L"MyMod" / L"views" / L"panel" / L"index.html";
-    return p.string();
+    const auto u = p.u8string();   // UTF-8: p.string() throws for a folder the ANSI code page cannot spell
+    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
 }
 
 static void OnMessage(SKSE::MessagingInterface::Message* m)
@@ -98,7 +99,11 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
   `v4()->PostGameTask(fn, user)` (host 0.30.1+) before you touch anything
   `RE::`, never SKSE's `AddTask`: these callbacks run inside the game's Present,
   where on Skyrim VR an `AddTask` can hang the game (the threading contract in
-  `MagelightUI_API.h` says why). Magelight's own functions are safe to call from
+  `MagelightUI_API.h` says why). With `Magelight.json` `"pageThread": true`
+  (host 1.7.0+, flat) the render thread is Magelight's own page thread instead,
+  running beside the game: the same rules hold there, and `RE::` from a
+  listener is then a race with the game, not merely bad form.
+  `QueryCapability("pagethread")` is 1 in that mode. Magelight's own functions are safe to call from
   there; every one is callable from any thread. VR button callbacks
   (`BindVRHotkeyCallback`, `SetVRButtonListener`) run on the **present thread**;
   post from them the same way. `fn` is a plain function pointer, so box the copy:

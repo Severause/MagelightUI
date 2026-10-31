@@ -7,6 +7,7 @@
 #include "MagelightGameTask.h"
 #include "MagelightApi4.h"
 #include "MagelightPapyrus.h"
+#include "PathTextCore.h"   // after CommonLib, which must precede windows.h
 
 #include <cctype>
 #include <filesystem>
@@ -236,7 +237,7 @@ namespace Magelight::Papyrus {
                 // folder as page-readable (PageRootFor). The C++ tier keeps
                 // unrestricted absolute paths — a DLL can read what it wants
                 // anyway; a script may not.
-                if (!Magelight::PathIsUnderGameRoot(std::filesystem::path(path))) {
+                if (!Magelight::PathIsUnderGameRoot(Magelight::PathText::FromUtf8(path))) {
                     SKSE::log::warn("Magelight[papyrus]: CreateView('{}') — absolute htmlPath outside the game root refused: {}",
                         slug, path);
                     return 0;
@@ -249,7 +250,7 @@ namespace Magelight::Papyrus {
                 // then hand back C:\Windows\x.html and pin that folder as
                 // readable (review 2026-09-10). A ".." component would escape
                 // Data/Magelight/<modId>/ the same way.
-                const std::filesystem::path rel(path);
+                const std::filesystem::path rel = Magelight::PathText::FromUtf8(path);
                 if (rel.has_root_name() || rel.has_root_directory()) {
                     SKSE::log::warn("Magelight[papyrus]: CreateView('{}') — htmlPath is neither drive-lettered nor relative, refused: {}",
                         slug, path);
@@ -265,7 +266,7 @@ namespace Magelight::Papyrus {
                 // Papyrus mods use the manifest layout: Data/Magelight/<modId>/<path>.
                 // A page that is not there is refused rather than passed on:
                 // the host would resolve it against its own runtime folder.
-                const auto modDir = Magelight::GameRootPath() / L"Data" / L"Magelight" / slug;
+                const auto modDir = Magelight::GameRootPath() / L"Data" / L"Magelight" / Magelight::PathText::FromUtf8(slug);
                 const auto inMod = modDir / rel;
                 std::error_code ec;
                 if (!std::filesystem::is_regular_file(inMod, ec)) {
@@ -281,7 +282,7 @@ namespace Magelight::Papyrus {
                         slug, slug, path);
                     return 0;
                 }
-                path = inMod.string();
+                path = Magelight::PathText::ToUtf8(inMod);
             }
             const std::string vname = Str(name);
             ViewDesc vd{};
@@ -296,7 +297,7 @@ namespace Magelight::Papyrus {
             vd.layer = ParseLayer(Str(layer));
             ViewId id = 0;
             if (Api4::CreateViewEx(mod, &vd, &id) != Result::Ok) {
-                SKSE::log::warn("Magelight[papyrus]: CreateView('{}'/'{}') — {}", slug, vname, Api4::GetLastErrorMessage(mod));
+                SKSE::log::warn("Magelight[papyrus]: CreateView('{}'/'{}') — {}", slug, vname, Api4::LastErrorText(mod));
                 return 0;
             }
             return static_cast<std::int32_t>(id);
@@ -460,7 +461,7 @@ namespace Magelight::Papyrus {
         RE::BSFixedString GetLastError(RE::StaticFunctionTag*, RE::BSFixedString modId)
         {
             const ModId mod = Api4::FindMod(Str(modId).c_str());
-            return mod ? Api4::GetLastErrorMessage(mod) : "";
+            return mod ? Api4::LastErrorText(mod).c_str() : "";
         }
 
         // "file" or "loopback" for a script-owned mod (registered here if it

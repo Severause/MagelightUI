@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.7.0 | 10700 | `QueryCapability("pagethread")`, `capabilities.pageThread`: whether render-thread callbacks run on Magelight's page thread (`Magelight.json` `"pageThread"`, flat only) |
 | 1.6.1 | 10601 | `VRPlacementDesc::flags` with `kVRPlacementAtGaze` and manifest `vr.atGaze`: a view placed where the player is looking, pitch included; `QueryCapability("vrGaze")` |
 | 1.6.0 | 10600 | The gamepad layer: `SetViewGamepad` / `GetViewGamepadState`, manifest `"gamepad"`, page `window.magelight.gamepad`; a `keys` style (A Enter, B Escape, d-pad and stick the arrows) and a `navigation` style (actions, focus scopes, prompts, an optional stick cursor); flat only; `QueryCapability("gamepad")`, `capabilities.gamepad` |
 | 1.5.0 | 10500 | Key events as in a browser: `KeyboardEvent.code`, a `key` from the player's layout and `location`, on flat and in VR; Alt, F10 and Alt+key reach the page; `QueryCapability("keyboardcode")`, `capabilities.keyboardCode` |
@@ -60,10 +61,81 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 1.7.0 - Unreleased
+
+### What players notice
+
+- **Pages can run on a thread of their own** (`Magelight.json` `"pageThread": true`, flat only; off by default in
+  this release). A page's scripts, layout and painting then no longer take time out of the game's frame: the game
+  thread only runs the GPU work the page thread recorded and draws the result, so a page that runs heavy script every
+  frame costs its own frame rate, not the game's. A page stuck in a script freezes every page (they share the one
+  page thread) but not the game: the game keeps running, the page's key and the toggle key still close it (Escape
+  too, unless the page took Escape), and
+  `Magelight.log` names the stall once with the page thread's stack. A page shows each frame one game frame later than in the game's frame; the cursor does not lag. Magelight
+  turns the thread off for the session, with a log line saying why, on Skyrim VR, on a graphics device that cannot be
+  used from a second thread, or when the device (or a wrapper of it) refuses a deferred context; pages then run in
+  the game's frame as before.
+- With the thread on, `Magelight.log`'s cost line every 2 s is the game thread's (`prelude`, `execute`,
+  `composite`), and a second line gives the page thread's own (`ul.update`, `ul.render`, frames per second).
+  `tools/load-test` is a page that burns a chosen load, with the before/after protocol.
+- A page frame that runs long no longer loses input: the pointer's moves that pile up meanwhile become one, and the
+  releases and the focus change always reach the page, so a page that comes back from a long frame never holds a
+  click, a key or key focus outside UI mode (with the page thread, a page frame can run for seconds).
+
+### For mod authors
+
+- `QueryCapability("pagethread")` (`capabilities.pageThread` on a page) is 1 while the render thread is Magelight's
+  page thread: from the settings' load when the player turned it on, until a refusal at render init turns it 0 for
+  the session; always 0 on VR. Log it, or refuse the mode until your callbacks follow the rules below.
+- A page event can still enter a `RenderThread` mod's handler after `UnregisterMod` has returned on another thread:
+  keep `user` and the handler alive for the rest of the process. Read `GetLastErrorMessage` on the thread that made
+  the failing call: a failing call from a render-thread callback can replace it meanwhile (`ModDesc.onLog` hands
+  each message over on its own thread).
+- With `pageThread` on, the render thread of the threading contract is Magelight's page thread: JS
+  listeners, DOM-ready and console callbacks, and a `RenderThread` mod's page, console and resize events and
+  `EvalJS` results run there, no longer inside the game's Present, at the same time as the game thread. A
+  `RenderThread` mod's handler can then be entered from two threads at once (page events from the page thread,
+  UI-mode events from the game thread). Never use the game's Direct3D immediate context in these callbacks. The rules are the ones `MagelightUI_API.h` already states (copy the argument,
+  post game work with `PostGameTask`, never touch `RE::` there). A mod that reached into `RE::` from a JS listener
+  got away with it on the game's main thread; on the page thread it races the game.
+- Texture images (`RegisterTextureImage`) keep working unchanged: the page thread's recorded draws sample your SRV
+  when the game thread runs them at Present, as before. Keep rendering on the game thread and `InvalidateImage`
+  after each update.
+
+### Packaging, licences and tools
+
+- `MagelightGPU.dll` contract 3: `MgGpu_Create` may be given a deferred context of the game's device. The driver
+  then records (no pipeline backup), splits its recording at each flush (new export `MgGpu_TakeCommandList`; the
+  host flushes between the parts, as the in-frame driver flushes there), and points a boxed `UpdateSubresource`'s
+  source at the bitmap's
+  origin, not the box's first texel, where Direct3D emulates command lists (`tools/deferred-test` proves the placement
+  on WARP).
+- New offline tests: `tools/deferred-test` (the driver on a deferred context driven from a page thread against the
+  immediate context, byte for byte; a View freed while its target is held), `tools/pagethread-test` (the handoff:
+  no page frame dropped, the game thread never waits, a stuck page included; a page thread that faults gives back
+  the registry locks it held). `tools/fiber-gc-test --thread` shows
+  pages on a real thread need no VM lock (its `build.bat` gates it), and `FiberRun.h`'s `MG_PAGE_THREAD=1` runs any
+  page-facing tool there.
+- `tools/load-test/MgLoadTest`: the in-game load kit (`package.ps1` zips it).
 ## 1.6.1 - Unreleased
 
 ### What players notice
 
+- **A game installed under a folder whose name is not plain English no longer crashes at start** (`D:\游戏\Skyrim
+  Special Edition`, say: the log named "No mapping for the Unicode character exists in the target multi-byte code
+  page"). Magelight read some of its paths in Windows' ANSI code page and some as UTF-8, so a Chinese, Japanese,
+  Cyrillic or accented folder name either threw on the first file a page asked for or left the page unfound. Every
+  path is UTF-8 now, and a page's `file:///` URL is plain ASCII whatever the folder is called.
+
+### For mod authors
+
+- Path strings the API takes (`ViewDesc.htmlPath`, the v1-v3 `CreateView`, cursor image paths, Papyrus `CreateView`)
+  are UTF-8. Text that is not valid UTF-8 is still read in the ANSI code page, so a plugin that passed
+  `path::string()` keeps working; ASCII paths are the same either way.
+- `GetViewInfo`'s `htmlPath` is UTF-8 too (it was ANSI for manifest and Papyrus views). Build a path from it with
+  `std::filesystem::path(std::u8string(...))` or `MultiByteToWideChar(CP_UTF8, ...)`, never `path(std::string)`.
+- The C++ quick start (`docs/CPP.md`) and the two C++ examples built their page path with `path::string()`, which
+  throws in your own plugin for such a folder: they use `u8string()` now; copy that.
 - **In VR, the grip grabs a page.** Point at a page and squeeze the grip: the page hangs on your laser and goes where
   you point until you let go, then stays there while it is open, even with `panelFollow` on. While you hold it, the
   same hand's stick turns it left or right (up to 60 degrees either way) and pushes it away (up) or pulls it closer

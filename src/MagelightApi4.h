@@ -45,6 +45,9 @@ namespace Magelight::Api4 {
     void   GetDisplaySize(std::int32_t* w, std::int32_t* h);
     std::int32_t QueryCapability(const char* name);
     const char* GetLastErrorMessage(ModId mod);
+    // The host's own reading of it: a copy made under the registry's lock (the pointer above lives only until the
+    // mod's next failing call, which with pageThread can come from the page thread meanwhile).
+    std::string LastErrorText(ModId mod);
     Result BindHotkey(ViewId view, std::uint32_t dxScancode, std::uint32_t action);
     // 0.18.0 (VR-4)
     Result SetViewVRPlacement(ViewId view, const MAGELIGHT_API::VRPlacementDesc* desc);

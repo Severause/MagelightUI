@@ -8,6 +8,7 @@
 #include "MagelightManifest.h"
 #include "MagelightDevWatch.h"
 #include "HotkeyNames.h"
+#include "PathTextCore.h"
 
 #include <nlohmann/json.hpp>
 
@@ -141,7 +142,7 @@ namespace Magelight::Manifest {
                     return nullptr;
                 }
                 std::string why;
-                auto img = Magelight::MakeCursorImage(modDir / fs::path(path).make_preferred(), hx, hy, height, press, &why);
+                auto img = Magelight::MakeCursorImage(modDir / Magelight::PathText::FromUtf8(path).make_preferred(), hx, hy, height, press, &why);
                 if (!img) SKSE::log::error("Magelight[manifest]: {}{} - {}", cctx, state, why);
                 return img;
             };
@@ -198,7 +199,7 @@ namespace Magelight::Manifest {
         void LoadOne(const fs::path& modDir)
         try {
             const fs::path file = modDir / "manifest.json";
-            const std::string folder = modDir.filename().string();
+            const std::string folder = Magelight::PathText::ToUtf8(modDir.filename());
             nlohmann::json j;
             try {
                 std::ifstream f(file);
@@ -212,7 +213,7 @@ namespace Magelight::Manifest {
                 SKSE::log::error("Magelight[manifest]: {} — top level must be an object", Magelight::SysInfo::ForLog(file));
                 return;
             }
-            const std::string topCtx = file.string() + " — ";
+            const std::string topCtx = Magelight::SysInfo::ForLog(file) + " — ";
             WarnUnknownKeys(j, { "modId", "name", "version", "minHost", "session", "network", "dev", "views", "cursor" }, topCtx);
             const std::string modId = MJStr(j, "modId", folder, topCtx);
             // The folder is the mod's identity: a manifest naming another
@@ -220,7 +221,7 @@ namespace Magelight::Manifest {
             // reach and storage jar of the plugin that registers it.
             if (Lower(modId) != Lower(folder)) {
                 SKSE::log::error("Magelight[manifest]: {} — modId '{}' must equal its folder name '{}' "
-                                 "(or be left out); not loaded", file.string(), modId, folder);
+                                 "(or be left out); not loaded", Magelight::SysInfo::ForLog(file), modId, folder);
                 return;
             }
             const std::string name = MJStr(j, "name", modId, topCtx);
@@ -244,7 +245,7 @@ namespace Magelight::Manifest {
                                      "manifest.json edits (geometry, hotkeys, adding views) need a game restart", modId);
 
             ModId mod = 0;
-            const std::string dirStr = modDir.string();
+            const std::string dirStr = Magelight::PathText::ToUtf8(modDir);
             const Result r = Api4::RegisterManifestMod(modId.c_str(), name.c_str(), ParseVersion(version),
                                                        ParseVersion(minHost),
                                                        session == "default" ? "default" : nullptr, dirStr.c_str(), &mod);
@@ -271,7 +272,7 @@ namespace Magelight::Manifest {
                     const std::string vname = it.key();
                     const nlohmann::json& v = it.value();
                     if (!v.is_object()) { SKSE::log::error("Magelight[manifest]: {} — view '{}' must be an object", Magelight::SysInfo::ForLog(file), vname); ++failed; continue; }
-                    const std::string vctx = file.string() + " — view '" + vname + "': ";
+                    const std::string vctx = Magelight::SysInfo::ForLog(file) + " — view '" + vname + "': ";
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
                                          "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad" }, vctx);
@@ -280,12 +281,12 @@ namespace Magelight::Manifest {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
                         ++failed; continue;
                     }
-                    const fs::path page = modDir / path;
+                    const fs::path page = modDir / Magelight::PathText::FromUtf8(path);
                     if (!fs::exists(page)) {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': page not found: {}", Magelight::SysInfo::ForLog(file), vname, Magelight::SysInfo::ForLog(page));
                         ++failed; continue;
                     }
-                    const std::string abs = page.string();
+                    const std::string abs = Magelight::PathText::ToUtf8(page);
                     ViewDesc vd{};
                     vd.size = sizeof(ViewDesc);
                     vd.name = vname.c_str();
@@ -344,7 +345,7 @@ namespace Magelight::Manifest {
                         if (ok) Api4::SetViewGamepad(id, &gc);
                         else SKSE::log::warn("Magelight[manifest]: {} — view '{}': 'gamepad' must be true, \"keys\", \"navigation\" "
                                              "or {{ \"style\": \"keys\" | \"navigation\", \"cursor\": true }} — ignored",
-                                             file.string(), vname);
+                                             Magelight::SysInfo::ForLog(file), vname);
                     }
                     if (const int hib = MJInt(v, "hibernateMs", 0, vctx); hib > 0) Api4::SetViewHibernate(id, static_cast<std::uint32_t>(hib));
                     // 0.31.0: the view's own cursor, over the mod's default.
@@ -358,7 +359,7 @@ namespace Magelight::Manifest {
                     if (auto sn = v.find("sounds"); sn != v.end()) {
                         if (!sn->is_object()) {
                             SKSE::log::warn("Magelight[manifest]: {} — view '{}': 'sounds' must be an object {{ \"open\": name, \"close\": name }} — ignored",
-                                            file.string(), vname);
+                                            Magelight::SysInfo::ForLog(file), vname);
                         } else {
                             WarnUnknownKeys(*sn, { "open", "close" }, vctx + "sounds: ");
                             const std::string so = MJStr(*sn, "open", "", vctx + "sounds: ");
@@ -391,7 +392,7 @@ namespace Magelight::Manifest {
                         const std::uint32_t mod2 = ParseVRButton(mname);
                         if (btn == 0xFFFFFFFFu || mod2 == 0xFFFFFFFFu) {
                             SKSE::log::error("Magelight[manifest]: {} — view '{}': vrHotkey button/modifier unknown "
-                                "(menu|grip|a|stick|trigger|touchpad)", file.string(), vname);
+                                "(menu|grip|a|stick|trigger|touchpad)", Magelight::SysInfo::ForLog(file), vname);
                         } else if (btn) {
                             MAGELIGHT_API::VRHotkeyDesc hd{};
                             hd.size = sizeof(hd);
@@ -430,7 +431,7 @@ namespace Magelight::Manifest {
         }
         catch (const std::exception& e) {
             SKSE::log::error("Magelight[manifest]: {} — aborted ({}); other mods still load",
-                             (modDir / "manifest.json").string(), e.what());
+                             Magelight::SysInfo::ForLog(modDir / "manifest.json"), e.what());
         }
 
     }  // namespace
