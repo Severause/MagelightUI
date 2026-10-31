@@ -114,6 +114,21 @@ if (-not $cmake) {
 if (-not $cmake) { Write-Host "cmake.exe not found" -ForegroundColor Red; exit 1 }
 Write-Host "  CMake: $cmake"
 
+# One vcpkg tree per set of library inputs, shared by every build directory: a copy is 3 GB and they are identical. The
+# name hashes what picks the libraries, so a tree is never rewritten in place by a build of other inputs. MG_VCPKG_INSTALLED_DIR
+# overrides. A build directory that already holds its own tree keeps it: moving it would recompile everything.
+function Get-SharedVcpkgDir([string]$root, [string]$prefix) {
+    $o = [Environment]::GetEnvironmentVariable('MG_VCPKG_INSTALLED_DIR')
+    if ($o) { return $o }
+    $files = @(Join-Path $root 'vcpkg.json'; Join-Path $root 'vcpkg-configuration.json') | Where-Object { Test-Path $_ }
+    $ports = Join-Path $root 'ports'
+    if (Test-Path $ports) { $files += @(Get-ChildItem $ports -Recurse -File | Sort-Object FullName | ForEach-Object { $_.FullName }) }
+    $sum = ($files | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash }) -join ''
+    $stream = [IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes($sum))
+    $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.Substring(0, 12).ToLower()
+    return "C:\b\vcpkg\$prefix-$hash"
+}
+
 $buildDir = if ($env:MG_BUILD_DIR) { $env:MG_BUILD_DIR } else { "C:\b\mgl" }
 if ($Clean -and (Test-Path $buildDir)) { Remove-Item -Recurse -Force $buildDir }
 if (-not (Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir -Force | Out-Null }
@@ -130,6 +145,13 @@ $cmakeArgs = @(
     "-DCMAKE_C_COMPILER=cl.exe",
     "-DCMAKE_CXX_COMPILER=cl.exe"
 )
+
+$vcpkgCache = Join-Path $buildDir "CMakeCache.txt"
+$ownTree = (Test-Path $vcpkgCache) -and
+           (Select-String -Path $vcpkgCache -Pattern '^VCPKG_INSTALLED_DIR:[A-Z]*=.*/vcpkg_installed$' -Quiet)
+if (-not $ownTree -and -not $env:CI) {   # CI caches the tree in the build directory
+    $cmakeArgs += "-DVCPKG_INSTALLED_DIR=$((Get-SharedVcpkgDir $PSScriptRoot 'mgl') -replace '\\', '/')"
+}
 & $cmake $cmakeArgs
 if ($LASTEXITCODE -ne 0) { Write-Host "CMake configure FAILED" -ForegroundColor Red; exit 1 }
 

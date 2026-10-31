@@ -18,6 +18,9 @@ call "%~dp0..\desktop-harness\vcvars.bat" || exit /b 1
 set "ROOT=%~dp0..\.."
 set "UL=%ROOT%\extern\ultralight"
 set "VCPKG=%BUILD%\vcpkg_installed\x64-windows-static"
+rem A build directory normally uses the shared tree build.ps1 chose; its cache says which.
+for /f "tokens=2 delims==" %%d in ('findstr /b "VCPKG_INSTALLED_DIR:" "%BUILD%\CMakeCache.txt" 2^>nul') do set "VCPKG=%%d/x64-windows-static"
+set "VCPKG=%VCPKG:/=\%"
 rem The runtime sits where the game has it, in a folder named SKSE\Plugins\Magelight, which the polled-keys filter
 rem exempts by name; the control copy sits in another plugin's folder.
 set "RUN=%OUT%\Data\SKSE\Plugins\Magelight"
