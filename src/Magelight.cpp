@@ -22,6 +22,7 @@
 
 #include "MagelightGameTask.h"   // after CommonLib, which must precede windows.h
 #include "PageThreadCore.h"      // the same
+#include "CxxThrowCore.h"        // the same
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -32,6 +33,7 @@
 #include <imm.h>   // IME (0.27.0)
 #include <windowsx.h>
 #include <tlhelp32.h>
+#include <psapi.h>
 #include <chrono>
 #include <thread>
 #include <objbase.h>
@@ -96,7 +98,8 @@ namespace Magelight {
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
-    //                         // (and no main-menu pages, 1.7.1)
+    //                         // (and no main-menu pages, 1.7.1). 1.7.2: unset, a replaced d3d11.dll or dxgi.dll turns
+    //                         // it off; true runs it anyway
     //   "keyFallback": true   // 1.7.0: keys that reach DirectInput but not the window go to the page anyway (flat only)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
@@ -176,6 +179,7 @@ namespace Magelight {
     // is 0). The in-frame path has a bug the thread avoids: pages behind a frame-generation swapchain paint rounded,
     // hover-only rows black.
     static std::atomic<PageThread::Mode> s_pageThreadMode{ PageThread::Mode::Off };
+    static bool s_pageThreadAsked = false;   // Magelight.json says true: run it over a replaced d3d11.dll or dxgi.dll
     static bool PageThreadOn() { return s_pageThreadMode.load() == PageThread::Mode::On; }
     // Main-menu pages (1.7.1, page thread only). A view is one once a mod asks for UI mode on it at the main menu, or
     // calls SetViewMainMenu; that also starts Ultralight there. All of it runs on the main thread's Presents, which take
@@ -581,6 +585,8 @@ namespace Magelight {
                     SKSE::log::info("Magelight: pageThread false - pages run in the game's frame");
                 } else if (REL::Module::IsVR()) {
                     SKSE::log::info("Magelight: pageThread is ignored on Skyrim VR - pages run in the game's frame");
+                } else {
+                    s_pageThreadAsked = true;
                 }
             }
             if (auto it = j.find("keyFallback"); it != j.end() && it->is_boolean()) s_keyFallback = it->get<bool>();
@@ -1431,8 +1437,8 @@ namespace Magelight {
                 if (it != v->listeners.end()) l = it->second;
             }
         }
-        if (l.fnEx) l.fnEx(id, arg.c_str(), l.user);
-        else if (l.fn) l.fn(arg.c_str());
+        if (l.fnEx) CallMod(name.c_str(), id, [&] { l.fnEx(id, arg.c_str(), l.user); });
+        else if (l.fn) CallMod(name.c_str(), id, [&] { l.fn(arg.c_str()); });
         else SKSE::log::warn("Magelight: JS called unregistered listener '{}' (view {})", name, id);
         return JSValueMakeUndefined(ctx);
     }
@@ -2027,7 +2033,7 @@ namespace Magelight {
                 }
             }
             SKSE::log::info("Magelight: DOM ready (view {})", id);
-            if (cb) cb(id);
+            if (cb) CallMod("a DOM-ready callback", id, [&] { cb(id); });
             Emit(HostEvent::ViewDomReady, id);
             bool reloaded = false;
             {
@@ -2444,7 +2450,7 @@ namespace Magelight {
         }
     }
 
-    static LONG LogSehAndDisable(const char* where, unsigned long code, void* addr);  // fwd (frame section)
+    static LONG LogSehAndDisable(const char* where, EXCEPTION_POINTERS* ep);  // fwd (frame section)
 
     // ── UI-pass composite ──────────────────────────────────────────────────
     // With the composite in the game's UI pass, Present still updates and renders the views (into their own
@@ -3743,7 +3749,7 @@ namespace Magelight {
                 std::lock_guard<std::mutex> lock(s_uiModeExitMutex);
                 cbs = s_uiModeExitCbs;
             }
-            for (UIModeExitFn cb : cbs) cb(uiView);
+            for (UIModeExitFn cb : cbs) CallMod("a UI-mode exit callback", uiView, [&] { cb(uiView); });
         }
         // 0.29.0: the view's manifest/API open/close sound. Game
         // thread already — play directly, after the exit hooks so a close
@@ -3766,8 +3772,7 @@ namespace Magelight {
     {
         __try {
             SetUIModeImpl(on, hideView, pauseGame, noTextEntry);
-        } __except (LogSehAndDisable("SetUIMode", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("SetUIMode", GetExceptionInformation())) {
         }
     }
 
@@ -4226,8 +4231,7 @@ namespace Magelight {
     {
         __try {
             return HandleFocusedMsg(msg, wparam, lparam);
-        } __except (LogSehAndDisable("wndproc", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("wndproc", GetExceptionInformation())) {
         }
         return false;
     }
@@ -8192,15 +8196,47 @@ float4 ps_straight(VSOut i) : SV_Target {
         VR::Init(s_device, s_context);
     }
 
+    // A C++ exception's type, its text and the stack that threw it. The VEH skips these (they are every mod's ordinary
+    // control flow), so nothing else names one. An exception filter only: the stack is gone after it.
+    static void LogCxxThrow(const char* prefix, EXCEPTION_POINTERS* ep)
+    {
+        CxxThrow::Info info;
+        if (!CxxThrow::Read(ep->ExceptionRecord, info)) return;
+        SKSE::log::error("Magelight: {} C++ exception {}{}{}", prefix, info.type[0] ? info.type : "of unknown type",
+                         info.what[0] ? ": " : "", info.what);
+        void* frames[kVehStackFrames];
+        bool callerFirst = false;
+        const int count = StackLeft() >= kStackToWalk ? WalkFaultStack(ep, frames, callerFirst) : 0;
+        for (int i = 0; i < count; ++i) {
+            char path[MAX_PATH];
+            std::uintptr_t off = 0;
+            const char* base = ModuleOffsetOf(frames[i], path, off);
+            SKSE::log::error("Magelight: {}   #{:02} {}+0x{:X}", prefix, i, base, off);
+        }
+    }
+
+    void NoteModThrow(const char* what, std::uint64_t view, EXCEPTION_POINTERS* ep)
+    {
+        static constexpr int kMaxLogged = 16;
+        static std::atomic<int> s_logged{ 0 };
+        const int n = s_logged.fetch_add(1);
+        if (n >= kMaxLogged) return;
+        SKSE::log::error("Magelight: {} on view {} threw - that call is lost, the overlay stays on{}", what, view,
+                         n == kMaxLogged - 1 ? "; later ones are not logged" : "");
+        LogCxxThrow("mod call:", ep);
+    }
+
     // SEH telemetry (0.3.1 diagnostics): a fault anywhere in our frame or
     // input path becomes a LOG LINE + graceful overlay shutdown instead of a
     // silent CTD (crash loggers routinely miss faults raised inside foreign
     // frames like a Present hook or a window proc).
-    static LONG LogSehAndDisable(const char* where, unsigned long code, void* addr)
+    static LONG LogSehAndDisable(const char* where, EXCEPTION_POINTERS* ep)
     {
         SKSE::log::error(
             "Magelight: SEH exception 0x{:08X} at {} in {} — overlay disabled, UI mode will drop (UI mode {}: {})",
-            code, addr, where, s_focused.load() ? "on" : "off, last", static_cast<const char*>(s_uiModeLabel));
+            ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress, where,
+            s_focused.load() ? "on" : "off, last", static_cast<const char*>(s_uiModeLabel));
+        LogCxxThrow("the exception:", ep);
         NoteRenderFailure("an exception in the frame or input path");   // a static literal: no allocation in a handler
         s_renderDead.store(true);
         return EXCEPTION_EXECUTE_HANDLER;
@@ -9112,8 +9148,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             UiPassCompositeImpl(endOfFrameFallback);
-        } __except (LogSehAndDisable("UI pass", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("UI pass", GetExceptionInformation())) {
         }
     }
 
@@ -9122,8 +9157,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             FrameWork(sc);
-        } __except (LogSehAndDisable("frame work", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("frame work", GetExceptionInformation())) {
         }
     }
 
@@ -9167,8 +9201,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             void* const before = s_vmLock.Vm();
             if (!s_vmLock.Hold(PageStackExports())) return 0;   // resolved here on the page thread
             return s_vmLock.Vm() != before ? 2 : 1;
-        } __except (LogSehAndDisable("the page VM lock", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("the page VM lock", GetExceptionInformation())) {
             return -1;
         }
     }
@@ -9376,8 +9409,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             return CreateUltralight(s_pageContext);
-        } __except (LogSehAndDisable("the page thread's start", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("the page thread's start", GetExceptionInformation())) {
             ReleasePageLocksAfterFault();
             return false;
         }
@@ -9387,8 +9419,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             PageThreadFrame();
-        } __except (LogSehAndDisable("page frame work", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("page frame work", GetExceptionInformation())) {
             ReleasePageLocksAfterFault();
         }
     }
@@ -9432,6 +9463,30 @@ float4 ps_straight(VSOut i) : SV_Target {
         for (;;) Sleep(INFINITE);
     }
 
+    // Every loaded d3d11.dll and dxgi.dll that is not Windows' own, by path, comma separated; empty when there is none
+    // or the list cannot be read. A replacement loads the real DLL too, under the same name, so a lookup by name could
+    // answer with either.
+    static std::string ReplacedGraphicsDlls()
+    {
+        wchar_t sysDir[MAX_PATH];
+        const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
+        if (!sysLen || sysLen >= MAX_PATH) return {};
+        HMODULE mods[2048];
+        DWORD needed = 0;
+        if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return {};
+        std::string out;
+        const DWORD count = (std::min)(needed / static_cast<DWORD>(sizeof(HMODULE)), static_cast<DWORD>(std::size(mods)));
+        for (DWORD i = 0; i < count; ++i) {
+            wchar_t path[MAX_PATH * 2];
+            const DWORD len = GetModuleFileNameW(mods[i], path, static_cast<DWORD>(std::size(path)));
+            if (!len || len >= std::size(path)) continue;
+            if (!PageThread::IsReplacedGraphicsDll(std::wstring_view(path, len), std::wstring_view(sysDir, sysLen))) continue;
+            if (!out.empty()) out += ", ";
+            out += WideToUtf8(std::wstring(path, len));
+        }
+        return out;
+    }
+
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
     // so, its deferred context, its handoff and the thread. False: the mode is Off (the log line says why) and render
     // init runs again next frame, as without the setting.
@@ -9439,7 +9494,12 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         ID3D11DeviceContext* deferred = nullptr;
         const bool deferredOk = SUCCEEDED(s_device->CreateDeferredContext(0, &deferred)) && deferred;
-        const char* refused = PageThread::Decide(s_device->GetCreationFlags(), deferredOk);
+        const std::string replaced = ReplacedGraphicsDlls();
+        if (!replaced.empty())
+            SKSE::log::warn("Magelight: not Windows' own graphics DLLs: {}{}", replaced,
+                            s_pageThreadAsked ? " (Magelight.json \"pageThread\": true runs the page thread over them)" : "");
+        const char* refused = PageThread::Decide(s_device->GetCreationFlags(), deferredOk,
+                                                 !replaced.empty() && !s_pageThreadAsked);
         const int stackMb = s_ulFiberMb > 0 ? s_ulFiberMb : kMinFiberMb;
         HANDLE thread = nullptr;
         if (!refused) {

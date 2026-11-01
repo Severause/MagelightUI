@@ -31,8 +31,9 @@ Read `CLAUDE.md` invariants 1-2 and 7 first.
    `MlView*` across that pass. `s_uiModeView`/`s_toggleView` must not point at a destroyed id.
 4. **SEH boundaries.** `SetUIMode`, `GuardedFrameWork`, `GuardedHandleFocusedMsg` are `__try`
    wrappers: NO locals with destructors (std::string, lock_guard, vector) inside the wrapper
-   itself. Work goes in the `*Impl` function. `LogSehAndDisable` runs inside the filter: no
-   allocation, no AddTask, no logging beyond the existing SKSE log call.
+   itself. Work goes in the `*Impl` function. `LogSehAndDisable` and `NoteModThrow` run inside
+   a filter: no allocation of their own, no AddTask, nothing beyond SKSE log calls and the stack walk `LogCxxThrow`
+   does when the stack has room.
 5. **Game-thread marshalling.** Anything touching `RE::` from the render thread or a callback
    goes through `GameTask::Post` (`MagelightGameTask.h`), never a raw `AddTask`: on VR a raw
    AddTask from the main thread can wait forever behind a job-thread task drain. A new main-thread
@@ -46,7 +47,7 @@ Read `CLAUDE.md` invariants 1-2 and 7 first.
    functions that take `s_viewsMutex` (or vice versa). Snapshot, unlock, call.
 8. **v4 event delivery.** `Deliver` copies strings before posting; `RenderThread` mods get the
    call inline — a `RenderThread` mod that touches `RE::` is the consumer's bug, but the host
-   must never deliver from inside a lock or inside an SEH wrapper.
+   must never deliver from inside a lock, or inside any SEH wrapper but the `CallGuarded` / `CallMod` pair.
 9. **Frame gating.** New per-frame work must sit AFTER the `s_worldReady`/`s_mainThreadId`
    and `tid != s_mainThreadId` early-returns, and after the `s_renderDead` return; with `"pageThread"` page work goes
    in `PageThreadFrame`, game work in `ThreadModeFrame` (invariant 27).
