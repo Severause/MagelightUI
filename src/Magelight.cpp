@@ -10357,11 +10357,17 @@ float4 ps_straight(VSOut i) : SV_Target {
         const HMODULE chainModule = ModuleAt(vtbl);
         const bool streamlineChain = ModuleBaseNameIs(chainModule, L"sl.interposer.dll");
         const bool smoothMotionAuto = !REL::Module::IsVR() && s_compositeMode == "auto" && SmoothMotionLoaded();
-        // Streamline can sit under a proxy's vtable; an untrusted chain has never had the UI pass.
+        // Streamline wrapping the game's objects, even under a proxy's vtable. Loaded beside them (ENB Anti-Aliasing's
+        // DLAA) it hands out none, and the UI pass ran clean there. An untrusted chain has never had the UI pass.
+        const auto inStreamline = [](const void* p) { return p && ModuleBaseNameIs(ModuleAt(p), L"sl.interposer.dll"); };
+        const auto vtableOf = [](const void* obj) { return obj ? *static_cast<const void* const*>(obj) : nullptr; };
+        const bool streamlineWraps = streamlineChain || inStreamline(reinterpret_cast<const void*>(s_origPresent))
+            || inStreamline(vtableOf(s_gameDevice)) || inStreamline(vtableOf(EngineDevice()));
+        if (smoothMotionAuto && !streamlineWraps && GetModuleHandleW(L"sl.interposer.dll"))
+            SKSE::log::info("Magelight: NVIDIA Streamline is loaded but wraps neither the game's swapchain nor its device");
         const bool smoothMotionEngine = smoothMotionAuto
-            && PageThread::SmoothMotionTakesEngineMode(
-                !ReplacedGraphicsDlls().empty(),
-                streamlineChain || GetModuleHandleW(L"sl.interposer.dll") || s_untrustedChain.load());
+            && PageThread::SmoothMotionTakesEngineMode(!ReplacedGraphicsDlls().empty(),
+                                                      streamlineWraps || s_untrustedChain.load());
         s_smoothMotionUiPass = smoothMotionAuto && !smoothMotionEngine;
         s_engineMode = !REL::Module::IsVR() && (s_compositeMode == "engine" || smoothMotionEngine) && InstallEngineEndHook();
         if (s_smoothMotionUiPass)
