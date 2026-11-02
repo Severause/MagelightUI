@@ -649,7 +649,8 @@ if (v4()->hostVersionNumber >= 10701 && v4()->QueryCapability("mainMenu") == 1)
 - A request in the first seconds of the main menu, before the game's main thread presents it, is refused with
   `UIModeRefused`. Asking again works.
 - On VR and with `"pageThread": false` the capability is 0: a request needs a renderer, as before, and the call does
-  nothing. It also turns 0 at render init when the page thread is refused, as on a replaced `d3d11.dll` or `dxgi.dll`.
+  nothing. It also turns 0 at render init when the page thread is refused, as on the engine's device behind a replaced
+  `d3d11.dll` or `dxgi.dll`.
 - If the page thread cannot start, UI mode ends again (`UIModeExited`) and pages start with the game.
 - UI mode closes when a load starts. A page shown without UI mode is yours to hide when the main menu closes.
 - A world freeze is ignored at the main menu.

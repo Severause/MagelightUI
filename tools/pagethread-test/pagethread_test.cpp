@@ -189,10 +189,14 @@ int main()
           "decide: the device's threading is named before the deferred context");
     Check(Decide(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, true) == nullptr,
           "decide: other creation flags do not refuse");
-    Check(Same(Decide(0, true, true), "d3d11.dll or dxgi.dll is not Windows' own (ENB, ReShade)"),
-          "decide: a replaced graphics DLL refuses");
+    Check(Same(Decide(0, true, true), "the engine's device is behind a replaced d3d11.dll or dxgi.dll (ENB, ReShade)"),
+          "decide: the engine's device over a replaced DLL refuses");
     Check(Same(Decide(0, false, true), "the device refused a deferred context"),
           "decide: the deferred context is named before a replaced DLL");
+    Check(SmoothMotionTakesEngineMode(false, false), "smooth motion: a plain install takes engine mode");
+    Check(SmoothMotionTakesEngineMode(false, true), "smooth motion: Streamline takes engine mode");
+    Check(!SmoothMotionTakesEngineMode(true, false), "smooth motion: ENB or ReShade alone takes the UI pass");
+    Check(SmoothMotionTakesEngineMode(true, true), "smooth motion: Streamline or an untrusted chain over a replaced DLL takes engine mode");
 
     constexpr std::wstring_view kSys = LR"(C:\Windows\System32)";
     Check(!IsReplacedGraphicsDll(LR"(C:\Windows\System32\d3d11.dll)", kSys), "dll: Windows' own d3d11");

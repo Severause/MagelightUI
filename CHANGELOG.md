@@ -66,9 +66,10 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **Pages no longer stop working at load on some setups with ENB or ReShade.** When `d3d11.dll` or `dxgi.dll` is not
-  Windows' own, pages run in the game's frame again, as before 1.7.0, and the log says so. `"pageThread": true` in
-  `Magelight.json` runs the page thread on such a setup anyway.
+- **Pages no longer stop working at load with ENB and NVIDIA Smooth Motion.** Smooth Motion put Magelight on the game
+  engine's graphics device, which crashes the page thread behind ENB. There Smooth Motion now draws pages in the game's
+  UI pass and the page thread keeps running. ENB without Smooth Motion was never affected. Any other replaced `d3d11.dll`
+  or `dxgi.dll` that leaves Magelight on the engine's device runs pages in the game's frame, as before 1.7.0.
 - **One mod's error no longer shuts off every page.** A C++ exception a mod's page button or field handler lets out now
   ends that one call. Before, it turned the overlay off until the game restarted.
 

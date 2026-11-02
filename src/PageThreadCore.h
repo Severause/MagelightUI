@@ -72,15 +72,24 @@ namespace Magelight::PageThread {
         return !SameIgnoringCase(modulePath.substr(0, slash), systemDir);
     }
 
+    // Whether Smooth Motion takes engine mode under composite "auto". Engine mode keeps Streamline's wrapper objects
+    // away from the engine's, or the device is lost; a swapchain that cannot be trusted has never had the UI pass.
+    // Behind a replaced d3d11.dll or dxgi.dll with neither, the engine's device cannot carry the page thread (Decide)
+    // and the UI pass draws without flicker on ENB.
+    inline bool SmoothMotionTakesEngineMode(bool graphicsDllReplaced, bool streamlineOrUntrustedChain)
+    {
+        return !graphicsDllReplaced || streamlineOrUntrustedChain;
+    }
+
     // Why the page thread cannot run on this device, for the log line, or null when it can. A single-threaded device
     // may not be used from a second thread; a device (or a wrapper of one) that refuses a deferred context leaves the
-    // driver nothing to record into; a replaced d3d11.dll or dxgi.dll has crashed on the first draw recorded into one.
-    // Named in that order.
-    inline const char* Decide(UINT deviceCreationFlags, bool deferredContextOk, bool graphicsDllReplaced = false)
+    // driver nothing to record into; the ENGINE's device behind a replaced d3d11.dll or dxgi.dll faults on the first
+    // shader recorded under ENB (the swapchain's device there does not). Named in that order.
+    inline const char* Decide(UINT deviceCreationFlags, bool deferredContextOk, bool engineDeviceOverReplacedDll = false)
     {
         if (deviceCreationFlags & D3D11_CREATE_DEVICE_SINGLETHREADED) return "the game's device is single-threaded";
         if (!deferredContextOk) return "the device refused a deferred context";
-        if (graphicsDllReplaced) return "d3d11.dll or dxgi.dll is not Windows' own (ENB, ReShade)";
+        if (engineDeviceOverReplacedDll) return "the engine's device is behind a replaced d3d11.dll or dxgi.dll (ENB, ReShade)";
         return nullptr;
     }
 

@@ -98,8 +98,7 @@ namespace Magelight {
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
-    //                         // (and no main-menu pages, 1.7.1). 1.7.2: unset, a replaced d3d11.dll or dxgi.dll turns
-    //                         // it off; true runs it anyway
+    //                         // (and no main-menu pages, 1.7.1)
     //   "keyFallback": true   // 1.7.0: keys that reach DirectInput but not the window go to the page anyway (flat only)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
@@ -179,7 +178,6 @@ namespace Magelight {
     // is 0). The in-frame path has a bug the thread avoids: pages behind a frame-generation swapchain paint rounded,
     // hover-only rows black.
     static std::atomic<PageThread::Mode> s_pageThreadMode{ PageThread::Mode::Off };
-    static bool s_pageThreadAsked = false;   // Magelight.json says true: run it over a replaced d3d11.dll or dxgi.dll
     static bool PageThreadOn() { return s_pageThreadMode.load() == PageThread::Mode::On; }
     // Main-menu pages (1.7.1, page thread only). A view is one once a mod asks for UI mode on it at the main menu, or
     // calls SetViewMainMenu; that also starts Ultralight there. All of it runs on the main thread's Presents, which take
@@ -373,9 +371,13 @@ namespace Magelight {
     // end-of-frame call (BSGraphics::Renderer::End + 9, PrismaUI's and the ImGui overlays' site) into the target the
     // engine left bound, never at Present. Behind Streamline the swapchain hands out wrapper objects; a draw that mixes
     // them with the engine's removes the device under Smooth Motion, and a draw at Present comes after Smooth Motion
-    // grabs the frame (pages flicker). On for composite "engine", and for "auto" while Smooth Motion is loaded.
+    // grabs the frame (pages flicker). On for composite "engine", and for "auto" under Smooth Motion except behind a
+    // replaced graphics DLL with no Streamline (s_smoothMotionUiPass).
     static bool              s_engineMode = false;
     static std::atomic<bool> s_engineComposite{ false };   // the end-of-frame hook is installed and drawing
+    // Smooth Motion under composite "auto" behind a replaced d3d11.dll or dxgi.dll: the UI pass, not engine mode
+    // (PageThread::SmoothMotionTakesEngineMode).
+    static bool              s_smoothMotionUiPass = false;
     // Behind a swapchain wrapper (a d3d11.dll or dxgi.dll proxy such as ENB's or ReShade's) a draw at Present may
     // never reach the screen, so while the carrier menu is closed (only click-through views up, which never open
     // it) the end-of-frame hook draws the UI-pass quads instead. Set once, with the UI-pass composite on a
@@ -472,7 +474,7 @@ namespace Magelight {
     static std::string s_presentHookMode = "auto";
     // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
     // at Present; "engine" from the engine's end of frame with its own device, after every menu (flat only; what
-    // "auto" uses under Smooth Motion, see s_engineMode); "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
+    // "auto" mostly uses under Smooth Motion, see s_engineMode); "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
     // the game's UI apart from the scene (Skyrim Upscaler's HUD Fix) keeps ours with it. "auto" picks "ui" when
     // Skyrim Upscaler is loaded or the game swapchain is not dxgi's own: NVIDIA Streamline's (sl.interposer.dll:
     // Skyrim Upscaler, Community Shaders' and Open Shaders' upscaling, whose frame generation drops what is drawn
@@ -585,8 +587,6 @@ namespace Magelight {
                     SKSE::log::info("Magelight: pageThread false - pages run in the game's frame");
                 } else if (REL::Module::IsVR()) {
                     SKSE::log::info("Magelight: pageThread is ignored on Skyrim VR - pages run in the game's frame");
-                } else {
-                    s_pageThreadAsked = true;
                 }
             }
             if (auto it = j.find("keyFallback"); it != j.end() && it->is_boolean()) s_keyFallback = it->get<bool>();
@@ -2545,6 +2545,7 @@ namespace Magelight {
         if (REL::Module::IsVR()) return false;
         if (s_engineMode || s_compositeMode == "ui") return true;
         if (s_compositeMode == "present") return false;
+        if (s_smoothMotionUiPass) return true;
         if (SmoothMotionLoaded()) return false;   // no engine mode: drawn at Present (late when InstallLatePresent can)
         return chain != SwapChainKind::kDxgi || GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
     }
@@ -9495,11 +9496,13 @@ float4 ps_straight(VSOut i) : SV_Target {
         ID3D11DeviceContext* deferred = nullptr;
         const bool deferredOk = SUCCEEDED(s_device->CreateDeferredContext(0, &deferred)) && deferred;
         const std::string replaced = ReplacedGraphicsDlls();
+        // The object, not where it was asked for: a wrapper's swapchain can hand back the engine's own. Never by
+        // COM identity, which a wrapper may answer for what it wraps.
+        const bool engineObject = s_device == EngineDevice();
         if (!replaced.empty())
-            SKSE::log::warn("Magelight: not Windows' own graphics DLLs: {}{}", replaced,
-                            s_pageThreadAsked ? " (Magelight.json \"pageThread\": true runs the page thread over them)" : "");
-        const char* refused = PageThread::Decide(s_device->GetCreationFlags(), deferredOk,
-                                                 !replaced.empty() && !s_pageThreadAsked);
+            SKSE::log::info("Magelight: not Windows' own graphics DLLs: {}; the device in use {} the engine's own object",
+                            replaced, engineObject ? "is" : "is not");
+        const char* refused = PageThread::Decide(s_device->GetCreationFlags(), deferredOk, !replaced.empty() && engineObject);
         const int stackMb = s_ulFiberMb > 0 ? s_ulFiberMb : kMinFiberMb;
         HANDLE thread = nullptr;
         if (!refused) {
@@ -10139,7 +10142,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // "auto" turns it on behind an earlier Present hook on a plain dxgi swapchain, and for Smooth Motion without
-    // engine mode when d3d11.dll is the system one; never on VR. Behind a swapchain wrapper (a d3d11.dll proxy such
+    // engine mode or s_smoothMotionUiPass when d3d11.dll is the system one; never on VR. Behind a swapchain wrapper (a d3d11.dll proxy such
     // as ENB's, Streamline, Skyrim Upscaler) dxgi's own Present is found through a throwaway device, which only
     // "late" and Smooth Motion take: it killed the game at start behind ENB. Behind a dxgi.dll proxy (ReShade's)
     // nothing takes it: the device binds to the proxy, so the search could only find the proxy's swapchain again.
@@ -10160,7 +10163,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool earlierHook = ModuleAt(reinterpret_cast<const void*>(s_origPresent)) != ModuleAt(vtbl);
         // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind
         // ENB's or ReShade's d3d11.dll: the throwaway device the dxgi search takes killed the game at start there.
-        const bool smoothMotion = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded()
+        const bool smoothMotion = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded() && !s_smoothMotionUiPass
             && IsSystemModule(GetModuleHandleW(L"d3d11.dll"), L"d3d11.dll");
         if (smoothMotion)
             SKSE::log::info("Magelight: NVIDIA Smooth Motion is loaded and engine mode is off - drawing late, inside "
@@ -10351,9 +10354,18 @@ float4 ps_straight(VSOut i) : SV_Target {
         InstallGameCursorSkip();
         InstallCursorMenuPin();
         InstallCursorAdvanceHide();
-        s_engineMode = !REL::Module::IsVR()
-            && (s_compositeMode == "engine" || (s_compositeMode == "auto" && SmoothMotionLoaded()))
-            && InstallEngineEndHook();
+        const HMODULE chainModule = ModuleAt(vtbl);
+        const bool streamlineChain = ModuleBaseNameIs(chainModule, L"sl.interposer.dll");
+        const bool smoothMotionAuto = !REL::Module::IsVR() && s_compositeMode == "auto" && SmoothMotionLoaded();
+        // Streamline can sit under a proxy's vtable; an untrusted chain has never had the UI pass.
+        const bool smoothMotionEngine = smoothMotionAuto
+            && PageThread::SmoothMotionTakesEngineMode(
+                !ReplacedGraphicsDlls().empty(),
+                streamlineChain || GetModuleHandleW(L"sl.interposer.dll") || s_untrustedChain.load());
+        s_smoothMotionUiPass = smoothMotionAuto && !smoothMotionEngine;
+        s_engineMode = !REL::Module::IsVR() && (s_compositeMode == "engine" || smoothMotionEngine) && InstallEngineEndHook();
+        if (s_smoothMotionUiPass)
+            SKSE::log::info("Magelight: NVIDIA Smooth Motion behind a replaced graphics DLL - the UI pass, not engine mode");
         if (s_engineMode) {
             s_engineComposite.store(true);
             SKSE::log::info("Magelight: engine mode - the engine's device, drawn from its end-of-frame call{}",
@@ -10363,10 +10375,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         {
             // An untrusted wrapper (frame generation on Direct3D 12, set above) keeps drawing at Present, into the
             // engine's framebuffer: the UI pass has not been tried behind one.
-            const HMODULE chain = ModuleAt(vtbl);
-            RegisterOverlayMenu(ModuleBaseNameIs(chain, L"sl.interposer.dll")                ? SwapChainKind::kStreamline
-                                : IsSystemModule(chain, L"dxgi.dll") || s_untrustedChain.load() ? SwapChainKind::kDxgi
-                                                                                              : SwapChainKind::kWrapper);
+            RegisterOverlayMenu(streamlineChain                                                     ? SwapChainKind::kStreamline
+                                : IsSystemModule(chainModule, L"dxgi.dll") || s_untrustedChain.load() ? SwapChainKind::kDxgi
+                                                                                                    : SwapChainKind::kWrapper);
         }
         RegisterFocusMenu();
         // Manifest mods (Data/Magelight/<ModId>/manifest.json): folders that

@@ -453,9 +453,10 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     a View Ultralight frees meanwhile needs no retire queue (`tools/deferred-test`). Engine work at Present
     (`GameBookkeeping`, the overlay menu, the UI pass, the cursor quad) stays on the game thread. The mode is decided
     once: VR never asks for it (the setting is ignored there when `Magelight.json` is read); at render init
-    (`StartPageThread`, `PageThread::Decide`) a single-threaded device, a refused deferred context, a `d3d11.dll` or
-    `dxgi.dll` that is not Windows' own (unless the file says `true`: `s_pageThreadAsked`) or a failed thread
-    turn it Off with a log line, and the next frame starts Ultralight as without the setting (on the fiber, or the
+    (`StartPageThread`, `PageThread::Decide`) a single-threaded device, a refused deferred context, the engine's own device object
+    behind a `d3d11.dll` or `dxgi.dll` that is not Windows' own (the shader's first bind on the deferred context faults
+    in Windows' d3d11.dll under ENB; ENB's swapchain device is fine, so `SmoothMotionTakesEngineMode` keeps
+    Smooth Motion off the engine's device there) or a failed thread turn it Off with a log line, and the next frame starts Ultralight as without the setting (on the fiber, or the
     game's stack with `ulFiberMB` 0). A thread that gets no renderer from Ultralight hands render init back the same way (`TakePageInitFailure`, the frame ends there so the next one reaches the fiber); after a fault, or once the thread runs, a failure turns the overlay off. The page thread holds a
     `GameTask::Scope` for its whole life, so its posts go through the pump as posts made inside Present do.
     **Main-menu pages (1.7.1):** only with the page thread, only while the Main Menu is open and only for a view a mod
