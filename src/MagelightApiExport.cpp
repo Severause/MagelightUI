@@ -155,6 +155,8 @@ namespace {
         &Magelight::Api4::GetViewGamepadState,
         // 1.7.1 appendix
         &Magelight::Api4::SetViewMainMenu,
+        // 1.8.0 appendix
+        &Magelight::Api4::SetViewPolledKeys,
     };
 
 }  // namespace

@@ -345,6 +345,12 @@ namespace MAGELIGHT_API {
                                                             // the same view included. Re-show a view you hid with
                                                             // the release. Ignored before 1.1.0 (gate on
                                                             // "uiModeCancel").
+    inline constexpr std::uint32_t kUIModeFlagPassPolledKeys = 16;   // (1.8.0) while this UI mode lasts, other
+                                                            // plugins' GetAsyncKeyState / GetKeyState read the
+                                                            // keyboard as it is instead of all keys up (see
+                                                            // PolledKeysConfig for a narrower rule). A switch to
+                                                            // another of your views takes the new request's flag.
+                                                            // Ignored before 1.8.0 (gate on "polledKeys").
 
     // ── VR (0.18.0) ────────────────────────────────────────────────────────
     // Per-view placement in the headset. mode: 0 HeadLocked (glued to the head
@@ -510,6 +516,25 @@ namespace MAGELIGHT_API {
         std::uint64_t generation;        // changes whenever the pad changes hands or reconnects
     };
 
+    // ── Polled keys (1.8.0) ───────────────────────────────────────────────
+    // While a page holds UI mode, another SKSE plugin that reads keys with
+    // GetAsyncKeyState / GetKeyState gets every keyboard key as up, so typing
+    // into the page cannot fire its hotkeys (your own DLL and the mouse
+    // buttons are never hidden). SetViewPolledKeys lets reads through while
+    // this view holds UI mode: those of the plugins named in modules, of the
+    // keys named in keys, or of both at once (a read passes when its plugin
+    // AND its key are listed; an empty list matches all, so both empty lets
+    // every read through). A side-neutral VK_SHIFT, VK_CONTROL or VK_MENU also
+    // covers its left and right keys.
+    struct PolledKeysConfig {
+        std::uint32_t size;              // = sizeof(PolledKeysConfig)
+        std::uint32_t moduleCount;       // at most 32; 0 = every plugin
+        const char* const* modules;      // DLL file names, UTF-8, no path, case-insensitive ("VoiceChat.dll")
+        std::uint32_t keyCount;          // at most 64; 0 = every key
+        std::uint32_t reserved;          // must be 0
+        const std::uint16_t* keys;       // Windows virtual-key codes (VK_*, 1-254), not DirectInput scancodes
+    };
+
     // Actions for BindHotkey (one binding per DirectInput scancode, process-wide).
     inline constexpr std::uint32_t kHotkeyActionUnbind = 0;             // scancode 0 = every binding of the view
     inline constexpr std::uint32_t kHotkeyActionToggleUIMode = 1;       // RequestUIMode / ReleaseUIMode + hide
@@ -606,7 +631,8 @@ namespace MAGELIGHT_API {
                                                             // starts will run, on Magelight's page thread; it can
                                                             // turn 0 for the session when the renderer starts,
                                                             // never back; see the threading contract; 0 in VR),
-                                                            // "mainMenu" (1.7.1: follows "pageThread"). The
+                                                            // "mainMenu" (1.7.1: follows "pageThread"),
+                                                            // "polledKeys" (1.8.0). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -912,6 +938,19 @@ namespace MAGELIGHT_API {
         // the page thread cannot start; a page shown without UI mode is yours to hide when the main menu closes. Any
         // thread. InvalidView for a view that is gone or an inspector.
         Result (*SetViewMainMenu)(ViewId view, bool on);
+
+        // ── appended in 1.8.0 — gate on hostVersionNumber >= 10800 and QueryCapability("polledKeys") ──
+        // Which other plugins' key reads get through while this view holds UI
+        // mode (see PolledKeysConfig); nullptr puts back the default, every
+        // keyboard key up. Kept across reloads and hibernation, ended by
+        // DestroyView; a change to the view holding UI mode applies at once.
+        // kUIModeFlagPassPolledKeys on a request lets every read through
+        // whatever this says. Any thread; *config and its strings are copied.
+        // InvalidView for a view that is gone or an inspector; InvalidArgument
+        // for a short size, a nonzero reserved, too many entries, a name that
+        // is empty, a path or not a .dll, or a key outside 1-254
+        // (GetLastErrorMessage says which). Nothing changes on a failure.
+        Result (*SetViewPolledKeys)(ViewId view, const PolledKeysConfig* config);
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)

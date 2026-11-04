@@ -52,6 +52,7 @@ tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus
 tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it; --thread: pages on the page thread, which must pass without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1) or the page thread (MG_PAGE_THREAD=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
+tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
@@ -282,7 +283,8 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     pad, or that bookkeeping breaks. A plugin that polls
     user32 `GetAsyncKeyState` / `GetKeyState` itself gets keyboard keys as up
     (the Polled keys block in Magelight.cpp), except the UI-mode owner's DLL,
-    Magelight and non-plugin modules. Two things the sink
+    Magelight, non-plugin modules and what the UI-mode page lets through
+    (1.8.0: Api4::GetUIModePolledRule, src/PolledKeysCore.h). Two things the sink
     layer alone could NOT do, which is why the mute lives at the device:
     a sink cannot precede a dispatcher hook, and unlinking events only
     shields sinks registered later. An embedding mod's own engine menu
