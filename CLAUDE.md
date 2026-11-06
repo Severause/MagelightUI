@@ -52,7 +52,7 @@ tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus
 tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it; --thread: pages on the page thread, which must pass without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1) or the page thread (MG_PAGE_THREAD=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
-tools/pagethread-test/      src/PageThreadCore.h: Decide, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault (build.bat)
+tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
 build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <that>\stage (namespaced runtime patch)
@@ -445,14 +445,18 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     The locks the page work holds across Ultralight or driver calls (`s_viewsMutex`,
     `s_imagesMutex`) are `PageThread::OwnedMutex`es: built /EHsc, a fault the page thread's SEH guard catches runs
     no destructor, so the guard gives back what its thread still holds (`ReleasePageLocksAfterFault`) or the game's
-    next lock hangs; a new lock held across such calls on the page side must be one too. A packet's
+    next lock hangs; a new lock held across such calls on the page side must be one too. A callback into a mod on the
+    frame, bridge or v4 delivery paths goes through `CallMod` (`CxxThrowCore.h`): a C++ exception ends that call, not the
+    overlay or the sink, and is logged from a filter while the stack that threw it is there; a new callback needs it too. A packet's
     `PresentedView`s hold SRV references of their own and never `ul` (a View's
     reference count is Ultralight's); a recorded list keeps every resource it uses alive until it is released, so
     a View Ultralight frees meanwhile needs no retire queue (`tools/deferred-test`). Engine work at Present
     (`GameBookkeeping`, the overlay menu, the UI pass, the cursor quad) stays on the game thread. The mode is decided
     once: VR never asks for it (the setting is ignored there when `Magelight.json` is read); at render init
-    (`StartPageThread`, `PageThread::Decide`) a single-threaded device, a refused deferred context or a failed thread
-    turn it Off with a log line, and the next frame starts Ultralight as without the setting (on the fiber, or the
+    (`StartPageThread`, `PageThread::Decide`) a single-threaded device, a refused deferred context, the engine's own device object
+    behind a `d3d11.dll` or `dxgi.dll` that is not Windows' own (the shader's first bind on the deferred context faults
+    in Windows' d3d11.dll under ENB; ENB's swapchain device is fine, so `SmoothMotionTakesEngineMode` keeps
+    Smooth Motion off the engine's device there) or a failed thread turn it Off with a log line, and the next frame starts Ultralight as without the setting (on the fiber, or the
     game's stack with `ulFiberMB` 0). A thread that gets no renderer from Ultralight hands render init back the same way (`TakePageInitFailure`, the frame ends there so the next one reaches the fiber); after a fault, or once the thread runs, a failure turns the overlay off. The page thread holds a
     `GameTask::Scope` for its whole life, so its posts go through the pump as posts made inside Present do.
     **Main-menu pages (1.7.1):** only with the page thread, only while the Main Menu is open and only for a view a mod

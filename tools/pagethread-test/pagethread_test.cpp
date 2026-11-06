@@ -2,6 +2,7 @@
 // page frame reaches the game thread. build.bat builds and runs this; exit 0 when every check passes.
 
 #include "PageThreadCore.h"
+#include "CxxThrowCore.h"
 
 #include <d3d11.h>
 
@@ -11,7 +12,9 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 using namespace Magelight::PageThread;
@@ -113,8 +116,70 @@ static DWORD WINAPI HoldOwned(void* p)
     return 0;
 }
 
+// ---- A mod's exception -------------------------------------------------------------------------------------------
+namespace ns { struct Inner { struct Own : std::runtime_error { using std::runtime_error::runtime_error; }; }; }
+struct Plain {};
+struct NullWhat : std::exception { const char* what() const noexcept override { return nullptr; } };
+
+using namespace Magelight;
+static CxxThrow::Info g_noted;
+static int            g_notes = 0;
+static void Noted(const char*, std::uint64_t, EXCEPTION_POINTERS* ep)
+{
+    ++g_notes;
+    g_noted = {};
+    CxxThrow::Read(ep->ExceptionRecord, g_noted);
+}
+
+// Called through a plain function pointer, as a mod's listener is.
+static __declspec(noinline) void ThrowsRuntime(const char*) { throw ns::Inner::Own("the text"); }
+static __declspec(noinline) void ThrowsBadAlloc(const char*) { throw std::bad_alloc(); }
+static __declspec(noinline) void ThrowsPlain(const char*) { throw Plain{}; }
+static __declspec(noinline) void ThrowsNullWhat(const char*) { throw NullWhat{}; }
+static __declspec(noinline) void Faults(const char* p) { *const_cast<char*>(p) = 1; }
+static __declspec(noinline) void Fine(const char*) {}
+
+static bool ReachesGuard(void (*fn)(const char*))
+{
+    __try {
+        CxxThrow::Call(&Noted, "test", 1, [&] { fn(nullptr); });
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+    return false;
+}
+
 int main()
 {
+    // ---- CxxThrow ----------------------------------------------------------------------------------------------------
+    void (*volatile fn)(const char*) = &ThrowsRuntime;
+    Check(!ReachesGuard(fn), "throw: a std::exception stops at the call");
+    Check(g_notes == 1, "throw: and is noted once");
+    Check(Same(g_noted.type, "ns::Inner::Own"), "throw: its type, nested and undecorated");
+    Check(Same(g_noted.what, "the text"), "throw: its what(), through the std::exception base");
+    fn = &ThrowsBadAlloc;
+    Check(!ReachesGuard(fn), "throw: bad_alloc stops at the call");
+    Check(Same(g_noted.type, "std::bad_alloc") && Same(g_noted.what, "bad allocation"), "throw: bad_alloc is named");
+    fn = &ThrowsPlain;
+    Check(!ReachesGuard(fn), "throw: a type that is no std::exception stops too");
+    Check(Same(g_noted.type, "Plain") && g_noted.what[0] == 0, "throw: named, with no text");
+    fn = &ThrowsNullWhat;
+    Check(!ReachesGuard(fn) && Same(g_noted.type, "NullWhat") && g_noted.what[0] == 0, "throw: a null what() reads as no text");
+    g_notes = 0;
+    fn = &Fine;
+    Check(!ReachesGuard(fn) && g_notes == 0, "throw: a call that returns notes nothing");
+    fn = &Faults;
+    Check(ReachesGuard(fn) && g_notes == 0, "throw: a fault still reaches the guard, un-noted");
+    EXCEPTION_RECORD notThrow{};
+    notThrow.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    CxxThrow::Info none;
+    Check(!CxxThrow::Read(&notThrow, none) && !CxxThrow::Read(nullptr, none), "throw: only a C++ throw reads as one");
+    EXCEPTION_RECORD bad{};
+    bad.ExceptionCode = CxxThrow::kCode;
+    bad.NumberParameters = 4;
+    bad.ExceptionInformation[2] = 1;
+    Check(CxxThrow::Read(&bad, none) && none.type[0] == 0, "throw: unreadable tables leave the type empty");
+
     // ---- Decide -----------------------------------------------------------------------------------------------------
     Check(Decide(0, true) == nullptr, "decide: a free-threaded device with a deferred context: the thread runs");
     Check(Same(Decide(D3D11_CREATE_DEVICE_SINGLETHREADED, true), "the game's device is single-threaded"),
@@ -124,6 +189,25 @@ int main()
           "decide: the device's threading is named before the deferred context");
     Check(Decide(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG, true) == nullptr,
           "decide: other creation flags do not refuse");
+    Check(Same(Decide(0, true, true), "the engine's device is behind a replaced d3d11.dll or dxgi.dll (ENB, ReShade)"),
+          "decide: the engine's device over a replaced DLL refuses");
+    Check(Same(Decide(0, false, true), "the device refused a deferred context"),
+          "decide: the deferred context is named before a replaced DLL");
+    Check(SmoothMotionTakesEngineMode(false, false), "smooth motion: a plain install takes engine mode");
+    Check(SmoothMotionTakesEngineMode(false, true), "smooth motion: Streamline takes engine mode");
+    Check(!SmoothMotionTakesEngineMode(true, false), "smooth motion: ENB or ReShade alone takes the UI pass");
+    Check(SmoothMotionTakesEngineMode(true, true), "smooth motion: Streamline or an untrusted chain over a replaced DLL takes engine mode");
+
+    constexpr std::wstring_view kSys = LR"(C:\Windows\System32)";
+    Check(!IsReplacedGraphicsDll(LR"(C:\Windows\System32\d3d11.dll)", kSys), "dll: Windows' own d3d11");
+    Check(!IsReplacedGraphicsDll(LR"(c:\WINDOWS\system32\DXGI.DLL)", kSys), "dll: Windows' own dxgi, any case");
+    Check(!IsReplacedGraphicsDll(LR"(\\?\C:\Windows\System32\d3d11.dll)", kSys), "dll: a long-path prefix");
+    Check(!IsReplacedGraphicsDll(LR"(C:\Windows\System32\dxgi.dll)", LR"(C:\Windows\System32\)"), "dll: a trailing slash");
+    Check(IsReplacedGraphicsDll(LR"(D:\Steam\Skyrim Special Edition\d3d11.dll)", kSys), "dll: ENB's in the game folder");
+    Check(IsReplacedGraphicsDll(LR"(D:\Steam\Skyrim Special Edition\dxgi.dll)", kSys), "dll: ReShade's in the game folder");
+    Check(IsReplacedGraphicsDll(LR"(C:\Windows\System32\Other\d3d11.dll)", kSys), "dll: a folder under the system one");
+    Check(!IsReplacedGraphicsDll(LR"(D:\Steam\Skyrim Special Edition\d3dcompiler_47.dll)", kSys), "dll: other names are not asked about");
+    Check(!IsReplacedGraphicsDll(L"d3d11.dll", kSys), "dll: a bare name has no folder to judge");
 
     // ---- Main-menu pages ----------------------------------------------------------------
     Check(StartsAtMainMenu(true, true, true), "start: the page thread starts at the main menu for a main-menu page");

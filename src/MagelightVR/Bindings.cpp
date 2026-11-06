@@ -6,6 +6,7 @@
 
 #include "MagelightApi4.h"             // DispatchViewAction (game-thread gated action)
 #include "../../api/MagelightUI_API.h" // kHotkeyAction*
+#include "../CxxThrowCore.h"             // CallMod
 
 namespace Magelight::VR {
 
@@ -141,7 +142,7 @@ namespace Magelight::VR {
                 s_captureLastTick = now;
                 SKSE::log::info("Magelight VR: button edge captured — button {} held {} hand {}",
                                 button, heldOther, hand);
-                edgeCb(button, heldOther, static_cast<std::uint8_t>(hand), edgeUser);
+                CallMod("a VR button listener", 0, [&] { edgeCb(button, heldOther, static_cast<std::uint8_t>(hand), edgeUser); });
                 break;   // one edge per tick is plenty for a capture UI
             }
             return;
@@ -179,7 +180,7 @@ namespace Magelight::VR {
                     lastTick = now;
                     // A mod that owns its own open/close semantics gets the
                     // edge raw; everyone else gets the built-in action.
-                    if (b.cb) b.cb(view, b.user);
+                    if (b.cb) CallMod("a VR hotkey callback", view, [&] { b.cb(view, b.user); });
                     else      Api4::DispatchViewAction(view, b.action, "vr");
                 }
             }

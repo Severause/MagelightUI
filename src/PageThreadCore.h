@@ -16,8 +16,10 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cwctype>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -49,13 +51,45 @@ namespace Magelight::PageThread {
         return pageThreadOff || menuPage || (!mainMenuOpen && viewsReleased);
     }
 
+    inline bool SameIgnoringCase(std::wstring_view a, std::wstring_view b)
+    {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (std::towlower(a[i]) != std::towlower(b[i])) return false;
+        return true;
+    }
+
+    // Whether a loaded module is a d3d11.dll or dxgi.dll other than Windows' own, ENB's and ReShade's usual names. The
+    // test is the system folder, not the game's: such a DLL can sit elsewhere (MO2's overwrite, a Root folder).
+    inline bool IsReplacedGraphicsDll(std::wstring_view modulePath, std::wstring_view systemDir)
+    {
+        if (modulePath.starts_with(LR"(\\?\)")) modulePath.remove_prefix(4);
+        while (!systemDir.empty() && (systemDir.back() == L'\\' || systemDir.back() == L'/')) systemDir.remove_suffix(1);
+        const std::size_t slash = modulePath.find_last_of(L"\\/");
+        if (slash == std::wstring_view::npos) return false;
+        const std::wstring_view name = modulePath.substr(slash + 1);
+        if (!SameIgnoringCase(name, L"d3d11.dll") && !SameIgnoringCase(name, L"dxgi.dll")) return false;
+        return !SameIgnoringCase(modulePath.substr(0, slash), systemDir);
+    }
+
+    // Whether Smooth Motion takes engine mode under composite "auto". Engine mode keeps Streamline's wrapper objects
+    // away from the engine's, or the device is lost; a swapchain that cannot be trusted has never had the UI pass.
+    // Behind a replaced d3d11.dll or dxgi.dll with neither, the engine's device cannot carry the page thread (Decide)
+    // and the UI pass draws without flicker on ENB.
+    inline bool SmoothMotionTakesEngineMode(bool graphicsDllReplaced, bool streamlineOrUntrustedChain)
+    {
+        return !graphicsDllReplaced || streamlineOrUntrustedChain;
+    }
+
     // Why the page thread cannot run on this device, for the log line, or null when it can. A single-threaded device
     // may not be used from a second thread; a device (or a wrapper of one) that refuses a deferred context leaves the
-    // driver nothing to record into. Named in that order.
-    inline const char* Decide(UINT deviceCreationFlags, bool deferredContextOk)
+    // driver nothing to record into; the ENGINE's device behind a replaced d3d11.dll or dxgi.dll faults on the first
+    // shader recorded under ENB (the swapchain's device there does not). Named in that order.
+    inline const char* Decide(UINT deviceCreationFlags, bool deferredContextOk, bool engineDeviceOverReplacedDll = false)
     {
         if (deviceCreationFlags & D3D11_CREATE_DEVICE_SINGLETHREADED) return "the game's device is single-threaded";
         if (!deferredContextOk) return "the device refused a deferred context";
+        if (engineDeviceOverReplacedDll) return "the engine's device is behind a replaced d3d11.dll or dxgi.dll (ENB, ReShade)";
         return nullptr;
     }
 

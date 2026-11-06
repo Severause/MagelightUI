@@ -123,6 +123,11 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
       }
   }
   ```
+- **Exceptions.** A C++ exception your JS listener, event handler, EvalJS, DOM-ready or UI-mode exit callback or VR
+  button callback lets out ends that call and nothing else (1.7.2): the log names the callback, the exception and the
+  stack that threw it, and the page gets no error. A fault (an access violation) in a JS listener or a DOM-ready, UI-mode
+  exit or VR callback still turns the overlay off for the session, and one in an event handler or EvalJS callback still
+  disables that mod's event sink.
 - **Versioning.** Anything added after your `minHost` must be gated:
   `if (v4()->hostVersionNumber >= 2100) v4()->BindVRHotkeyCallback(...)`, or
   `if (v4()->QueryCapability("vr")) ...`. The packed number is
@@ -644,7 +649,8 @@ if (v4()->hostVersionNumber >= 10701 && v4()->QueryCapability("mainMenu") == 1)
 - A request in the first seconds of the main menu, before the game's main thread presents it, is refused with
   `UIModeRefused`. Asking again works.
 - On VR and with `"pageThread": false` the capability is 0: a request needs a renderer, as before, and the call does
-  nothing.
+  nothing. It also turns 0 at render init when the page thread is refused, as on the engine's device behind a replaced
+  `d3d11.dll` or `dxgi.dll`.
 - If the page thread cannot start, UI mode ends again (`UIModeExited`) and pages start with the game.
 - UI mode closes when a load starts. A page shown without UI mode is yours to hide when the main menu closes.
 - A world freeze is ignored at the main menu.
