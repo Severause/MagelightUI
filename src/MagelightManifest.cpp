@@ -12,10 +12,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace Magelight::Manifest {
 
@@ -275,7 +277,8 @@ namespace Magelight::Manifest {
                     const std::string vctx = Magelight::SysInfo::ForLog(file) + " — view '" + vname + "': ";
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
-                                         "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad", "mainMenu" }, vctx);
+                                         "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad", "mainMenu",
+                                         "polledKeys" }, vctx);
                     const std::string path = MJStr(v, "path", "", vctx);
                     if (!SafeRelative(path)) {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
@@ -347,6 +350,56 @@ namespace Magelight::Manifest {
                         else SKSE::log::warn("Magelight[manifest]: {} — view '{}': 'gamepad' must be true, \"keys\", \"navigation\" "
                                              "or {{ \"style\": \"keys\" | \"navigation\", \"cursor\": true }} — ignored",
                                              Magelight::SysInfo::ForLog(file), vname);
+                    }
+                    // 1.8.0: other plugins' key reads that pass while the view holds UI mode. true = every read;
+                    // { "modules": ["Some.dll"], "keys": ["F5", 0x70] }, either list optional (an empty one matches all).
+                    if (auto pk = v.find("polledKeys"); pk != v.end()) {
+                        std::vector<std::string> mods;
+                        std::vector<std::uint16_t> keys;
+                        std::string bad;
+                        bool set = false;
+                        if (pk->is_boolean()) {
+                            set = pk->get<bool>();
+                        } else if (pk->is_object()) {
+                            WarnUnknownKeys(*pk, { "modules", "keys" }, vctx + "polledKeys: ");
+                            set = true;
+                            if (auto m = pk->find("modules"); m != pk->end()) {
+                                if (!m->is_array()) bad = "'modules' must be an array of DLL file names";
+                                else for (const auto& e : *m) {
+                                    if (e.is_string()) mods.push_back(e.get<std::string>());
+                                    else bad = "a module name is not a string";
+                                }
+                            }
+                            if (auto k = pk->find("keys"); k != pk->end()) {
+                                if (!k->is_array()) bad = "'keys' must be an array of key names or virtual-key codes";
+                                else for (const auto& e : *k) {
+                                    int vk = 0;
+                                    if (e.is_number_unsigned()) vk = static_cast<int>(std::min<std::uint64_t>(e.get<std::uint64_t>(), 0xFFFF));
+                                    else if (e.is_string()) vk = PolledKeys::ParseKeyName(e.get<std::string>());
+                                    if (vk <= 0 || vk > 0xFE) bad = "unknown key " + e.dump() + " (a virtual-key code 1-254, or a name "
+                                                                    "such as \"F5\", \"Ctrl\", \"Numpad1\", \"G\")";
+                                    else keys.push_back(static_cast<std::uint16_t>(vk));
+                                }
+                            }
+                        } else {
+                            bad = "must be true, false or { \"modules\": [..], \"keys\": [..] }";
+                        }
+                        if (!bad.empty()) {
+                            SKSE::log::warn("Magelight[manifest]: {} — view '{}': polledKeys: {} — ignored",
+                                            Magelight::SysInfo::ForLog(file), vname, bad);
+                        } else if (set) {
+                            std::vector<const char*> names;
+                            for (const auto& s : mods) names.push_back(s.c_str());
+                            MAGELIGHT_API::PolledKeysConfig pc{};
+                            pc.size = sizeof(pc);
+                            pc.moduleCount = static_cast<std::uint32_t>(names.size());
+                            pc.modules = names.data();
+                            pc.keyCount = static_cast<std::uint32_t>(keys.size());
+                            pc.keys = keys.data();
+                            if (Api4::SetViewPolledKeys(id, &pc) != Result::Ok)
+                                SKSE::log::warn("Magelight[manifest]: {} — view '{}': polledKeys: {} — ignored",
+                                                Magelight::SysInfo::ForLog(file), vname, Api4::GetLastErrorMessage(mod));
+                        }
                     }
                     if (const int hib = MJInt(v, "hibernateMs", 0, vctx); hib > 0) Api4::SetViewHibernate(id, static_cast<std::uint32_t>(hib));
                     // 0.31.0: the view's own cursor, over the mod's default.

@@ -9,8 +9,10 @@
 #  define MAGELIGHT_API_NO_LOADER
 #endif
 #include "../api/MagelightUI_API.h"
+#include "PolledKeysCore.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace Magelight { struct CursorSet; }   // Magelight.h
@@ -40,6 +42,9 @@ namespace Magelight::Api4 {
     ModId  GetUIModeOwner();
     // Image base of the DLL whose mod holds UI mode (nullptr: none, or a v1-v3/host view). Lock-free, any thread.
     const void* GetUIModeOwnerModule();
+    // 1.8.0: which other plugins' key reads the view holding UI mode lets through (nullptr: none). Any thread, no
+    // registry lock; an empty rule passes every read.
+    std::shared_ptr<const PolledKeys::Rule> GetUIModePolledRule();
     Result RaiseView(ViewId view);
     Result GetViewInfo(ViewId view, ViewDesc* out);
     void   GetDisplaySize(std::int32_t* w, std::int32_t* h);
@@ -139,6 +144,7 @@ namespace Magelight::Api4 {
     Result SetViewGamepad(ViewId view, const MAGELIGHT_API::GamepadConfig* config);         // 1.6.0 the gamepad layer's opt-in
     Result GetViewGamepadState(ViewId view, MAGELIGHT_API::GamepadState* out);              // 1.6.0
     Result SetViewMainMenu(ViewId view, bool on);                                           // 1.7.1 load and show at the main menu
+    Result SetViewPolledKeys(ViewId view, const MAGELIGHT_API::PolledKeysConfig* config);   // 1.8.0 other plugins' key reads that pass
     // 0.31.0: a manifest's top-level "cursor", the default for every view of the mod without a cursor of its own
     // (existing views now, later ones at CreateViewEx).
     void SetModCursor(ModId mod, const Magelight::CursorSet& set);

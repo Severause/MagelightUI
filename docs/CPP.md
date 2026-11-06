@@ -168,7 +168,8 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
   holds UI mode, `GetAsyncKeyState` and `GetKeyState` called from an SKSE plugin
   read every keyboard key as up (mouse buttons and toggle bits pass). Your DLL is
   exempt while your own view holds UI mode, provided your `RegisterMod`
-  callbacks (`onEvent`, else `onLog`) live in that DLL.
+  callbacks (`onEvent`, else `onLog`) live in that DLL. From 1.8.0 your page
+  can let other plugins' reads through: see "Letting other plugins read keys".
 
 ## Trust model: views are addressable, not owned
 
@@ -777,6 +778,43 @@ if (v4()->QueryCapability("keyboardcode") == 1) {
 if (v4()->QueryCapability("auxbuttons") == 1) {
     // mouse 4/5 arrive as back/forward + auxclick; middle clicks never autoscroll
 }
+```
+
+## Letting other plugins read keys (1.8.0)
+
+While a page holds UI mode, another SKSE plugin that reads keys itself with `GetAsyncKeyState` or `GetKeyState`
+gets every keyboard key as up, so letters typed into the page cannot fire its hotkeys (the plugin whose page it is,
+Magelight and the mouse buttons are never hidden). A page that works together with another mod can let reads
+through. A barter page the player haggles on by voice is the case it was made for: the voice mod reads its
+push-to-talk key that way.
+
+- `kUIModeFlagPassPolledKeys` on `RequestUIMode` lets every read through for that UI mode. A re-request (a switch
+  to another of your views, a reclaim) takes the new request's flag.
+- `SetViewPolledKeys(view, &config)` names what gets through while that view holds UI mode: the plugins in
+  `modules` (DLL file names, no path, case-insensitive), the keys in `keys` (Windows virtual-key codes, not
+  DirectInput scancodes), or both, in which case a read passes only when its plugin and its key are both listed.
+  An empty list matches all, so both empty is the same as the flag. `VK_SHIFT`, `VK_CONTROL` and `VK_MENU` also
+  cover their left and right keys; a listed side covers itself only. At most 32 modules and 64 keys. It is kept
+  across reloads and hibernation, `nullptr` puts back the default, and a change to the view holding UI mode
+  applies at once.
+- The manifest's `"polledKeys"` does the same for a manifest view (see [MANIFEST.md](MANIFEST.md)).
+
+Name only what the page needs. Every read you let through is a key typed into your page that the other mod also
+acts on: with a voice mod's push-to-talk bound to a letter, typing that letter in your text field talks. When you
+do not know which key the player bound, name the plugin and leave `keys` empty. Gate on `hostVersionNumber >= 10800`
+and `QueryCapability("polledKeys") == 1`; an older host ignores the flag and has no `SetViewPolledKeys`, so the
+reads stay hidden there. With `Magelight.json` `"blockPolledKeys": false` nothing is hidden in the first place.
+
+```cpp
+if (api->hostVersionNumber >= 10800 && api->QueryCapability("polledKeys") == 1) {
+    const char* modules[] = { "VoiceChat.dll" };
+    MAGELIGHT_API::PolledKeysConfig pk{};
+    pk.size = sizeof(pk);
+    pk.moduleCount = 1;
+    pk.modules = modules;                              // every key VoiceChat.dll reads; add keys to narrow it
+    api->SetViewPolledKeys(barterView, &pk);           // kept across reloads; nullptr hides every key again
+}
+api->RequestUIMode(barterView, MAGELIGHT_API::kUIModeFlagPause);
 ```
 
 ## A gamepad (1.6.0)

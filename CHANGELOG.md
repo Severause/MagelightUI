@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.8.0 | 10800 | Other plugins' key reads a page lets through while it holds UI mode: `kUIModeFlagPassPolledKeys` on `RequestUIMode`, `SetViewPolledKeys` (named DLLs, named keys, or both), manifest `"polledKeys"`, `QueryCapability("polledKeys")` |
 | 1.7.1 | 10701 | UI mode asked at the main menu opens the page there; `SetViewMainMenu`, manifest `"mainMenu"`, `QueryCapability("mainMenu")` (flat, page thread); `UIModeRefused` detail `view does not show here` |
 | 1.7.0 | 10700 | `QueryCapability("pagethread")`, `capabilities.pageThread`: whether render-thread callbacks run on Magelight's page thread (`Magelight.json` `"pageThread"`, flat only) |
 | 1.6.1 | 10601 | `VRPlacementDesc::flags` with `kVRPlacementAtGaze` and manifest `vr.atGaze`: a view placed where the player is looking, pitch included; `QueryCapability("vrGaze")` |
@@ -61,6 +62,17 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.8.0 - Unreleased
+
+### For mod authors
+
+- Since 0.31.10, while a page holds UI mode, every other SKSE plugin that reads keys with `GetAsyncKeyState` or
+  `GetKeyState` gets the keyboard as all keys up. A page that works together with another mod can now let reads
+  through: `kUIModeFlagPassPolledKeys` on `RequestUIMode` lets every read through for that UI mode, and
+  `SetViewPolledKeys` (or the manifest's `"polledKeys"`) names the plugins, the keys, or both that get through while
+  the view holds UI mode. A side-neutral Shift, Ctrl or Alt covers both sides. Gate on `hostVersionNumber >= 10800`
+  and `QueryCapability("polledKeys")`. See "Letting other plugins read keys" in `docs/CPP.md`.
 
 ## 1.7.2 - Unreleased
 

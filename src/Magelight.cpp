@@ -2739,42 +2739,55 @@ namespace Magelight {
     // While a page holds UI mode both calls answer "up" for keyboard keys to another mod's SKSE plugin (a DLL
     // under SKSE\Plugins), except the DLL that owns the page, which may poll its own close key. Magelight, its
     // runtime folder, the game and Windows itself (the IME reads modifier state) are never filtered, nor are the
-    // mouse buttons. GetKeyState keeps its toggle bit (Caps Lock, Num Lock). Magelight.json
-    // "blockPolledKeys": false leaves both calls alone (no hook is installed).
+    // mouse buttons. GetKeyState keeps its toggle bit (Caps Lock, Num Lock). The page holding UI mode can let some
+    // reads through (1.8.0: Api4::GetUIModePolledRule, PolledKeysCore.h). Magelight.json "blockPolledKeys": false
+    // leaves both calls alone (no hook is installed).
     static std::string WideToUtf8(const std::wstring& w);
     using KeyStateFn = SHORT(WINAPI*)(int);
     static KeyStateFn           s_getAsyncKeyStateNext = nullptr;
     static KeyStateFn           s_getKeyStateNext = nullptr;
     static const void*          s_selfModule = nullptr;
 
-    // Another mod's SKSE plugin? Cached per image base. The file name is read outside the lock: a thread holding
-    // the loader lock can poll a key, and GetModuleFileNameW wants that lock.
-    static bool IsForeignPluginModule(const void* base)
+    // Is this read hidden? Only another mod's SKSE plugin is ever hidden, and only where the page's rule (null: none)
+    // does not let the read through. Each module is classified once and cached per image base with its lower-case
+    // file name, which the rule is matched against inside the lookup (no copy per read). Its file name is read
+    // outside the lock: a thread holding the loader lock can poll a key, and GetModuleFileNameW wants that lock. The
+    // log names a plugin once, at its first hidden read.
+    static bool HideForeignRead(const void* base, const PolledKeys::Rule* rule, int vk)
     {
+        struct Known { bool foreign = false; bool logged = false; std::wstring fileLower; std::wstring file; };
         static std::mutex s_mutex;
-        static std::unordered_map<const void*, bool> s_known;
+        static std::unordered_map<const void*, Known> s_known;
+        std::wstring logName;
+        const auto judge = [&](Known& k) {
+            if (!k.foreign) return false;
+            const bool hide = !rule || !PolledKeys::Passes(*rule, k.fileLower, vk);
+            if (hide && !k.logged) { k.logged = true; logName = k.file; }
+            return hide;
+        };
+        bool hide = false, known = false;
         {
             std::lock_guard<std::mutex> lk(s_mutex);
-            if (const auto it = s_known.find(base); it != s_known.end()) return it->second;
+            if (const auto it = s_known.find(base); it != s_known.end()) { known = true; hide = judge(it->second); }
         }
-        wchar_t buf[1024]{};
-        const DWORD n = GetModuleFileNameW(reinterpret_cast<HMODULE>(const_cast<void*>(base)), buf, 1023);
-        std::wstring path(buf, n);
-        std::wstring lower(path);
-        std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
-        const bool foreign = n > 0 && Input::IsForeignPluginPath(lower);
-        bool first = false;
-        {
-            std::lock_guard<std::mutex> lk(s_mutex);
-            first = s_known.emplace(base, foreign).second;
-        }
-        if (first && foreign) {
+        if (!known) {
+            wchar_t buf[1024]{};
+            const DWORD n = GetModuleFileNameW(reinterpret_cast<HMODULE>(const_cast<void*>(base)), buf, 1023);
+            const std::wstring path(buf, n);
+            std::wstring lower(path);
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+            Known k;
+            k.foreign = n > 0 && Input::IsForeignPluginPath(lower);
+            k.fileLower = PolledKeys::FileNameLower(lower);
             const auto slash = path.find_last_of(L"\\/");
-            SKSE::log::info("Magelight: keys {} polls are hidden while a page holds UI mode (Magelight.json "
-                            "\"blockPolledKeys\": false allows them)",
-                            WideToUtf8(slash == std::wstring::npos ? path : path.substr(slash + 1)));
+            k.file = slash == std::wstring::npos ? path : path.substr(slash + 1);
+            std::lock_guard<std::mutex> lk(s_mutex);
+            hide = judge(s_known.emplace(base, std::move(k)).first->second);
         }
-        return foreign;
+        if (!logName.empty())
+            SKSE::log::info("Magelight: keys {} polls are hidden while a page holds UI mode (Magelight.json "
+                            "\"blockPolledKeys\": false allows them)", WideToUtf8(logName));
+        return hide;
     }
 
     static bool HidePolledKey(int vk, void* returnAddress)
@@ -2785,7 +2798,8 @@ namespace Magelight {
         PVOID base = nullptr;
         if (!RtlPcToFileHeader(returnAddress, &base) || !base) return false;
         if (base == s_selfModule || base == Api4::GetUIModeOwnerModule()) return false;
-        return IsForeignPluginModule(base);
+        const auto rule = Api4::GetUIModePolledRule();   // what the page holding UI mode lets through (1.8.0)
+        return HideForeignRead(base, rule.get(), vk);
     }
 
     // Magelight's own key-state reads. They call the originals behind the filter: a plugin that hooks these

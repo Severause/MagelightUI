@@ -104,6 +104,16 @@ namespace Magelight::Api4 {
         ModId s_uiOwner = 0;      // mirrored from UIModeEntered/Exited (0 = none / a v1-v3 or host view)
         // The image base of s_uiOwner's DLL, for the polled-key filter, which runs on any thread and must not lock.
         std::atomic<const void*> s_uiOwnerModule{ nullptr };
+        // Polled keys (1.8.0, PolledKeysCore.h): each view's SetViewPolledKeys rule, and the kUIModeFlagPassPolledKeys
+        // of the pending request and of the mode it entered. s_uiPolledRule is what the filter reads, on any thread,
+        // without s_mutex: the UI-mode view's rule, the pass-everything rule for the flag, or null (hide every key).
+        std::map<ViewId, std::shared_ptr<const PolledKeys::Rule>> s_polledRules;
+        bool s_uiPendingPassKeys = false;
+        bool s_uiPassKeys = false;
+        // A switch's flag, by the view it moves to, until its UIModeSwitched (taken) or UIModeRefused (dropped): the
+        // view that holds UI mode until then keeps its own rule.
+        std::map<ViewId, bool> s_uiSwitchPassKeys;
+        std::atomic<std::shared_ptr<const PolledKeys::Rule>> s_uiPolledRule;
         ViewId s_uiPending = 0;   // a RequestUIMode whose game-thread entry has not been decided yet
         // The posted entry of s_uiPending, set with it under s_mutex, so CancelUIModeRequest can withdraw it (1.1.0).
         std::uint64_t s_uiPendingTicket = 0;
@@ -134,6 +144,19 @@ namespace Magelight::Api4 {
                 if (code && RtlPcToFileHeader(const_cast<void*>(code), &image)) base = image;
             }
             s_uiOwnerModule.store(base);
+        }
+
+        // uiView = the view holding UI mode, 0 for none. Call under s_mutex after a change to the mode, its flag or the
+        // view's rule.
+        void PublishPolledRuleLocked(ViewId uiView)
+        {
+            static const auto kPassAll = std::make_shared<const PolledKeys::Rule>();
+            std::shared_ptr<const PolledKeys::Rule> rule;
+            if (uiView != 0) {
+                if (s_uiPassKeys) rule = kPassAll;
+                else if (const auto it = s_polledRules.find(uiView); it != s_polledRules.end()) rule = it->second;
+            }
+            s_uiPolledRule.store(std::move(rule));
         }
 
         void DrainUIQueue();
@@ -443,6 +466,7 @@ namespace Magelight::Api4 {
                         m->views.erase(view);
                     }
                     s_viewOwner.erase(view);
+                    s_polledRules.erase(view);
                     if (s_uiPending == view) { s_uiPending = 0; s_uiPendingTicket = 0; }
                     DropQueuedLocked(view);
                     DropHotkeysLocked(view);
@@ -451,12 +475,19 @@ namespace Magelight::Api4 {
                     // Same owner by construction (RequestUIMode only switches within a mod).
                     s_uiOwner = OwnerLocked(view);
                     PublishUiOwnerLocked();
+                    if (const auto it = s_uiSwitchPassKeys.find(view); it != s_uiSwitchPassKeys.end()) {
+                        s_uiPassKeys = it->second;
+                        s_uiSwitchPassKeys.erase(it);
+                    }
+                    PublishPolledRuleLocked(view);
                     ownerSink(view, Event::UIModeEntered);
                     break;
                 case HostEvent::UIModeEntered:
                     // The host decided: the entered view's owner (0 for a host/v3 view) holds UI mode.
                     s_uiOwner = OwnerLocked(view);
                     PublishUiOwnerLocked();
+                    s_uiPassKeys = s_uiPending == view && s_uiPendingPassKeys;
+                    PublishPolledRuleLocked(view);
                     if (s_uiPending == view || s_uiPending != 0) { s_uiPending = 0; s_uiPendingTicket = 0; }
                     if (Mod* m = FindLocked(s_uiOwner)) targets.emplace_back(SinkOf(*m), Event::UIModeEntered);
                     break;
@@ -464,6 +495,9 @@ namespace Magelight::Api4 {
                     if (Mod* m = FindLocked(s_uiOwner)) targets.emplace_back(SinkOf(*m), Event::UIModeExited);
                     s_uiOwner = 0;
                     PublishUiOwnerLocked();
+                    s_uiPassKeys = false;
+                    s_uiSwitchPassKeys.clear();
+                    PublishPolledRuleLocked(0);
                     s_uiPending = 0;
                     s_uiPendingTicket = 0;
                     s_uiExitTicket = 0;
@@ -472,6 +506,7 @@ namespace Magelight::Api4 {
                     break;
                 case HostEvent::UIModeRefused:
                     if (s_uiPending == view) { s_uiPending = 0; s_uiPendingTicket = 0; }
+                    s_uiSwitchPassKeys.erase(view);
                     ownerSink(view, Event::UIModeRefused);
                     break;
                 case HostEvent::DisplayResized:
@@ -741,7 +776,10 @@ namespace Magelight::Api4 {
             m->alive->store(false);   // queued deliveries drop
             for (const auto& [v, rec] : m->views) { views.push_back(v); DropQueuedLocked(v); DropHotkeysLocked(v); }
             ownsUi = (s_uiOwner == mod);
-            if (ownsUi) { s_uiOwner = 0; s_uiPending = 0; s_uiPendingTicket = 0; PublishUiOwnerLocked(); }
+            if (ownsUi) {
+                s_uiOwner = 0; s_uiPending = 0; s_uiPendingTicket = 0; PublishUiOwnerLocked();
+                s_uiPassKeys = false; PublishPolledRuleLocked(0);
+            }
             // An entry of this mod that has not run would enter a view the destroys below then cannot remove
             // (DestroyView refuses the UI-mode view), leaving UI mode to a mod that no longer exists.
             if (s_uiPending && OwnerLocked(s_uiPending) == mod) {
@@ -882,7 +920,8 @@ namespace Magelight::Api4 {
             return Fail(owner, Result::Denied, "RequestUIMode: a Hud / click-through view cannot take UI mode");
 
         Sink holder;
-        bool busy = false, haveHolder = false, switching = false, queued = false, reclaimed = false;
+        bool busy = false, haveHolder = false, switching = false, switchTask = false, queued = false, reclaimed = false;
+        const bool passKeys = (flags & kUIModeFlagPassPolledKeys) != 0;
         std::uint64_t ticket = 0;
         {
             std::lock_guard<std::mutex> lk(s_mutex);
@@ -897,6 +936,16 @@ namespace Magelight::Api4 {
             }
             if (active && s_uiOwner == owner && s_uiPending == 0) {
                 switching = true;   // intra-mod: retarget the mode you already hold
+                // A reclaim always confirms, the same view included: the mod's close already told it the mode was going.
+                switchTask = reclaimed || Magelight::GetUIModeView() != view;
+                // The flag holds once the switch runs (UIModeSwitched), never if it is refused; a re-request of the
+                // view that holds the mode runs no switch, so it holds from now.
+                if (switchTask) {
+                    s_uiSwitchPassKeys[view] = passKeys;
+                } else {
+                    s_uiPassKeys = passKeys;
+                    PublishPolledRuleLocked(view);
+                }
             } else if (active || s_uiOwner != 0 || s_uiPending != 0) {
                 busy = true;
                 if (Mod* h = FindLocked(s_uiOwner)) { holder = SinkOf(*h); haveHolder = true; }
@@ -908,19 +957,21 @@ namespace Magelight::Api4 {
                 }
             } else {
                 s_uiPending = view;   // decided by the host on the game thread; Entered/Refused clears it
+                s_uiPendingPassKeys = passKeys;
                 ticket = Magelight::NewUIModeTicket();
                 s_uiPendingTicket = ticket;
             }
         }
         if (reclaimed) SKSE::log::info("Magelight[v4]: RequestUIMode({}) reclaimed UI mode from its own release", view);
+        if (passKeys && (switching || ticket != 0))
+            SKSE::log::info("Magelight[v4]: RequestUIMode({}) lets every plugin's key reads through (kUIModeFlagPassPolledKeys)", view);
         if (switching) {
             // 0.26.10: a re-request carries the flags the holder wants NOW —
             // the pause flag is retargeted even when the view is unchanged
             // (before, a same-view re-request returned Ok and silently kept
             // the old pause: SA's Live Stage asked to unpause and ran frozen).
             const bool wantPause = (flags & kUIModeFlagPause) != 0;
-            // A reclaim always confirms, the same view included: the mod's close already told it the mode was going.
-            if (reclaimed || Magelight::GetUIModeView() != view) Magelight::SwitchUIModeView(view);
+            if (switchTask) Magelight::SwitchUIModeView(view);
             Magelight::SetUIModePause(wantPause);
             return Result::Ok;   // UIModeEntered (detail "switched") confirms a view change or a reclaim
         }
@@ -985,7 +1036,7 @@ namespace Magelight::Api4 {
             for (const auto& [v, rec] : m->views) DropQueuedLocked(v);
             if (!active) {
                 // Nothing to exit; make sure no stale claim survives.
-                if (s_uiOwner == mod) { s_uiOwner = 0; PublishUiOwnerLocked(); }
+                if (s_uiOwner == mod) { s_uiOwner = 0; PublishUiOwnerLocked(); s_uiPassKeys = false; PublishPolledRuleLocked(0); }
                 if (s_uiPending && OwnerLocked(s_uiPending) == mod) { s_uiPending = 0; s_uiPendingTicket = 0; }
                 return Result::Ok;
             }
@@ -1124,6 +1175,7 @@ namespace Magelight::Api4 {
         if (n == "pagethread") return Magelight::PageThreadActive() ? 1 : 0;   // render-thread callbacks run on the page thread (1.7.0); flat only
         if (n == "vrgaze") return 1;        // VRPlacementDesc::flags kVRPlacementAtGaze / manifest vr.atGaze (1.6.1)
         if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
+        if (n == "polledkeys") return 1;    // SetViewPolledKeys / kUIModeFlagPassPolledKeys / manifest "polledKeys" (1.8.0)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1261,7 +1313,8 @@ namespace Magelight::Api4 {
                                         "sound", "freezeWorld", "consoleLog", "loadStagger", "loadOnShow", "cursor",
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
-                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu" };
+                                        "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu",
+                                        "polledKeys" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1738,6 +1791,50 @@ namespace Magelight::Api4 {
         if (!Magelight::SetViewMainMenu(view, on))
             return Fail(OwnerOf(view), Result::InvalidView, "SetViewMainMenu: view is gone or is an inspector");
         return Result::Ok;
+    }
+
+    // 1.8.0 (PolledKeysCore.h; the filter is the Polled keys block in Magelight.cpp).
+    Result SetViewPolledKeys(ViewId view, const MAGELIGHT_API::PolledKeysConfig* config)
+    {
+        if (const Result g = GateView(view, "SetViewPolledKeys"); g != Result::Ok) return g;
+        const ModId owner = OwnerOf(view);
+        std::shared_ptr<const PolledKeys::Rule> rule;
+        std::string what = "every key hidden";
+        if (config) {
+            if (config->size < sizeof(MAGELIGHT_API::PolledKeysConfig))
+                return Fail(owner, Result::InvalidArgument, "SetViewPolledKeys: config->size is below the 1.8.0 PolledKeysConfig");
+            if (config->reserved != 0) return Fail(owner, Result::InvalidArgument, "SetViewPolledKeys: reserved must be 0");
+            if ((config->moduleCount && !config->modules) || (config->keyCount && !config->keys))
+                return Fail(owner, Result::InvalidArgument, "SetViewPolledKeys: a count is set with a null list");
+            if (config->moduleCount > PolledKeys::kMaxModules || config->keyCount > PolledKeys::kMaxKeys)
+                return Fail(owner, Result::InvalidArgument, "SetViewPolledKeys: at most 32 modules and 64 keys");
+            std::vector<std::wstring> modules;
+            for (std::uint32_t i = 0; i < config->moduleCount; ++i) {
+                const char* m = config->modules[i];
+                modules.push_back(m ? Magelight::PathText::FromUtf8(m).wstring() : std::wstring());
+            }
+            std::vector<int> keys(config->keys, config->keys + config->keyCount);
+            PolledKeys::Rule built;
+            if (std::string e = PolledKeys::Build(modules, keys, built); !e.empty())
+                return Fail(owner, Result::InvalidArgument, "SetViewPolledKeys: " + e);
+            what = (built.modules.empty() ? std::string("every plugin") : std::to_string(built.modules.size()) + " module(s)") +
+                   ", " + (built.keys.empty() ? std::string("every key") : std::to_string(built.keys.size()) + " key(s)");
+            rule = std::make_shared<const PolledKeys::Rule>(std::move(built));
+        }
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            if (rule) s_polledRules[view] = rule;
+            else s_polledRules.erase(view);
+            if (Magelight::IsUIModeActive() && Magelight::GetUIModeView() == view) PublishPolledRuleLocked(view);
+        }
+        SKSE::log::info("Magelight[v4]: SetViewPolledKeys({}): {} while it holds UI mode", view,
+                        rule ? "reads pass for " + what : what);
+        return Result::Ok;
+    }
+
+    std::shared_ptr<const PolledKeys::Rule> GetUIModePolledRule()
+    {
+        return s_uiPolledRule.load();
     }
 
     Result GetViewGamepadState(ViewId view, MAGELIGHT_API::GamepadState* out)
