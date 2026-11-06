@@ -29,6 +29,7 @@
 #include "MagelightVR.h"
 #include "MagelightDevWatch.h"
 #include "MagelightGameTask.h"
+#include "CxxThrowCore.h"
 
 #include <windows.h>
 #include "PathTextCore.h"   // after windows.h
@@ -386,7 +387,8 @@ namespace Magelight::Api4 {
             return r;
         }
 
-        // SEH boundary for inline (RenderThread) delivery: POD-only frame.
+        // SEH boundary for inline (RenderThread) delivery: POD-only frame. A fault disables the sink; a C++ exception
+        // ends that call only (CallMod).
         LONG FilterLog(unsigned long code, ModId id)
         {
             SKSE::log::error("Magelight[v4]: mod {} event handler faulted (0x{:08X}) — its sink is disabled",
@@ -397,7 +399,7 @@ namespace Magelight::Api4 {
                                void* user, ModId id)
         {
             __try {
-                fn(view, result, exception, user);
+                Magelight::CallMod("an EvalJS callback", view, [&] { fn(view, result, exception, user); });
                 return true;
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 SKSE::log::error("Magelight[v4]: mod {} EvalJS callback raised an SEH exception — its sink is disabled", id);
@@ -408,7 +410,7 @@ namespace Magelight::Api4 {
         bool CallGuarded(EventFn fn, const EventData* ev, void* user, ModId id)
         {
             __try {
-                fn(ev, user);
+                Magelight::CallMod("an event handler", ev->view, [&] { fn(ev, user); });
                 return true;
             } __except (FilterLog(GetExceptionCode(), id)) {
                 return false;

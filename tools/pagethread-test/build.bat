@@ -1,7 +1,8 @@
 @echo off
 rem Builds and runs pagethread_test.exe: the page thread's handoff (src\PageThreadCore.h, 1.7.0) on the desktop, no
 rem game: when the page thread may run (Decide), and that every page frame reaches the game thread once, in order,
-rem without the game thread ever waiting on it, a page stuck in a script included. %1 = output folder (default
+rem without the game thread ever waiting on it, a page stuck in a script included. Also src\CxxThrowCore.h: a mod's
+rem exception named and stopped at the call, a fault not. %1 = output folder (default
 rem C:\b\mgl-pagethreadtest). Exit 0 when every check passes.
 setlocal
 set "OUT=%~1"

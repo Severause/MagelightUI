@@ -22,6 +22,7 @@
 
 #include "MagelightGameTask.h"   // after CommonLib, which must precede windows.h
 #include "PageThreadCore.h"      // the same
+#include "CxxThrowCore.h"        // the same
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -32,6 +33,7 @@
 #include <imm.h>   // IME (0.27.0)
 #include <windowsx.h>
 #include <tlhelp32.h>
+#include <psapi.h>
 #include <chrono>
 #include <thread>
 #include <objbase.h>
@@ -369,9 +371,13 @@ namespace Magelight {
     // end-of-frame call (BSGraphics::Renderer::End + 9, PrismaUI's and the ImGui overlays' site) into the target the
     // engine left bound, never at Present. Behind Streamline the swapchain hands out wrapper objects; a draw that mixes
     // them with the engine's removes the device under Smooth Motion, and a draw at Present comes after Smooth Motion
-    // grabs the frame (pages flicker). On for composite "engine", and for "auto" while Smooth Motion is loaded.
+    // grabs the frame (pages flicker). On for composite "engine", and for "auto" under Smooth Motion except behind a
+    // replaced graphics DLL with no Streamline (s_smoothMotionUiPass).
     static bool              s_engineMode = false;
     static std::atomic<bool> s_engineComposite{ false };   // the end-of-frame hook is installed and drawing
+    // Smooth Motion under composite "auto" behind a replaced d3d11.dll or dxgi.dll: the UI pass, not engine mode
+    // (PageThread::SmoothMotionTakesEngineMode).
+    static bool              s_smoothMotionUiPass = false;
     // Behind a swapchain wrapper (a d3d11.dll or dxgi.dll proxy such as ENB's or ReShade's) a draw at Present may
     // never reach the screen, so while the carrier menu is closed (only click-through views up, which never open
     // it) the end-of-frame hook draws the UI-pass quads instead. Set once, with the UI-pass composite on a
@@ -468,7 +474,7 @@ namespace Magelight {
     static std::string s_presentHookMode = "auto";
     // Magelight.json "composite": where views are drawn onto the frame. "present" draws them over the back buffer
     // at Present; "engine" from the engine's end of frame with its own device, after every menu (flat only; what
-    // "auto" uses under Smooth Motion, see s_engineMode); "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
+    // "auto" mostly uses under Smooth Motion, see s_engineMode); "ui" draws them in the game's UI pass (MagelightOverlayMenu::PostDisplay), so a mod that keeps
     // the game's UI apart from the scene (Skyrim Upscaler's HUD Fix) keeps ours with it. "auto" picks "ui" when
     // Skyrim Upscaler is loaded or the game swapchain is not dxgi's own: NVIDIA Streamline's (sl.interposer.dll:
     // Skyrim Upscaler, Community Shaders' and Open Shaders' upscaling, whose frame generation drops what is drawn
@@ -1431,8 +1437,8 @@ namespace Magelight {
                 if (it != v->listeners.end()) l = it->second;
             }
         }
-        if (l.fnEx) l.fnEx(id, arg.c_str(), l.user);
-        else if (l.fn) l.fn(arg.c_str());
+        if (l.fnEx) CallMod(name.c_str(), id, [&] { l.fnEx(id, arg.c_str(), l.user); });
+        else if (l.fn) CallMod(name.c_str(), id, [&] { l.fn(arg.c_str()); });
         else SKSE::log::warn("Magelight: JS called unregistered listener '{}' (view {})", name, id);
         return JSValueMakeUndefined(ctx);
     }
@@ -2027,7 +2033,7 @@ namespace Magelight {
                 }
             }
             SKSE::log::info("Magelight: DOM ready (view {})", id);
-            if (cb) cb(id);
+            if (cb) CallMod("a DOM-ready callback", id, [&] { cb(id); });
             Emit(HostEvent::ViewDomReady, id);
             bool reloaded = false;
             {
@@ -2444,7 +2450,7 @@ namespace Magelight {
         }
     }
 
-    static LONG LogSehAndDisable(const char* where, unsigned long code, void* addr);  // fwd (frame section)
+    static LONG LogSehAndDisable(const char* where, EXCEPTION_POINTERS* ep);  // fwd (frame section)
 
     // ── UI-pass composite ──────────────────────────────────────────────────
     // With the composite in the game's UI pass, Present still updates and renders the views (into their own
@@ -2539,6 +2545,7 @@ namespace Magelight {
         if (REL::Module::IsVR()) return false;
         if (s_engineMode || s_compositeMode == "ui") return true;
         if (s_compositeMode == "present") return false;
+        if (s_smoothMotionUiPass) return true;
         if (SmoothMotionLoaded()) return false;   // no engine mode: drawn at Present (late when InstallLatePresent can)
         return chain != SwapChainKind::kDxgi || GetModuleHandleW(L"SkyrimUpscaler.dll") != nullptr;
     }
@@ -3757,7 +3764,7 @@ namespace Magelight {
                 std::lock_guard<std::mutex> lock(s_uiModeExitMutex);
                 cbs = s_uiModeExitCbs;
             }
-            for (UIModeExitFn cb : cbs) cb(uiView);
+            for (UIModeExitFn cb : cbs) CallMod("a UI-mode exit callback", uiView, [&] { cb(uiView); });
         }
         // 0.29.0: the view's manifest/API open/close sound. Game
         // thread already — play directly, after the exit hooks so a close
@@ -3780,8 +3787,7 @@ namespace Magelight {
     {
         __try {
             SetUIModeImpl(on, hideView, pauseGame, noTextEntry);
-        } __except (LogSehAndDisable("SetUIMode", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("SetUIMode", GetExceptionInformation())) {
         }
     }
 
@@ -4240,8 +4246,7 @@ namespace Magelight {
     {
         __try {
             return HandleFocusedMsg(msg, wparam, lparam);
-        } __except (LogSehAndDisable("wndproc", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("wndproc", GetExceptionInformation())) {
         }
         return false;
     }
@@ -8206,15 +8211,47 @@ float4 ps_straight(VSOut i) : SV_Target {
         VR::Init(s_device, s_context);
     }
 
+    // A C++ exception's type, its text and the stack that threw it. The VEH skips these (they are every mod's ordinary
+    // control flow), so nothing else names one. An exception filter only: the stack is gone after it.
+    static void LogCxxThrow(const char* prefix, EXCEPTION_POINTERS* ep)
+    {
+        CxxThrow::Info info;
+        if (!CxxThrow::Read(ep->ExceptionRecord, info)) return;
+        SKSE::log::error("Magelight: {} C++ exception {}{}{}", prefix, info.type[0] ? info.type : "of unknown type",
+                         info.what[0] ? ": " : "", info.what);
+        void* frames[kVehStackFrames];
+        bool callerFirst = false;
+        const int count = StackLeft() >= kStackToWalk ? WalkFaultStack(ep, frames, callerFirst) : 0;
+        for (int i = 0; i < count; ++i) {
+            char path[MAX_PATH];
+            std::uintptr_t off = 0;
+            const char* base = ModuleOffsetOf(frames[i], path, off);
+            SKSE::log::error("Magelight: {}   #{:02} {}+0x{:X}", prefix, i, base, off);
+        }
+    }
+
+    void NoteModThrow(const char* what, std::uint64_t view, EXCEPTION_POINTERS* ep)
+    {
+        static constexpr int kMaxLogged = 16;
+        static std::atomic<int> s_logged{ 0 };
+        const int n = s_logged.fetch_add(1);
+        if (n >= kMaxLogged) return;
+        SKSE::log::error("Magelight: {} on view {} threw - that call is lost, the overlay stays on{}", what, view,
+                         n == kMaxLogged - 1 ? "; later ones are not logged" : "");
+        LogCxxThrow("mod call:", ep);
+    }
+
     // SEH telemetry (0.3.1 diagnostics): a fault anywhere in our frame or
     // input path becomes a LOG LINE + graceful overlay shutdown instead of a
     // silent CTD (crash loggers routinely miss faults raised inside foreign
     // frames like a Present hook or a window proc).
-    static LONG LogSehAndDisable(const char* where, unsigned long code, void* addr)
+    static LONG LogSehAndDisable(const char* where, EXCEPTION_POINTERS* ep)
     {
         SKSE::log::error(
             "Magelight: SEH exception 0x{:08X} at {} in {} — overlay disabled, UI mode will drop (UI mode {}: {})",
-            code, addr, where, s_focused.load() ? "on" : "off, last", static_cast<const char*>(s_uiModeLabel));
+            ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress, where,
+            s_focused.load() ? "on" : "off, last", static_cast<const char*>(s_uiModeLabel));
+        LogCxxThrow("the exception:", ep);
         NoteRenderFailure("an exception in the frame or input path");   // a static literal: no allocation in a handler
         s_renderDead.store(true);
         return EXCEPTION_EXECUTE_HANDLER;
@@ -9126,8 +9163,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             UiPassCompositeImpl(endOfFrameFallback);
-        } __except (LogSehAndDisable("UI pass", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("UI pass", GetExceptionInformation())) {
         }
     }
 
@@ -9136,8 +9172,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             FrameWork(sc);
-        } __except (LogSehAndDisable("frame work", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("frame work", GetExceptionInformation())) {
         }
     }
 
@@ -9181,8 +9216,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             void* const before = s_vmLock.Vm();
             if (!s_vmLock.Hold(PageStackExports())) return 0;   // resolved here on the page thread
             return s_vmLock.Vm() != before ? 2 : 1;
-        } __except (LogSehAndDisable("the page VM lock", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("the page VM lock", GetExceptionInformation())) {
             return -1;
         }
     }
@@ -9390,8 +9424,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             return CreateUltralight(s_pageContext);
-        } __except (LogSehAndDisable("the page thread's start", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("the page thread's start", GetExceptionInformation())) {
             ReleasePageLocksAfterFault();
             return false;
         }
@@ -9401,8 +9434,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         __try {
             PageThreadFrame();
-        } __except (LogSehAndDisable("page frame work", GetExceptionCode(),
-                        (GetExceptionInformation())->ExceptionRecord->ExceptionAddress)) {
+        } __except (LogSehAndDisable("page frame work", GetExceptionInformation())) {
             ReleasePageLocksAfterFault();
         }
     }
@@ -9446,6 +9478,30 @@ float4 ps_straight(VSOut i) : SV_Target {
         for (;;) Sleep(INFINITE);
     }
 
+    // Every loaded d3d11.dll and dxgi.dll that is not Windows' own, by path, comma separated; empty when there is none
+    // or the list cannot be read. A replacement loads the real DLL too, under the same name, so a lookup by name could
+    // answer with either.
+    static std::string ReplacedGraphicsDlls()
+    {
+        wchar_t sysDir[MAX_PATH];
+        const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
+        if (!sysLen || sysLen >= MAX_PATH) return {};
+        HMODULE mods[2048];
+        DWORD needed = 0;
+        if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return {};
+        std::string out;
+        const DWORD count = (std::min)(needed / static_cast<DWORD>(sizeof(HMODULE)), static_cast<DWORD>(std::size(mods)));
+        for (DWORD i = 0; i < count; ++i) {
+            wchar_t path[MAX_PATH * 2];
+            const DWORD len = GetModuleFileNameW(mods[i], path, static_cast<DWORD>(std::size(path)));
+            if (!len || len >= std::size(path)) continue;
+            if (!PageThread::IsReplacedGraphicsDll(std::wstring_view(path, len), std::wstring_view(sysDir, sysLen))) continue;
+            if (!out.empty()) out += ", ";
+            out += WideToUtf8(std::wstring(path, len));
+        }
+        return out;
+    }
+
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
     // so, its deferred context, its handoff and the thread. False: the mode is Off (the log line says why) and render
     // init runs again next frame, as without the setting.
@@ -9453,7 +9509,14 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         ID3D11DeviceContext* deferred = nullptr;
         const bool deferredOk = SUCCEEDED(s_device->CreateDeferredContext(0, &deferred)) && deferred;
-        const char* refused = PageThread::Decide(s_device->GetCreationFlags(), deferredOk);
+        const std::string replaced = ReplacedGraphicsDlls();
+        // The object, not where it was asked for: a wrapper's swapchain can hand back the engine's own. Never by
+        // COM identity, which a wrapper may answer for what it wraps.
+        const bool engineObject = s_device == EngineDevice();
+        if (!replaced.empty())
+            SKSE::log::info("Magelight: not Windows' own graphics DLLs: {}; the device in use {} the engine's own object",
+                            replaced, engineObject ? "is" : "is not");
+        const char* refused = PageThread::Decide(s_device->GetCreationFlags(), deferredOk, !replaced.empty() && engineObject);
         const int stackMb = s_ulFiberMb > 0 ? s_ulFiberMb : kMinFiberMb;
         HANDLE thread = nullptr;
         if (!refused) {
@@ -10093,7 +10156,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // "auto" turns it on behind an earlier Present hook on a plain dxgi swapchain, and for Smooth Motion without
-    // engine mode when d3d11.dll is the system one; never on VR. Behind a swapchain wrapper (a d3d11.dll proxy such
+    // engine mode or s_smoothMotionUiPass when d3d11.dll is the system one; never on VR. Behind a swapchain wrapper (a d3d11.dll proxy such
     // as ENB's, Streamline, Skyrim Upscaler) dxgi's own Present is found through a throwaway device, which only
     // "late" and Smooth Motion take: it killed the game at start behind ENB. Behind a dxgi.dll proxy (ReShade's)
     // nothing takes it: the device binds to the proxy, so the search could only find the proxy's swapchain again.
@@ -10114,7 +10177,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool earlierHook = ModuleAt(reinterpret_cast<const void*>(s_origPresent)) != ModuleAt(vtbl);
         // Without engine mode, Smooth Motion leaves dxgi's own Present as the only safe place to draw. Not behind
         // ENB's or ReShade's d3d11.dll: the throwaway device the dxgi search takes killed the game at start there.
-        const bool smoothMotion = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded()
+        const bool smoothMotion = mode == "auto" && !REL::Module::IsVR() && SmoothMotionLoaded() && !s_smoothMotionUiPass
             && IsSystemModule(GetModuleHandleW(L"d3d11.dll"), L"d3d11.dll");
         if (smoothMotion)
             SKSE::log::info("Magelight: NVIDIA Smooth Motion is loaded and engine mode is off - drawing late, inside "
@@ -10305,9 +10368,24 @@ float4 ps_straight(VSOut i) : SV_Target {
         InstallGameCursorSkip();
         InstallCursorMenuPin();
         InstallCursorAdvanceHide();
-        s_engineMode = !REL::Module::IsVR()
-            && (s_compositeMode == "engine" || (s_compositeMode == "auto" && SmoothMotionLoaded()))
-            && InstallEngineEndHook();
+        const HMODULE chainModule = ModuleAt(vtbl);
+        const bool streamlineChain = ModuleBaseNameIs(chainModule, L"sl.interposer.dll");
+        const bool smoothMotionAuto = !REL::Module::IsVR() && s_compositeMode == "auto" && SmoothMotionLoaded();
+        // Streamline wrapping the game's objects, even under a proxy's vtable. Loaded beside them (ENB Anti-Aliasing's
+        // DLAA) it hands out none, and the UI pass ran clean there. An untrusted chain has never had the UI pass.
+        const auto inStreamline = [](const void* p) { return p && ModuleBaseNameIs(ModuleAt(p), L"sl.interposer.dll"); };
+        const auto vtableOf = [](const void* obj) { return obj ? *static_cast<const void* const*>(obj) : nullptr; };
+        const bool streamlineWraps = streamlineChain || inStreamline(reinterpret_cast<const void*>(s_origPresent))
+            || inStreamline(vtableOf(s_gameDevice)) || inStreamline(vtableOf(EngineDevice()));
+        if (smoothMotionAuto && !streamlineWraps && GetModuleHandleW(L"sl.interposer.dll"))
+            SKSE::log::info("Magelight: NVIDIA Streamline is loaded but wraps neither the game's swapchain nor its device");
+        const bool smoothMotionEngine = smoothMotionAuto
+            && PageThread::SmoothMotionTakesEngineMode(!ReplacedGraphicsDlls().empty(),
+                                                      streamlineWraps || s_untrustedChain.load());
+        s_smoothMotionUiPass = smoothMotionAuto && !smoothMotionEngine;
+        s_engineMode = !REL::Module::IsVR() && (s_compositeMode == "engine" || smoothMotionEngine) && InstallEngineEndHook();
+        if (s_smoothMotionUiPass)
+            SKSE::log::info("Magelight: NVIDIA Smooth Motion behind a replaced graphics DLL - the UI pass, not engine mode");
         if (s_engineMode) {
             s_engineComposite.store(true);
             SKSE::log::info("Magelight: engine mode - the engine's device, drawn from its end-of-frame call{}",
@@ -10317,10 +10395,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         {
             // An untrusted wrapper (frame generation on Direct3D 12, set above) keeps drawing at Present, into the
             // engine's framebuffer: the UI pass has not been tried behind one.
-            const HMODULE chain = ModuleAt(vtbl);
-            RegisterOverlayMenu(ModuleBaseNameIs(chain, L"sl.interposer.dll")                ? SwapChainKind::kStreamline
-                                : IsSystemModule(chain, L"dxgi.dll") || s_untrustedChain.load() ? SwapChainKind::kDxgi
-                                                                                              : SwapChainKind::kWrapper);
+            RegisterOverlayMenu(streamlineChain                                                     ? SwapChainKind::kStreamline
+                                : IsSystemModule(chainModule, L"dxgi.dll") || s_untrustedChain.load() ? SwapChainKind::kDxgi
+                                                                                                    : SwapChainKind::kWrapper);
         }
         RegisterFocusMenu();
         // Manifest mods (Data/Magelight/<ModId>/manifest.json): folders that
