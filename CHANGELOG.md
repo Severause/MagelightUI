@@ -67,19 +67,33 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **Magelight no longer fights SimpleIME for the keyboard.** SimpleIME types through a window of its own, which keeps
-  keyboard focus once its IME has run. Magelight's key fallback took that focus back, and Magelight turned its own IME
-  on for the same keyboard. With Google Japanese Input that stalled the game for half a minute in one report, and
-  Japanese input in other programs stayed broken until Windows restarted. Now, once another window in the game holds
-  keyboard focus, Magelight leaves the focus there and keeps its own IME off until the game restarts. Pages still get
-  keys through the key fallback, with less: each key arrives a few frames late, held keys do not repeat, left Alt and
-  Windows-key combinations stay with the system, and with `"keyFallback": false` a page gets no keys at all. With
-  SimpleIME's IME in Japanese, Chinese or Korean mode, its own popup shows over the page while the page gets the raw
-  keys, and Escape closes the page. Anyone who types in Magelight pages should set SimpleIME's `enable_mod = false`
-  before starting the game: Magelight's own IME then handles all three languages.
+- **SimpleIME types into Magelight pages.** SimpleIME types through a window of its own, which keeps keyboard focus
+  once its IME has run. Magelight's key fallback used to take that focus back while Magelight turned its own IME on for
+  the same keyboard. With Google Japanese Input that stalled the game for half a minute in one report, and Japanese
+  input in other programs stayed broken until Windows restarted. Magelight now follows SimpleIME's mod author guide:
+  - The game's text-entry flag is raised while a page text field that takes an IME has focus, so SimpleIME's IME
+    turns on there.
+  - What SimpleIME types reaches the field.
+  - Magelight leaves keyboard focus with SimpleIME and keeps its own IME off until the game restarts.
+  - In SimpleIME's tool window (F2), set the IME window position update policy to "Based on cursor position" or
+    "None", since it cannot see a page's caret.
+  
+  What is still less than typing without it:
+  - Keys reach the page through the key fallback: each a few frames late, held keys do not repeat, left Alt and
+    Windows-key combinations stay with the system, and `"keyFallback": false` leaves a page no keys at all.
+  - While SimpleIME is composing, Backspace, Enter, the arrows and Escape reach the page too, and Escape closes it:
+    SimpleIME does not tell other mods when it is composing.
+  - With SimpleIME loaded, a mod that reads the keyboard itself and stands down only for the text-entry flag can act
+    on keys pressed in a page outside a text field that takes an IME, password and number fields included.
+  
+  For the smoothest typing in pages, set SimpleIME's `enable_mod = false` before starting the game. Magelight's own
+  IME then handles Japanese, Chinese and Korean, and SimpleIME no longer covers the console and other game text fields.
 
 ### For mod authors
 
+- With SimpleIME loaded, UI mode no longer raises the game's text-entry flag for its whole length: Magelight raises it
+  while a page text field that takes an IME has focus, as SimpleIME's guide asks, and lowers it when the field loses focus or UI mode
+  ends. Without SimpleIME nothing changes, and `kUIModeFlagNoTextEntry` keeps its meaning.
 - Since 0.31.10, while a page holds UI mode, every other SKSE plugin that reads keys with `GetAsyncKeyState` or
   `GetKeyState` gets the keyboard as all keys up. A page that works together with another mod can now let reads
   through: `kUIModeFlagPassPolledKeys` on `RequestUIMode` lets every read through for that UI mode, and

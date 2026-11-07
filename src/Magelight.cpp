@@ -434,7 +434,8 @@ namespace Magelight {
     // core on '__ime' (ImeCore.h), which draws the candidate list at the
     // composition unless the page draws its own. A page needs no code for any
     // of it. VR is exempt: the VR keyboards own text there.
-    // wparam: 1 attach, 0 detach, 2 reposition the candidates, 3 cancel the IME's copy of a composition the page kept.
+    // wparam: 1 attach, 0 detach, 2 reposition the candidates, 3 cancel the IME's copy of a composition the page kept,
+    // 4 attach once SimpleIME has had time to take focus (DeferImeAttach).
     static constexpr UINT kImeCtlMsg = WM_APP + 0x4F46;
     // Lost keys (Input::LostKeys): the message that gives the game window keyboard focus back, and the one that carries
     // a key the poll passed on (wparam vk, lparam as WM_KEYDOWN / WM_KEYUP have it). A message of our own, not a posted
@@ -449,6 +450,14 @@ namespace Magelight {
     static std::atomic<std::uint32_t> s_keySession{ 0 };         // bumped on UI-mode entry
     static std::atomic<bool> s_imeAttached{ false };
     static std::atomic<bool> s_imeComposing{ false };
+    // SimpleIME is loaded (DetectImeHosts, kDataLoaded): the game's text-entry flag follows the page's text field, and
+    // its text reaches the field as Scaleform char events (TakeImeHostChar). Flat only.
+    static std::atomic<bool> s_simpleImeLoaded{ false };
+    // The flag is raised for the focused text field (FollowFieldTextEntry, window thread): SimpleIME's IME is on.
+    static std::atomic<bool> s_fieldTextEntry{ false };
+    static std::atomic<std::uint32_t> s_fieldEntryGen{ 0 };        // bumped by each raise
+    static std::atomic<std::uint32_t> s_imeHostCharGen{ ~0u };     // the raise SimpleIME's text last came under
+    static std::atomic<bool> s_uiModeNoTextEntry{ false };         // this UI mode asked kUIModeFlagNoTextEntry
     // Between IMN_OPENCANDIDATE and IMN_CLOSECANDIDATE (window thread): the list is read only while it is open, and a
     // detach closes one still open.
     static std::atomic<bool> s_imeCandidatesOpen{ false };
@@ -2340,6 +2349,32 @@ namespace Magelight {
     }
     static bool              s_focusMenuRegistered = false;
 
+    // SimpleIME types its IME's result as Scaleform char events that reach the top menus, its menu (depth 13) first,
+    // as its "Compatibility & Mod Author Guide" describes. While the page's field has SimpleIME's IME on
+    // (s_fieldTextEntry), one reaching this menu goes into that field. SimpleIME frees the event after the frame, so it
+    // is only read here. True: taken. Control characters are taken but not typed: their keys reach the page through
+    // the key fallback. Game thread (the focus menu).
+    static bool TakeImeHostChar(const RE::UIMessage& msg)
+    {
+        if (!s_fieldTextEntry.load() || !s_focused.load()) return false;
+        const auto* d = static_cast<const RE::BSUIScaleformData*>(msg.data);
+        if (!d || !d->scaleformEvent || d->scaleformEvent->type != RE::GFxEvent::EventType::kCharEvent) return false;
+        // Scaleform's GFxCharEvent, which CommonLib does not declare: the UTF-16 unit follows the 4-byte event type.
+        std::uint32_t code = 0;
+        std::memcpy(&code, reinterpret_cast<const std::byte*>(d->scaleformEvent) + sizeof(RE::GFxEvent), sizeof(code));
+        if (code < 0x20 || code == 0x7F || code > 0xFFFF) return true;
+        static wchar_t s_high = 0;   // a high surrogate, until its low half comes
+        wchar_t units[2]{};
+        if (const std::size_t n = EditState::PairUnit(s_high, static_cast<wchar_t>(code), units)) QueueTypedText(units, n);
+        s_imeHostCharGen.store(s_fieldEntryGen.load());
+        static std::uint32_t s_loggedSession = ~0u;
+        if (s_loggedSession != s_keySession.load()) {
+            s_loggedSession = s_keySession.load();
+            SKSE::log::info("Magelight: text from SimpleIME reaches the page's field");
+        }
+        return true;
+    }
+
     class MagelightFocusMenu final : public RE::IMenu
     {
     public:
@@ -2403,6 +2438,8 @@ namespace Magelight {
                         SKSE::log::info("Magelight: menu user event '{}' swallowed by the focus menu", ev);
                     return RE::UI_MESSAGE_RESULTS::kHandled;
                 }
+            } else if (msg.type == RE::UI_MESSAGE_TYPE::kScaleformEvent) {
+                if (TakeImeHostChar(msg)) return RE::UI_MESSAGE_RESULTS::kHandled;
             } else if (msg.type == RE::UI_MESSAGE_TYPE::kHide) {
                 // Engine-initiated close (loading screen, force-close): UI mode must follow, decided once the
                 // queue has run (CheckFocusMenuClosed): a hide of our own while UI mode is on (the held menu
@@ -2896,9 +2933,10 @@ namespace Magelight {
     // Game thread (the input sink).
     enum class KeyPhase { Down, Repeat, Up };
     // The text a key makes, if any. Printable? Ask the active layout, with the live modifier state, or `bits` when
-    // given. It keeps the key's lParam, as the window's WM_CHAR does, so its keypress carries the key's code. Returns
-    // the characters made.
-    static int QueueKeyText(UINT vk, std::uint32_t make, LPARAM down, const std::uint16_t* bits = nullptr)
+    // given. It keeps the key's lParam, as the window's WM_CHAR does, so its keypress carries the key's code.
+    // `printable` false keeps only Tab and Enter (another IME host types the rest). Returns the characters made.
+    static int QueueKeyText(UINT vk, std::uint32_t make, LPARAM down, const std::uint16_t* bits = nullptr,
+                            bool printable = true)
     {
         BYTE ks[256]{};
         if (bits) {
@@ -2914,7 +2952,7 @@ namespace Magelight {
         const int n = ToUnicode(vk, make, ks, buf, 7, 0);
         for (int i = 0; i < n && i < 7; ++i) {
             const wchar_t ch = buf[i];
-            if (ch >= 0x20 || ch == L'\t' || ch == L'\r')
+            if ((printable && ch >= 0x20) || ch == L'\t' || ch == L'\r')
                 QueueInput(WM_CHAR, static_cast<WPARAM>(ch), down);
         }
         return n;
@@ -3733,8 +3771,11 @@ namespace Magelight {
             // us not to raise it — on Skyrim VR the raise starts the engine's
             // virtual keyboard device, which OpenComposite hooks to raise its
             // own keyboard over the page (field 2026-09-05, SA's quick wheel).
+            // With SimpleIME loaded it follows the page's text field instead (FollowFieldTextEntry): SimpleIME turns
+            // its IME on while the flag is raised.
             static bool s_textEntryRaised = false;
-            if (on && !s_textEntryRaised && !noTextEntry) {
+            if (on) s_uiModeNoTextEntry.store(noTextEntry);
+            if (on && !s_textEntryRaised && !noTextEntry && !(s_simpleImeLoaded.load() && !VR::IsLive())) {
                 cm->AllowTextInput(true);
                 s_textEntryRaised = true;
             } else if (!on && s_textEntryRaised) {
@@ -3970,11 +4011,13 @@ namespace Magelight {
     // never hands focus back and a moment without its focus is no sign it has stopped. Window thread.
     static bool s_otherImeHostSeen = false;
 
-    void LogImeHosts()
+    void DetectImeHosts()
     {
-        if (GetModuleHandleW(L"SimpleIME.dll"))
-            SKSE::log::info("Magelight: SimpleIME is loaded; once its window holds keyboard focus, Magelight leaves "
-                            "the focus there and keeps its own IME off");
+        if (!GetModuleHandleW(L"SimpleIME.dll")) return;
+        s_simpleImeLoaded.store(true);
+        SKSE::log::info("Magelight: SimpleIME is loaded; the text-entry flag follows a page's text field, its text "
+                        "reaches the field, and once its window holds keyboard focus Magelight leaves the focus there "
+                        "and keeps its own IME off");
     }
 
     static void LogOtherWindowFocus(HWND holder, const char* what)   // window thread
@@ -4030,6 +4073,57 @@ namespace Magelight {
         }
         s_imeAttached.store(on);
         SKSE::log::info("Magelight: IME context {}", on ? "attached (text field focused)" : "detached");
+    }
+
+    // With SimpleIME loaded, the game's text-entry flag is raised for a page text field that takes an IME and lowered
+    // when it loses focus or UI mode ends, as SimpleIME's guide asks: its IME is on while the flag is raised. A UI mode
+    // entered with kUIModeFlagNoTextEntry never raises it. Window thread (kImeCtlMsg, the game's main thread on flat).
+    static void FollowFieldTextEntry(bool field)
+    {
+        if (!s_simpleImeLoaded.load() || VR::IsLive()) return;
+        const bool on = field && s_focused.load() && !s_uiModeNoTextEntry.load();
+        if (on == s_fieldTextEntry.load()) return;
+        auto* cm = RE::ControlMap::GetSingleton();
+        if (!cm) return;
+        cm->AllowTextInput(on);
+        if (on) s_fieldEntryGen.fetch_add(1);
+        s_fieldTextEntry.store(on);
+        static int s_left = 32;
+        if (s_left-- > 0)
+            SKSE::log::info("Magelight: text-entry flag {} for the page's text field (SimpleIME)", on ? "raised" : "lowered");
+    }
+
+    // kImeCtlMsg 4 after a short wait, for a field whose flag has just gone up while SimpleIME's window has not held
+    // focus yet: with its mod on, SimpleIME takes focus first and ImeAttach then stays off; with it off, Magelight's
+    // IME attaches. Window thread.
+    static void DeferImeAttach()
+    {
+        try {
+            std::thread([hwnd = s_hwnd]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                PostMessageW(hwnd, kImeCtlMsg, 4, 0);
+            }).detach();
+        } catch (...) {
+            ImeAttach(true);
+        }
+    }
+
+    // SimpleIME types the field's text itself (TakeImeHostChar) while it holds focus with the field's IME on and an IME
+    // active on its thread, so a key the fallback passes adds only Tab and Enter. Its text having come under this
+    // raise settles it; before that, a Japanese, Chinese or Korean language on its thread stands for an active IME (its
+    // own test is any TSF input processor). With a plain keyboard layout SimpleIME sends no text and the key's own
+    // stands. Window thread.
+    static bool ImeHostTypesText()
+    {
+        if (!s_fieldTextEntry.load()) return false;
+        HWND holder = nullptr;
+        if (!OtherWindowHasFocus(holder)) return false;
+        if (s_imeHostCharGen.load() == s_fieldEntryGen.load()) return true;
+        const HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(holder, nullptr));
+        switch (PRIMARYLANGID(LOWORD(reinterpret_cast<std::uintptr_t>(hkl)))) {
+        case LANG_JAPANESE: case LANG_CHINESE: case LANG_KOREAN: return true;
+        default: return false;
+        }
     }
 
     // The window's IME context follows text focus in the UI-mode view (DrainEditableStates decides); on VR the VR
@@ -4325,7 +4419,9 @@ namespace Magelight {
         s_handlingPassedKey = true;
         GuardedHandleFocusedMsg(down ? WM_KEYDOWN : WM_KEYUP, vk, lparam);
         s_handlingPassedKey = false;
-        if (down) QueueKeyText(static_cast<UINT>(vk), static_cast<std::uint32_t>((lparam >> 16) & 0x7F), lparam, &bits);
+        if (down)
+            QueueKeyText(static_cast<UINT>(vk), static_cast<std::uint32_t>((lparam >> 16) & 0x7F), lparam, &bits,
+                         !ImeHostTypesText());
     }
 
     // Page thread. A key event reads this thread's keyboard layout, and Windows switches only the window thread's.
@@ -4358,7 +4454,17 @@ namespace Magelight {
                 ImcScope c;
                 if (c.h) ImeCancelOpen(c.h, true);
             }
-            else ImeAttach(wparam != 0);
+            else if (wparam == 4) {
+                if (s_fieldTextEntry.load()) ImeAttach(true);   // the field still has the flag
+            }
+            else {
+                const bool on = wparam != 0;
+                FollowFieldTextEntry(on);
+                // SimpleIME takes focus on its own thread a moment after the raise: attaching now would put a second
+                // IME on the keyboard before ImeAttach could see its focus.
+                if (on && s_fieldTextEntry.load() && !s_otherImeHostSeen) DeferImeAttach();
+                else ImeAttach(on);
+            }
             return 0;
         }
         if (s_focused.load() && !s_renderDead.load()) {
