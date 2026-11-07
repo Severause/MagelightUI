@@ -104,6 +104,7 @@ static void OnSKSEMessage(SKSE::MessagingInterface::Message* msg)
         // lazily on the RENDER thread from inside the hook (one thread owns
         // the web renderer, always).
         Magelight::SysInfo::LogGraphicsAdapters();
+        Magelight::LogImeHosts();
         Magelight::InstallHook();
         Magelight::RegisterInputSink();
         break;

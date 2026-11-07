@@ -170,6 +170,15 @@ wants a keyboard; on flat the line ends `-> IME on` or `off`; the first 32 of a 
 letters from a VR keyboard, it reads letters from `keypress` or `keydown` in a text field: since 1.5.0 typed text
 reaches a field as `input` events, as on a phone, and only those keys are key events.
 
+**With SimpleIME.** SimpleIME runs its own IME in a window of its own, which keeps keyboard focus once its IME has
+run. From 1.8.0 Magelight leaves that focus where it is and keeps its own IME off until the game restarts
+(`Magelight.log`: `another window in this process holds keyboard focus`). Pages then get keys only through the key
+fallback: each key a few frames late, no repeat while a key is held, no left Alt or Windows-key combinations, and
+nothing at all with `"keyFallback": false`. With SimpleIME's IME in Japanese, Chinese or Korean mode, its popup shows
+over the page while the page gets the raw keys, and Escape closes the page. For typing in pages, set
+`enable_mod = false` in `SimpleIME.toml` before starting the game. Magelight's own IME then handles Japanese,
+Chinese and Korean, and SimpleIME no longer covers the console and the game's other text fields.
+
 ## A key or a mouse button reads wrong in a page
 
 From 1.5.0 a page's key events carry `code`, `location` and a `key` from the player's own keyboard

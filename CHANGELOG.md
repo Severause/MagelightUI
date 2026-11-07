@@ -65,6 +65,19 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ## 1.8.0 - Unreleased
 
+### What players notice
+
+- **Magelight no longer fights SimpleIME for the keyboard.** SimpleIME types through a window of its own, which keeps
+  keyboard focus once its IME has run. Magelight's key fallback took that focus back, and Magelight turned its own IME
+  on for the same keyboard. With Google Japanese Input that stalled the game for half a minute in one report, and
+  Japanese input in other programs stayed broken until Windows restarted. Now, once another window in the game holds
+  keyboard focus, Magelight leaves the focus there and keeps its own IME off until the game restarts. Pages still get
+  keys through the key fallback, with less: each key arrives a few frames late, held keys do not repeat, left Alt and
+  Windows-key combinations stay with the system, and with `"keyFallback": false` a page gets no keys at all. With
+  SimpleIME's IME in Japanese, Chinese or Korean mode, its own popup shows over the page while the page gets the raw
+  keys, and Escape closes the page. Anyone who types in Magelight pages should set SimpleIME's `enable_mod = false`
+  before starting the game: Magelight's own IME then handles all three languages.
+
 ### For mod authors
 
 - Since 0.31.10, while a page holds UI mode, every other SKSE plugin that reads keys with `GetAsyncKeyState` or

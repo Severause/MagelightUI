@@ -3953,10 +3953,51 @@ namespace Magelight {
         }
     }
 
+    // Keyboard focus on a window of this process other than the game's, such as SimpleIME's: it keeps focus in its own
+    // child window once its IME has run, with the game window's input context detached. Two IME hosts on one keyboard
+    // fight over focus and the context, and Google Japanese Input has stalled the game's thread that way, so Magelight
+    // leaves both to the other window. `holder` gets the focused window. Window thread.
+    static bool OtherWindowHasFocus(HWND& holder)
+    {
+        holder = GetFocus();
+        if (!holder || holder == s_hwnd) return false;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(holder, &pid);
+        return pid == GetCurrentProcessId();
+    }
+
+    // Set once OtherWindowHasFocus has held: Magelight's IME stays off for the rest of the process, since SimpleIME
+    // never hands focus back and a moment without its focus is no sign it has stopped. Window thread.
+    static bool s_otherImeHostSeen = false;
+
+    void LogImeHosts()
+    {
+        if (GetModuleHandleW(L"SimpleIME.dll"))
+            SKSE::log::info("Magelight: SimpleIME is loaded; once its window holds keyboard focus, Magelight leaves "
+                            "the focus there and keeps its own IME off");
+    }
+
+    static void LogOtherWindowFocus(HWND holder, const char* what)   // window thread
+    {
+        static int s_left = 16;
+        if (s_left-- <= 0) return;
+        char cls[64]{};
+        GetClassNameA(holder, cls, sizeof(cls));
+        SKSE::log::info("Magelight: another window in this process holds keyboard focus ({:#x} {}): {}",
+                        reinterpret_cast<std::uintptr_t>(holder), cls, what);
+    }
+
     static void ImeAttach(bool on)   // window thread only (kImeCtlMsg)
     {
         if (!s_hwnd || s_imeAttached.load() == on) return;
         if (on) {
+            HWND holder = nullptr;
+            if (OtherWindowHasFocus(holder)) {
+                s_otherImeHostSeen = true;
+                LogOtherWindowFocus(holder, "Magelight's IME stays off");
+                return;
+            }
+            if (s_otherImeHostSeen) return;
             const BOOL ok = ImmAssociateContextEx(s_hwnd, nullptr, IACE_DEFAULT);
             // Diagnostics: did the window actually get a context, is the IME open,
             // and is it in a native (hiragana/kana) conversion mode or alphanumeric?
@@ -4251,11 +4292,20 @@ namespace Magelight {
         return false;
     }
 
-    // Lost keys: the window has no key messages, so try what an alt-tab does. Window thread.
+    // Lost keys: the window has no key messages, so try what an alt-tab does, unless another window in this process holds
+    // focus (OtherWindowHasFocus): the keys still reach the page through the poll, and Magelight's own IME comes off.
+    // Window thread.
     static void RestoreKeyFocus()
     {
-        const HWND before = GetFocus();
-        if (before == s_hwnd || GetForegroundWindow() != s_hwnd) return;
+        if (GetForegroundWindow() != s_hwnd) return;
+        HWND before = nullptr;
+        if (OtherWindowHasFocus(before)) {
+            s_otherImeHostSeen = true;
+            if (s_imeAttached.load()) ImeAttach(false);
+            LogOtherWindowFocus(before, "focus left there");
+            return;
+        }
+        if (before == s_hwnd) return;
         SetFocus(s_hwnd);
         SKSE::log::info("Magelight: keyboard focus was {:#x}, given to the game's window: {}",
                         reinterpret_cast<std::uintptr_t>(before), GetFocus() == s_hwnd ? "took" : "refused");
