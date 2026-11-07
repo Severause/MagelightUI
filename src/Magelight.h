@@ -54,6 +54,9 @@ namespace Magelight {
     // IDXGISwapChain::Present. Idempotent.
     void InstallHook();
 
+    // kDataLoaded: whether SimpleIME, another IME host, is loaded (Magelight then follows its guide), with a log line.
+    void DetectImeHosts();
+
     // kInputLoaded/kDataLoaded: register the input sink (the UI-mode toggle
     // key, Page Up by default, and mod hotkeys). Idempotent.
     void RegisterInputSink();

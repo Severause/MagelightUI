@@ -265,7 +265,9 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     ahead of every sink (Immersive Equipment Displays opened its UI on
     Backspace typed into a search field and froze the cursor, 2026-09-03),
     not for Papyrus `OnKeyDown`. The text-entry flag is raised too, for the
-    mods that check it. Typing, Escape and bound hotkeys all ride the window
+    mods that check it (with SimpleIME loaded, only while a page text field
+    that takes an IME has focus: SimpleIME turns its IME on with the flag).
+    Typing, Escape and bound hotkeys all ride the window
     proc (WM_KEYDOWN / WM_CHAR are the OS, not DirectInput), so they keep
     working. The mouse device is untouched, and so is the gamepad but for a
     view that opted in to the gamepad layer (1.6.0): while it holds the pad

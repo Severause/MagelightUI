@@ -170,6 +170,29 @@ wants a keyboard; on flat the line ends `-> IME on` or `off`; the first 32 of a 
 letters from a VR keyboard, it reads letters from `keypress` or `keydown` in a text field: since 1.5.0 typed text
 reaches a field as `input` events, as on a phone, and only those keys are key events.
 
+**With SimpleIME.** From 1.8.0 Magelight follows SimpleIME's mod author guide.
+- **The text-entry flag:** while SimpleIME is loaded, the game's text-entry flag is raised only while a page text
+  field that takes an IME has focus, so SimpleIME's IME turns on there.
+- **Its text:** what SimpleIME types reaches the field (`Magelight.log`: `text from SimpleIME reaches the page's
+  field`).
+- **Focus:** SimpleIME keeps keyboard focus in a window of its own once its IME has run. Magelight leaves the focus
+  there and keeps its own IME off until the game restarts (`another window in this process holds keyboard focus`).
+- **Its IME window:** in SimpleIME's tool window (F2), set the IME window position update policy to "Based on cursor
+  position" or "None". It cannot follow a page's caret.
+
+What that costs:
+- **Keys come through the key fallback:** each key arrives a few frames late, held keys do not repeat, left Alt and
+  Windows-key combinations are not passed on, and nothing arrives at all with `"keyFallback": false`.
+- **Keys during a composition:** while SimpleIME is composing, Backspace, Enter, the arrows and Escape reach the page
+  too, and Escape closes it.
+- **Other mods' hotkeys:** with SimpleIME loaded, a mod that reads the keyboard itself and stands down only for the
+  text-entry flag can act on keys pressed in a page outside a text field that takes an IME (password and number
+  fields included).
+
+For the smoothest typing in pages, set `enable_mod = false` in `SimpleIME.toml` with the game closed (SimpleIME
+rewrites the file when the game exits). Magelight's own IME then handles Japanese, Chinese and Korean, and
+SimpleIME no longer covers the console and the game's other text fields.
+
 ## A key or a mouse button reads wrong in a page
 
 From 1.5.0 a page's key events carry `code`, `location` and a `key` from the player's own keyboard
