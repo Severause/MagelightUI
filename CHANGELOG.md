@@ -14,6 +14,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | Added | Gate | Feature |
 |---|---|---|
 | 1.8.0 | 10800 | Other plugins' key reads a page lets through while it holds UI mode: `kUIModeFlagPassPolledKeys` on `RequestUIMode`, `SetViewPolledKeys` (named DLLs, named keys, or both), manifest `"polledKeys"`, `QueryCapability("polledKeys")` |
+| 1.8.0 | — | The low-memory guard: while Windows is nearly out of memory, `UIModeRefused` with the detail `low memory` for a view not already on screen, first loads and wakes wait, hidden views are released whether or not they hibernate (`ViewReloaded` on the next load of one that never does); `Magelight.json` `lowMemoryFloorMB` |
 | 1.7.1 | 10701 | UI mode asked at the main menu opens the page there; `SetViewMainMenu`, manifest `"mainMenu"`, `QueryCapability("mainMenu")` (flat, page thread); `UIModeRefused` detail `view does not show here` |
 | 1.7.0 | 10700 | `QueryCapability("pagethread")`, `capabilities.pageThread`: whether render-thread callbacks run on Magelight's page thread (`Magelight.json` `"pageThread"`, flat only) |
 | 1.6.1 | 10601 | `VRPlacementDesc::flags` with `kVRPlacementAtGaze` and manifest `vr.atGaze`: a view placed where the player is looking, pitch included; `QueryCapability("vrGaze")` |
@@ -67,6 +68,14 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
+- **Magelight stops opening pages when Windows is nearly out of memory**, instead of risking the failure that turned
+  the overlay off until the game restarted. With less than 768 MB of commit left (shared by the game and every other
+  program), Magelight opens and loads no new page until memory recovers, says so on the HUD and in the log, and lets
+  go of the pages that are hidden; they load again when opened, and most on their own a minute or more after memory
+  recovers. Pages already on screen stay. Before, the next page to open could fail to allocate inside Ultralight, and
+  the overlay then turned off for the session. The game's own memory use is not Magelight's to fix: a game whose
+  memory keeps growing still runs out. `lowMemoryFloorMB` in `Magelight.json` sets the floor (`0` turns the guard
+  off). See "Pages stop opening: the game is low on memory" in `docs/TROUBLESHOOTING.md`.
 - **SimpleIME types into Magelight pages.** SimpleIME types through a window of its own, which keeps keyboard focus
   once its IME has run. Magelight's key fallback used to take that focus back while Magelight turned its own IME on for
   the same keyboard. With Google Japanese Input that stalled the game for half a minute in one report, and Japanese
@@ -100,6 +109,17 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   `SetViewPolledKeys` (or the manifest's `"polledKeys"`) names the plugins, the keys, or both that get through while
   the view holds UI mode. A side-neutral Shift, Ctrl or Alt covers both sides. Gate on `hostVersionNumber >= 10800`
   and `QueryCapability("polledKeys")`. See "Letting other plugins read keys" in `docs/CPP.md`.
+- While Windows is low on memory, `RequestUIMode` for a view not already on screen is refused with `UIModeRefused`
+  and the detail `low memory` (a switch with `switch: low memory`), first loads and wakes wait until memory is back,
+  and hidden views are released whether or not they hibernate. One that never hibernates loads again, hidden, a
+  minute or more after memory recovers, and gets `ViewReloaded` after that load's `ViewDomReady`: send its state
+  again.
+  `Navigate`, `ReloadView` and `RebuildViewAtScale` run as usual. See "When the game runs low on memory" in
+  `docs/CPP.md`.
+- A refused UI-mode entry now gives the next `kUIModeFlagQueue` request its turn; before, the rest of the queue waited
+  for another mod's UI mode to end.
+- A hibernation that drops a pending `ReloadView` or `RebuildViewAtScale` now sends the `ViewReloaded` the request
+  would have.
 
 ## 1.7.2 - Unreleased
 

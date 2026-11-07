@@ -254,7 +254,8 @@ namespace MAGELIGHT_API {
     enum class Event : std::uint32_t {
         ViewDomReady = 0,     // page scripts ran; safe to InteropCall
         ViewLoadFailed = 1,   // detail = "<url>: <description> (<domain>:<code>)"
-        ViewReloaded = 2,     // a ReloadView/Navigate landed (DOM ready again; re-send state)
+        ViewReloaded = 2,     // the page was replaced: a ReloadView/Navigate landed, a RebuildViewAtScale, or (1.8.0)
+                              // the next load of a view the low-memory guard released (DOM ready again; re-send state)
         ViewDestroyed = 3,    // DestroyView completed on the render thread
         UIModeEntered = 4,    // view = the UI-mode view; detail "switched" when you retargeted an active mode
         UIModeExited = 5,     // every exit path (programmatic, Escape, key, load boundary, render-death)
@@ -269,7 +270,8 @@ namespace MAGELIGHT_API {
                               // (QueryCapability("scriptErrors"), 1.5.0)
         RenderDead = 9,       // the overlay disabled itself for the session (also sent at RegisterMod if already dead)
         HostShutdown = 10,    // reserved
-        UIModeRefused = 11,   // your RequestUIMode lost the race on the game thread; detail = reason
+        UIModeRefused = 11,   // your RequestUIMode was not entered (a lost race, or the host refused it on the game
+                              // thread); detail = why ("low memory" since 1.8.0, see docs/CPP.md)
     };
 
     struct EventData {
@@ -592,7 +594,7 @@ namespace MAGELIGHT_API {
                                                             // the host's page script: InvalidArgument (0.30.0;
                                                             // RegisterJSListener drops them the same way)
         Result (*RequestUIMode)(ViewId view, std::uint32_t flags);   // Ok = entry queued: UIModeEntered confirms,
-                                                            // UIModeRefused reports a lost race. Busy → the
+                                                            // UIModeRefused says it was not entered. Busy → the
                                                             // holder hears FocusDenied. Hud/click-through → Denied.
                                                             // While YOU hold UI mode, another of your views
                                                             // switches in place (UIModeEntered, detail "switched")
@@ -667,7 +669,9 @@ namespace MAGELIGHT_API {
         Result (*SetViewHibernate)(ViewId view, std::uint32_t idleMs);   // hidden this long -> the View and its
                                                             // texture are released; ShowView(true) reloads the page,
                                                             // calls sent meanwhile land after DOM ready, and your
-                                                            // onDomReady/ViewDomReady fire again. 0 = never
+                                                            // onDomReady/ViewDomReady fire again. 0 = never, but
+                                                            // while the game is low on memory (1.8.0) every hidden
+                                                            // view is released whatever idleMs is (docs/CPP.md)
 
         // ── appended in 0.18.0 (VR-4) — gate on hostVersionNumber >= 1800 ──
         // No-ops on a flat runtime; QueryCapability("vr") says which you got.
@@ -883,7 +887,8 @@ namespace MAGELIGHT_API {
         // (network and layout quiet): Ultralight 2.0 decodes a page's images
         // only once the page is painted, so the first paint has none. One view
         // per frame, never on a frame already over the load budget. The
-        // texture stays allocated while the view lives (for a 2560x1440 view
+        // texture stays allocated while the view lives, unless it hibernates or
+        // the game runs low on memory (1.8.0) (for a 2560x1440 view
         // about 74 MB with MSAA 4x before 1.5.0, about 15 MB plus the page's
         // composited layer tiles from 1.5.0): opt in for a view the player
         // opens often. A page that hides its content while hidden (display:

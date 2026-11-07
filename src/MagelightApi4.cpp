@@ -505,7 +505,12 @@ namespace Magelight::Api4 {
                     if (!s_uiQueue.empty()) drainQueue = true;
                     break;
                 case HostEvent::UIModeRefused:
-                    if (s_uiPending == view) { s_uiPending = 0; s_uiPendingTicket = 0; }
+                    // A refused entry ends its turn: the next queued request is entered or refused in its own.
+                    if (s_uiPending == view) {
+                        s_uiPending = 0;
+                        s_uiPendingTicket = 0;
+                        if (!s_uiQueue.empty()) drainQueue = true;
+                    }
                     s_uiSwitchPassKeys.erase(view);
                     ownerSink(view, Event::UIModeRefused);
                     break;

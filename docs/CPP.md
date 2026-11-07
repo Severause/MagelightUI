@@ -578,8 +578,9 @@ if (v4()->hostVersionNumber >= 3111 && v4()->QueryCapability("prepaint") == 1)
     v4()->SetViewPrepaint(mainView, true);   // any time; the paint waits for the page
 ```
 
-- The texture stays allocated while the view lives. For a 2560x1440 view that
-  is about 74 MB with MSAA 4x on hosts before 1.5.0 (Ultralight 1.4), and on
+- The texture stays allocated while the view lives, unless it hibernates or
+  the game runs low on memory (1.8.0). For a 2560x1440 view that is about
+  74 MB with MSAA 4x on hosts before 1.5.0 (Ultralight 1.4), and on
   1.5.0 (Ultralight 2.0) about 15 MB for the view's own target plus the tiles
   of the layers the page composites. Opt in for the view the player opens
   often, not every popup.
@@ -699,7 +700,8 @@ pauses a background tab:
 - A hidden page is never painted, so it costs no render time; its timers still
   cost script time, so pause polling on `visibilitychange`. A hidden view keeps
   its texture: hibernation (`SetViewHibernate`) is still what frees it, its
-  video memory within about 20 s, whether or not another view is shown.
+  video memory within about 20 s, whether or not another view is shown (and,
+  from 1.8.0, the low-memory guard: "When the game runs low on memory").
 - `ShowView` changes `IsViewVisible` at once; the View follows on the render
   thread at two points in each frame, before the input and again between
   `Renderer::Update` and the paint. A show from the game thread (a game task,
@@ -816,6 +818,40 @@ if (api->hostVersionNumber >= 10800 && api->QueryCapability("polledKeys") == 1) 
 }
 api->RequestUIMode(barterView, MAGELIGHT_API::kUIModeFlagPause);
 ```
+
+## When the game runs low on memory (1.8.0)
+
+Free commit is the room left under Windows' commit limit, which the game shares with every other program. When it
+falls below the player's `lowMemoryFloorMB` (768 MB unless they changed it), the host shows and loads nothing new for
+Ultralight until memory recovers. An allocation that fails inside Ultralight throws through code Magelight cannot
+see, and the overlay then turns itself off for the session (`RenderDead`); the guard keeps that throw from happening.
+While it is up:
+
+- A UI-mode entry is refused unless its view is already on screen (loaded and shown, as after `ReleaseUIMode` without
+  a hide): `RequestUIMode` returns `Ok` as before, then `UIModeRefused` arrives with the detail `low memory` (Papyrus:
+  `Magelight_UIModeRefused` with `modId|low memory`), and the player gets a HUD line, at most one every 30 s. Handle
+  it as any refusal; asking again works once memory is back. A `kUIModeFlagQueue` request whose turn comes then is
+  refused the same way, and the next one in the queue gets its turn. A switch to another of your views (a reclaim
+  included) is refused with `switch: low memory` unless that view is on screen. UI mode then stays where it was,
+  unless the view holding it is hidden (a reclaim whose release hid it): then it ends, with `UIModeExited`.
+- A view's first load and a hibernated view's wake wait until memory is back. Your calls to the view stay queued, as
+  during any load; no event says it waits, and `ViewDomReady` arrives when it lands. A view shown meanwhile draws
+  nothing until then. The view holding UI mode and the VR keyboard load as usual, and so does the new View of a
+  shown view you rebuild (`RebuildViewAtScale`). `Navigate` and `ReloadView` on a loaded page run as usual: they
+  replace the page in its own View.
+- Hidden views are released as hibernation releases them, whether or not you called `SetViewHibernate`, once their
+  page has reached DOM ready and they have been hidden 2 s (a view never shown since it loaded, at once). A
+  released view whose page you set to hibernate comes back when shown, as after hibernation. One you never set to
+  hibernate (or load on show) loads again, hidden, about a minute after memory recovers (longer each time that
+  reload brought the guard straight back), or when shown if that comes first; its `ViewDomReady` then comes with a
+  `ViewReloaded`: send its state again. Until then a page you run hidden
+  (timers, a socket) is stopped, calls to it wait (past 256, the newest are dropped), and what it kept only in its
+  own script is gone; keep what must survive in your plugin or in the page's `localStorage`.
+- No page is prepainted.
+- Views already shown stay up and keep painting.
+
+The guard lifts once free commit is back above the floor by half the floor (at least 256 MB) and it has been up
+10 s. The log has a line each way. `lowMemoryFloorMB` `0` turns the guard off.
 
 ## A gamepad (1.6.0)
 
