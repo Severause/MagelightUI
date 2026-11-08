@@ -489,7 +489,8 @@ bring the UI back (loading a save does not). Post the whole log with the report.
 thread, with its `#NN` caller lines under it) names the module and offset; a place that faulted earlier in the session is named by its first
 line, and new places stop being logged after 64: `MgWCore.dll` is Ultralight's web engine (see the VEH section below). `MgWCore.dll +0xFB7F77` before 0.31.3
 was a PC where Arial could not be loaded. Since 0.31.3 the `fonts:` lines near the top of the log
-name the last-resort font the session uses and, when Arial could not be used, why. An exception
+name the last-resort font the session uses and, when Arial could not be used, why. `MgWCore.dll +0x1D635DC` before
+1.8.0 was a right-click (or the Menu key, or Shift+F10) on selected text in a page's text field. An exception
 `0xC00000FD` is a stack overflow: see the next section. With `pageThread` the line reads `... in page frame work`
 (or `in the page thread's start`), and may be followed by `the page thread faulted holding the view registry ...;
 given back`; the game thread keeps running either way. A fault while the page thread starts Ultralight logs

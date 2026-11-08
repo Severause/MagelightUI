@@ -43,7 +43,7 @@ tools/memreport-test/       src/MemoryReportCore.h against captured GetMemoryUsa
 tools/bridge-test/          src/JsBridgeCore.h and the page's __mlNative on a CPU view (build.bat builds and runs it)
 tools/visibility-test/      View::set_visible on CPU and GPU views: hidden pages, the prepaint, the frame order SyncViewVisibility relies on (build.bat)
 tools/pathtext-test/        src/PathTextCore.h's conversions, and a page loaded through Ultralight from a folder named in Chinese and Cyrillic with # and % (build.bat)
-tools/input-test/           src/InputCore.h's key events on the flat and VR paths, the polled-keys exemption, the releases, the leave, the pointer guard, the input queue's rule and the lost keys (build.bat; MinHook from the build dir)
+tools/input-test/           src/InputCore.h's key events on the flat and VR paths, the polled-keys exemption, the releases, the leave, the pointer guard (the context-menu guard in every frame, with its menufault and armfault controls), the input queue's rule and the lost keys (build.bat; MinHook from the build dir)
 tools/ime-test/             src/ImeCore.h's candidate-list parsing and '__ime' payload rules (ime_test), the Editor calls the native composition relies on (imeprobe); build.bat builds and runs both
 tools/ime-box-test/         the page core's IME candidate box in Ultralight's own WebKit: a reading the Editor composed, zoom, an iframe editor, device scale, the opt-outs (build.bat; needs node)
 tools/editor-test/          src/EditStateCore.h's text-focus rules on real EditableState reports, typed text as the host fires it, views/keyboard's layouts (build.bat)
@@ -479,3 +479,18 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     share is atomic or under its mutex, and new shared state must be too. `tools/deferred-test`, `tools/pagethread-test`
     and `fiber-gc-test --thread` are its gates; re-run them, and the page-facing tools with `MG_PAGE_THREAD=1`, at
     every SDK bump.
+28. **WebKit's context menu never runs.** Its default for a `contextmenu` over selected text in an editable field
+    faults in a spelling lookup in Ultralight 2.0 (`MgWCore.dll +0x1D635DC`, 1.7.1 field log: the overlay off for the
+    session), in any frame, for a right release, the Menu key, Shift+F10 or a page's own dispatch (one inside a page's
+    script can end the process). `Input::kPointerGuardScript` cancels the default of every `contextmenu` in the page
+    and in each frame, armed as the frame loads (a page's dispatch of one that is not cancelable is replaced by a
+    cancelable copy), and hides that from the page (`defaultPrevented` reports only the page's own calls: libraries skip
+    their own menu when it is set). Before each input that can open the menu (`Input::ArmsMenuGuard`: a right release,
+    the Menu key, F10) and before its own release of a held right button, `DrainInputQueue` re-arms the guard in the
+    page it goes to (`ArmMenuGuard`), which reaches the frames no load arms and, once the page reached DOM ready, a page
+    with no script of its own (its window object, and the page core, come with that script). A new way input reaches a
+    page that can open the menu needs the re-arm too. Not covered: a frame in a closed shadow root, and a page's own
+    dispatch in a frame no load armed before the next such input.
+    `tools/input-test`'s `contextmenu` section checks each case, and its `menufault` (no guard) and `armfault` (no
+    re-arm) controls, each in a process of its own, must still fault: when an SDK bump stops them faulting, the guard
+    may go.

@@ -2,7 +2,8 @@
 rem Builds and runs inputprobe.exe: what a page sees from the input Magelight hands Ultralight 2.0 (src\InputCore.h),
 rem offline on CPU views, no game. Keys through Input::MakeKeyEvent as the flat window and the VR paths queue them,
 rem the polled-keys filter around the constructor, the releases sent when focus goes, the leave sent to a view the
-rem pointer left, the page core's pointer guard, which view each pointer source's events go to (two VR hands), the
+rem pointer left, the page core's pointer guard (its context-menu half in every frame with the host's re-arm, and the
+rem WebKit faults they stop, in runs of their own), which view each pointer source's events go to (two VR hands), the
 rem input queue's rule (moves merged, releases and markers kept past its cap), the keys the muted keyboard poll passes
 rem on (LostKeys), and (printed) the matrix the design
 rem came from. Re-run it at every SDK
@@ -41,6 +42,10 @@ cl /nologo /std:c++20 /Zc:char8_t- /EHsc /W4 /WX /O2 /MT /utf-8 %HOOKDEF% /I "%R
 copy /y "%UL%\bin\*.dll" "%RUN%" >nul
 "%RUN%\inputprobe.exe" "%UL%"
 set "FAILS=%ERRORLEVEL%"
+"%RUN%\inputprobe.exe" "%UL%" menufault
+set /a FAILS=%FAILS%+%ERRORLEVEL%
+"%RUN%\inputprobe.exe" "%UL%" armfault
+set /a FAILS=%FAILS%+%ERRORLEVEL%
 if "%HOOKLIB%"=="" exit /b %FAILS%
 copy /y "%RUN%\*.dll" "%CTL%" >nul
 copy /y "%RUN%\inputprobe.exe" "%CTL%" >nul

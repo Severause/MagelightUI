@@ -1698,7 +1698,8 @@ namespace Magelight {
             "document.addEventListener('mouseover',function(ev){var t=up(ev.target,'data-ml-sound-hover');if(t===last)return;last=t;if(!t)return;"
             "var n=t.getAttribute('data-ml-sound-hover');if(n)try{__mlNative(id,'__sound','hover:'+n);}catch(e){}},true);"
             "})();" +
-            // Middle, back and forward buttons: no autoscroll, auxclick instead of click (InputCore.h).
+            // Middle, back and forward buttons: no autoscroll, auxclick instead of click; no WebKit context menu, in
+            // the page or its frames (InputCore.h).
             std::string(Input::kPointerGuardScript) +
             // IME: the page core draws the IME's candidate list the host hands it on '__ime' (ImeCore.h), in a box at
             // the anchor, the composition character the IME's window would open at, in viewport CSS px (the
@@ -7205,6 +7206,31 @@ float4 ps_straight(VSOut i) : SV_Target {
         InteropCall(uiId, "__ime", Ime::Payload(op.imeState, text, snap));
     }
 
+    // The page core's context-menu guard, armed again in the page about to get input that can open the menu
+    // (Input::ArmsMenuGuard): frames no load armed would fault (invariant 28). Run where the host may run a script: in a
+    // View that has had a window object, where a script brings no new document's (EditState::DocLoads, invariant 25), or
+    // in one whose page reached DOM ready, as the bridge's calls run. A page with no script of its own has no window
+    // object until a script runs there, so it gets the page core, and the guard, from this one. Render thread, outside
+    // s_viewsMutex, as every host script runs (invariant 16).
+    static void ArmMenuGuard(ultralight::View* ul)
+    {
+        bool windowed = false;
+        {
+            std::lock_guard<std::mutex> lk(s_editMutex);
+            windowed = s_docLoads.HasWindow(ul);
+        }
+        if (!windowed) {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            const MlView* v = FindViewByUlLocked(ul);
+            if (!v || !v->domReady) return;
+        }
+        if (auto ctxScope = ul->LockJSContext()) {
+            std::string result;
+            JsBridge::ErrorInfo err;
+            JsBridge::Evaluate(*ctxScope, Input::kArmMenuGuardScript, "magelight:menuguard", result, err);
+        }
+    }
+
     // Translate queued Windows messages into Ultralight events. Render thread only (the sole thread that touches
     // views); no Ultralight call is made under s_viewsMutex.
     // Routing: keys and text -> the UI-mode view. A pointer event -> the view a button its source holds was pressed
@@ -7390,6 +7416,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 for (int b = UL::kButton_Left; b <= UL::kButton_Forward; ++b) {
                     if (!(held.mask & (1u << b))) continue;
                     UL up{ UL::kType_MouseUp, held.x, held.y, static_cast<UL::Button>(b) };
+                    if (b == UL::kButton_Right) ArmMenuGuard(t.ul.get());   // the release opens the menu (ArmsMenuGuard)
                     t.ul->FireMouseEvent(up);
                 }
             }
@@ -7517,7 +7544,10 @@ float4 ps_straight(VSOut i) : SV_Target {
                 const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
                 const PointerTarget t = pointerTarget(e.source, mx, my);
                 const UL evt{ UL::kType_MouseUp, t.X(mx), t.Y(my), btn };
-                if (t.ul) t.ul->FireMouseEvent(evt);
+                if (t.ul) {
+                    if (Input::ArmsMenuGuard(e.msg, e.wparam)) ArmMenuGuard(t.ul.get());
+                    t.ul->FireMouseEvent(evt);
+                }
                 s_pointer.Release(e.source, t.ul ? t.id : 0, btn, evt.x, evt.y);
                 break;
             }
@@ -7558,6 +7588,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 const ultralight::KeyEvent evt = keyEvent(
                     down ? ultralight::KeyEvent::kType_RawKeyDown : ultralight::KeyEvent::kType_KeyUp,
                     e.wparam, e.lparam, sys, e.keys);
+                if (Input::ArmsMenuGuard(e.msg, e.wparam)) ArmMenuGuard(uiUl.get());
                 uiUl->FireKeyEvent(evt);
                 s_sentKeyView = uiId;
                 s_sentKeys = e.keys;

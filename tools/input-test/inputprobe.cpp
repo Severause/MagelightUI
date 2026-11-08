@@ -5,6 +5,9 @@
 //   release  the modifier and button releases the host sends when focus goes (checked)
 //   leave    a move outside the view as the leave the host sends a view the pointer left (checked)
 //   guard    the page core's pointer guard, Input::kPointerGuardScript (checked)
+//   contextmenu  the guard and the host's re-arm, as the host runs them: a right-click on selected text in a field (the
+//            main frame, every kind of iframe), the Menu key, Shift+F10 and a page's own dispatch, with no fault and
+//            no cancellation the page did not make itself (checked; runs last, since a fault ends the run)
 //   routes   which view each pointer source's events go to, Input::PointerRoutes, with two VR hands (checked)
 //   queue    the input queue a page frame drains, Input::QueueRule: moves merged, releases and markers kept (checked)
 //   lostkeys what the muted keyboard poll passes on, Input::LostKeys: only keys the window never got (checked)
@@ -14,7 +17,11 @@
 //            what Ultralight does with mouse buttons, click counts, a lost release, the wheel's x/y
 //   polledcontrol  the polled section run from a folder the filter does not exempt (build.bat runs it): the reads
 //            it hides there, which shows the exemption is what keeps the page's modifiers
-// Usage: inputprobe <sdkDir> [section ...] (default: every section but polledcontrol). Exit code = failed checks.
+//   menufault, armfault  the standing controls (build.bat runs each alone; a fault passes and ends the run): the main
+//            textarea without the guard, and an unclosed frame with the guard but no re-arm. WebKit still faulting
+//            there shows the contextmenu section tests real faults
+// Usage: inputprobe <sdkDir> [section ...] (default: every section but polledcontrol, menufault and armfault). Exit
+// code = failed checks.
 #include <windows.h>
 #include <intrin.h>
 #include <AppCore/Platform.h>
@@ -96,7 +103,17 @@ static void Expect(const std::string& name, const std::string& got, const std::s
     std::printf("%s  %-58s %s%s%s\n", ok ? "ok  " : "FAIL", name.c_str(), got.c_str(), ok ? "" : "   want ", ok ? "" : want.c_str());
 }
 
-struct Settle : LoadListener { bool done = false; void OnDOMReady(View*, uint64_t, bool, const String&) override { done = true; } };
+// The main frame's DOM ready. `inject` runs at the main frame's window-object-ready, before any page script, where the
+// host's InstallBridgeShims runs the page core.
+struct Settle : LoadListener {
+    bool done = false;
+    const char* inject = nullptr;
+    void OnWindowObjectReady(View* v, uint64_t, bool main, const String&) override
+    {
+        if (main && inject) { String ex; v->EvaluateScript(String(inject), &ex); }
+    }
+    void OnDOMReady(View*, uint64_t, bool main, const String&) override { if (main) done = true; }
+};
 
 static RefPtr<Renderer> g_r;
 static RefPtr<View> g_v;
@@ -104,15 +121,16 @@ static void Pump(int n = 3) { for (int i = 0; i < n; ++i) { g_r->Update(); g_r->
 static std::string Js(const std::string& s) { String ex; String out = g_v->EvaluateScript(String(s.c_str()), &ex); return std::string(out.utf8().data()); }
 static void Wait(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
-static RefPtr<View> NewView()
+static RefPtr<View> NewView(const char* page = kPage, const char* url = "file:///page.html", const char* inject = nullptr)
 {
     ViewConfig vc;
     vc.is_accelerated = false;
     RefPtr<View> v = g_r->CreateView(700, 500, vc, nullptr);
     static Settle ld;
     ld.done = false;
+    ld.inject = inject;
     v->set_load_listener(&ld);
-    v->LoadHTML(kPage, "file:///page.html");
+    v->LoadHTML(page, url);
     g_v = v;
     for (int i = 0; i < 400 && !ld.done; ++i) Pump(1);
     Pump(20);
@@ -178,22 +196,26 @@ static void ThreadAllUp() { BYTE ks[256]{}; ks[VK_NUMLOCK] = 1; SetKeyboardState
 // MakeKeyEvent left the thread's whole keyboard state as it found it.
 struct HostMsg { UINT msg; WPARAM w; LPARAM l; std::uint16_t keys; };
 static int g_made = 0, g_notApplied = 0, g_notRestored = 0;
+static KeyEvent HostKeyEvent(const HostMsg& e)
+{
+    const bool sys = e.msg == WM_SYSKEYDOWN || e.msg == WM_SYSKEYUP;
+    bool applied = false;
+    BYTE before[256]{}, after[256]{};
+    GetKeyboardState(before);
+    KeyEvent evt = In::MakeKeyEvent(TypeOf(e.msg), e.w, e.l, sys, e.keys, &applied);
+    GetKeyboardState(after);
+    ++g_made;
+    if (!applied) { ++g_notApplied; std::printf("      !! the thread's keyboard state could not be read\n"); }
+    if (std::memcmp(before, after, sizeof before) != 0) { ++g_notRestored; std::printf("      !! the thread's state was not put back\n"); }
+    return evt;
+}
 static void FireHost(const HostMsg& e)
 {
     if (e.msg == WM_CHAR) {
         const Char16 wch = static_cast<Char16>(e.w);
         if (wch < 0x20 && wch != L'\t' && wch != L'\r' && wch != L'\n') return;
     }
-    const bool sys = e.msg == WM_SYSKEYDOWN || e.msg == WM_SYSKEYUP;
-    bool applied = false;
-    BYTE before[256]{}, after[256]{};
-    GetKeyboardState(before);
-    const KeyEvent evt = In::MakeKeyEvent(TypeOf(e.msg), e.w, e.l, sys, e.keys, &applied);
-    GetKeyboardState(after);
-    ++g_made;
-    if (!applied) { ++g_notApplied; std::printf("      !! the thread's keyboard state could not be read\n"); }
-    if (std::memcmp(before, after, sizeof before) != 0) { ++g_notRestored; std::printf("      !! the thread's state was not put back\n"); }
-    g_v->FireKeyEvent(evt);
+    g_v->FireKeyEvent(HostKeyEvent(e));
     Pump(1);
 }
 
@@ -1007,6 +1029,275 @@ static void GuardTest()
     std::printf("  Alt+x with <button accesskey=x>: its onclick ran %s time(s); %s\n", Js("String(window.__ak)").c_str(), Js("K()").c_str());
 }
 
+// ── contextmenu: the guard's context-menu half, as the host runs it ──
+// The guard goes in at the main frame's window-object-ready, before any page script, as InstallBridgeShims runs it,
+// and before each right release, Menu key and F10 the host's re-arm runs (Input::ArmsMenuGuard, kArmMenuGuardScript).
+// kMenuPage's fields sit in the main frame and in iframes made each way a page makes one: srcdoc, about:blank filled
+// through innerHTML, document.write, a srcdoc frame inside the written one, a data: URL and a sandboxed srcdoc (both
+// scriptable from a file: page, so armed by load). kMenuPage2's frames no load arms: one rewritten in its own load
+// handler, one opened and never closed, one in a shadow root, one made just before a right release with no press, then
+// the page's own document.open; only the re-arm covers them. kMenuPage3 has no script, so no page core until the
+// re-arm's script. Without its cover each case faults, but #ti and the frame whose own listener cancels (the page cancels
+// the event itself); `menufault` (no guard, the main textarea) and `armfault` (the guard but no re-arm, the unclosed
+// frame) keep two of them proving it, each in a process of its own, since nothing may run after a fault.
+static const char* kMenuPage = R"(<!doctype html><html><head><style>
+body{margin:0;font:14px sans-serif}
+#ta{position:absolute;left:10px;top:10px;width:400px;height:120px}
+#ti{position:absolute;left:10px;top:150px;width:300px;height:24px}
+#ce{position:absolute;left:10px;top:380px;width:400px;height:60px}
+</style></head><body>
+<textarea id="ta">Write the guidelines here, with some words to select.</textarea>
+<input id="ti" value="a line of plain text">
+<div id="ce" contenteditable="true">editable div text here</div>
+<iframe id="fr" style="position:absolute;left:450px;top:10px;width:230px;height:130px;border:0" srcdoc="<textarea id='ta2' style='position:absolute;left:5px;top:5px;width:200px;height:100px'>words inside the frame to select</textarea>"></iframe>
+<iframe id="frd" style="position:absolute;left:10px;top:200px;width:200px;height:70px;border:0" src="data:text/html,<textarea id='ta6' style='position:absolute;left:5px;top:5px;width:180px;height:40px'>data words to select</textarea>"></iframe>
+<iframe id="frs" sandbox="allow-scripts" style="position:absolute;left:220px;top:200px;width:200px;height:70px;border:0" srcdoc="<textarea id='ta7' style='position:absolute;left:5px;top:5px;width:180px;height:40px'>sandboxed words to select</textarea>"></iframe>
+<iframe id="frp" style="position:absolute;left:10px;top:290px;width:200px;height:70px;border:0" srcdoc="<script>addEventListener('contextmenu',function(e){e.preventDefault();},true);</script><textarea id='ta8' style='position:absolute;left:5px;top:5px;width:180px;height:40px'>cancelled words to select</textarea>"></iframe>
+<script>
+document.getElementById('ti').addEventListener('contextmenu',function(e){e.preventDefault();});
+var f2=document.createElement('iframe');f2.id='fr2';f2.style.cssText='position:absolute;left:450px;top:150px;width:230px;height:80px;border:0';document.body.appendChild(f2);
+f2.contentDocument.body.innerHTML="<textarea id='ta3' style='position:absolute;left:5px;top:5px;width:200px;height:60px'>portal words to select</textarea>";
+var f3=document.createElement('iframe');f3.id='fr3';f3.style.cssText='position:absolute;left:450px;top:240px;width:230px;height:130px;border:0';document.body.appendChild(f3);
+var d3=f3.contentDocument;d3.open();d3.write("<body style='margin:0'><textarea id='ta4' style='position:absolute;left:5px;top:5px;width:200px;height:40px'>written words to select</textarea><iframe id='fr5' style='position:absolute;left:0;top:55px;width:220px;height:70px;border:0' srcdoc=\"<textarea id='ta5' style='position:absolute;left:5px;top:5px;width:200px;height:40px'>nested words to select</textarea>\"></iframe></body>");d3.close();
+</script></body></html>)";
+
+static const char* kMenuPage2 = R"(<!doctype html><html><head><style>
+body{margin:0;font:14px sans-serif}
+</style></head><body>
+<script>
+function frame(id,top){var f=document.createElement('iframe');f.id=id;f.style.cssText='position:absolute;left:10px;top:'+top+'px;width:300px;height:80px;border:0';return f;}
+function ta(id,words){return "<textarea id='"+id+"' style='position:absolute;left:5px;top:5px;width:280px;height:60px'>"+words+"</textarea>";}
+var fB=frame('fB',10);document.body.appendChild(fB);
+var dB=fB.contentDocument;dB.open();dB.write(ta('taB','unclosed words to select'));
+var fA=frame('fA',100);
+fA.onload=function(){if(fA.done)return;fA.done=1;var d=fA.contentDocument;d.open();d.write(ta('taA','rewritten words to select'));d.close();};
+document.body.appendChild(fA);
+var h=document.createElement('div');h.id='sh';h.style.cssText='position:absolute;left:10px;top:200px;width:300px;height:80px';document.body.appendChild(h);
+h.attachShadow({mode:'open'}).innerHTML="<iframe id='fC' style='width:300px;height:80px;border:0' srcdoc=\""+ta('taC','shadow words to select')+"\"></iframe>";
+</script></body></html>)";
+
+static const char* kMenuPage3 = R"(<!doctype html><html><body style="margin:0">
+<textarea id="taS" style="position:absolute;left:10px;top:10px;width:300px;height:60px">scriptless words to select</textarea>
+</body></html>)";
+
+// A fault inside WebKit, caught. Nothing may run in the process after one.
+static DWORD FireMouseSeh(View* v, const MouseEvent& e)
+{
+    __try { v->FireMouseEvent(e); return 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); }
+}
+static DWORD FireKeySeh(View* v, const KeyEvent& e)
+{
+    __try { v->FireKeyEvent(e); return 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); }
+}
+
+// One case: "fault" when WebKit faulted, else what the documents' own listeners saw (the target's id and the event's
+// defaultPrevented as the page reads it). A fault ends the run here.
+static void MenuResult(const std::string& name, DWORD fault, const std::string& want)
+{
+    if (!fault) {
+        Pump(3);
+        Expect(name, Js("CM.join(',')"), want);
+        return;
+    }
+    std::printf("  %s: WebKit fault 0x%08lX\n", name.c_str(), static_cast<unsigned long>(fault));
+    Expect(name, "fault", want);
+    std::fflush(stdout);
+    ExitProcess(static_cast<UINT>(g_fails));
+}
+
+// A listener on every document, open shadow roots' frames included, after the guard's window one, as a page's own.
+static const char* kMenuRecorder =
+    "window.CM=window.CM||[];CM.length=0;function rec(w){try{w.document.addEventListener('contextmenu',function(e){"
+    "CM.push((e.target.id||e.target.tagName)+':'+e.defaultPrevented);});recIn(w.document);}catch(x){}}"
+    "function recIn(r){var n=r.querySelectorAll('*');for(var i=0;i<n.length;i++){if(n[i].shadowRoot)recIn(n[i].shadowRoot);"
+    "var c=n[i].contentWindow;if(c)rec(c);}}rec(window);";
+
+enum class MenuRun { Guard, NoGuard, NoArm };
+
+// The host's re-arm before `msg` (DrainInputQueue's ArmMenuGuard), skipped when the run is NoArm.
+static void MenuHostArm(MenuRun run, UINT msg, WPARAM w)
+{
+    if (run != MenuRun::NoArm && In::ArmsMenuGuard(msg, w)) Js(In::kArmMenuGuardScript);
+}
+
+// A right press and release at (x, y) after `select` selects text in the element `el` names.
+static DWORD MenuRightClick(MenuRun run, const char* el, const char* select, int x, int y)
+{
+    using M = MouseEvent;
+    Wait(700);
+    Mouse(M::kType_MouseMoved, x, y);
+    Mouse(M::kType_MouseDown, x, y, M::kButton_Left);
+    Mouse(M::kType_MouseUp, x, y, M::kButton_Left);
+    Js(std::string("CM.length=0;var e=") + el + ";" + select);
+    Pump();
+    MenuHostArm(run, WM_RBUTTONDOWN, 0);
+    DWORD fault = FireMouseSeh(g_v.get(), M{ M::kType_MouseDown, x, y, M::kButton_Right });
+    if (!fault) {
+        Pump(1);
+        MenuHostArm(run, WM_RBUTTONUP, 0);
+        fault = FireMouseSeh(g_v.get(), M{ M::kType_MouseUp, x, y, M::kButton_Right });
+    }
+    return fault;
+}
+
+static void ContextMenuTest(MenuRun run)
+{
+    const char* textSel = "e.focus();e.setSelectionRange(0,5);";
+    struct F { const char* name; const char* want; const char* el; const char* select; int x, y; };
+    if (run != MenuRun::NoArm) {
+        std::printf("== contextmenu: selected text in a field, %s\n",
+                    run == MenuRun::Guard ? "the guard and the host's re-arm" : "NO guard (a fault passes)");
+        NewView(kMenuPage, "file:///menu.html", run == MenuRun::Guard ? In::kPointerGuardScript : nullptr);
+        Js(kMenuRecorder);
+        // The page sees no cancellation but its own (#ti's listener cancels).
+        const F fields[] = {
+            { "a textarea", "ta:false", "document.getElementById('ta')", textSel, 30, 20 },
+            { "an input whose page cancels", "ti:true", "document.getElementById('ti')", textSel, 30, 160 },
+            { "a contenteditable", "ce:false", "document.getElementById('ce')",
+              "var r=document.createRange();r.setStart(e.firstChild,0);r.setEnd(e.firstChild,8);var s=getSelection();"
+              "s.removeAllRanges();s.addRange(r);", 30, 390 },
+            { "a srcdoc iframe", "ta2:false", "document.getElementById('fr').contentDocument.getElementById('ta2')",
+              textSel, 470, 22 },
+            { "an innerHTML iframe", "ta3:false", "document.getElementById('fr2').contentDocument.getElementById('ta3')",
+              textSel, 470, 162 },
+            { "a written iframe", "ta4:false", "document.getElementById('fr3').contentDocument.getElementById('ta4')",
+              textSel, 470, 252 },
+            { "an iframe in a written one", "ta5:false",
+              "document.getElementById('fr3').contentDocument.getElementById('fr5').contentDocument.getElementById('ta5')",
+              textSel, 470, 307 },
+            { "a data: iframe", "ta6:false", "document.getElementById('frd').contentDocument.getElementById('ta6')",
+              textSel, 30, 212 },
+            { "a sandboxed iframe", "ta7:false", "document.getElementById('frs').contentDocument.getElementById('ta7')",
+              textSel, 240, 212 },
+            // Its own window listener, added before the frame was armed, runs ahead of the guard and cancels.
+            { "an iframe whose own listener cancels first", "ta8:true",
+              "document.getElementById('frp').contentDocument.getElementById('ta8')", textSel, 30, 302 },
+        };
+        for (const F& f : fields) {
+            const DWORD fault = MenuRightClick(run, f.el, f.select, f.x, f.y);
+            MenuResult(std::string("contextmenu: right-click in ") + f.name, fault,
+                       run == MenuRun::Guard ? std::string(f.want) : std::string("fault"));
+            if (run != MenuRun::Guard) return;
+        }
+        // The keyboard's ways to the same menu, through the host's key path: the Menu key, and Shift+F10.
+        const std::uint16_t nl = In::kKbNumLock, sh = In::kKbNumLock | In::kKbLShift;
+        struct K { const char* name; HostMsg seq[4]; int n; };
+        const K keys[] = {
+            { "the Menu key", { { WM_KEYDOWN, VK_APPS, In::SyntheticKeyLParam(VK_APPS, false), nl },
+                                { WM_KEYUP, VK_APPS, In::SyntheticKeyLParam(VK_APPS, true), nl } }, 2 },
+            { "Shift+F10", { { WM_KEYDOWN, VK_SHIFT, KL(0x2A, false, false), sh },
+                             { WM_SYSKEYDOWN, VK_F10, KL(0x44, false, false), sh },
+                             { WM_SYSKEYUP, VK_F10, KL(0x44, false, true), sh },
+                             { WM_KEYUP, VK_SHIFT, KL(0x2A, false, true), nl } }, 4 },
+        };
+        for (const K& k : keys) {
+            Wait(700);
+            Js("CM.length=0;var e=document.getElementById('ta');e.focus();e.setSelectionRange(0,5);");
+            Pump();
+            ThreadAllUp();
+            DWORD fault = 0;
+            for (int i = 0; i < k.n && !fault; ++i) {
+                MenuHostArm(run, k.seq[i].msg, k.seq[i].w);
+                fault = FireKeySeh(g_v.get(), HostKeyEvent(k.seq[i]));
+                Pump(1);
+            }
+            MenuResult(std::string("contextmenu: ") + k.name + " in a textarea", fault, "ta:false");
+        }
+        // A page's own dispatch: WebKit runs the default for it too. A fault here cannot be caught (it is inside
+        // EvaluateScript), so it ends the process: the run's exit code reports it.
+        Wait(700);
+        Js("CM.length=0;var e=document.getElementById('ta');e.focus();e.setSelectionRange(0,5);");
+        Pump();
+        const std::string ret = Js("String(document.getElementById('ta').dispatchEvent(new MouseEvent('contextmenu',"
+                                   "{bubbles:true,cancelable:true,button:2,clientX:30,clientY:20})))");
+        Pump(3);
+        Expect("contextmenu: a page's own dispatch (dispatchEvent's return, then what the page saw)",
+               ret + " " + Js("CM.join(',')"), "false ta:false");
+        // One not cancelable, whose default cannot be cancelled: the wrapped dispatchEvent sends a cancelable copy, and
+        // returns true, as a dispatch that cannot be cancelled does.
+        Wait(700);
+        Js("CM.length=0;var e=document.getElementById('ta');e.focus();e.setSelectionRange(0,5);");
+        Pump();
+        const std::string retNc = Js("String(document.getElementById('ta').dispatchEvent(new MouseEvent('contextmenu',"
+                                     "{bubbles:true,button:2,clientX:30,clientY:20})))");
+        Pump(3);
+        Expect("contextmenu: a page's own dispatch, not cancelable (dispatchEvent's return, then what the page saw)",
+               retNc + " " + Js("CM.join(',')"), "true ta:false");
+    }
+
+    // Frames no load arms.
+    std::printf("== contextmenu: frames no load arms, %s\n",
+                run == MenuRun::NoArm ? "WITHOUT the host's re-arm (a fault passes)" : "the host's re-arm");
+    NewView(kMenuPage2, "file:///menu2.html", run == MenuRun::NoGuard ? nullptr : In::kPointerGuardScript);
+    Js(kMenuRecorder);
+    const F frames[] = {
+        { "a frame opened and never closed", "taB:false",
+          "document.getElementById('fB').contentDocument.getElementById('taB')", textSel, 30, 22 },
+        { "a frame rewritten in its own load", "taA:false",
+          "document.getElementById('fA').contentDocument.getElementById('taA')", textSel, 30, 112 },
+        { "a frame in a shadow root", "taC:false",
+          "document.getElementById('sh').shadowRoot.getElementById('fC').contentDocument.getElementById('taC')",
+          textSel, 30, 212 },
+    };
+    for (const F& f : frames) {
+        const DWORD fault = MenuRightClick(run, f.el, f.select, f.x, f.y);
+        MenuResult(std::string("contextmenu: right-click in ") + f.name, fault,
+                   run == MenuRun::Guard ? std::string(f.want) : std::string("fault"));
+        if (run != MenuRun::Guard) return;
+    }
+    // A right release with no press before it (a button held as UI mode began, a press the input queue dropped), in a
+    // frame made just now, so only the re-arm before that release can reach it.
+    {
+        using M = MouseEvent;
+        Wait(700);
+        Js("var fE=frame('fE',290);document.body.appendChild(fE);var dE=fE.contentDocument;dE.open();"
+           "dE.write(ta('taE','released words to select'));");
+        Pump(5);
+        Js(kMenuRecorder);
+        Js("CM.length=0;var e=document.getElementById('fE').contentDocument.getElementById('taE');" + std::string(textSel));
+        Pump();
+        MenuHostArm(run, WM_RBUTTONUP, 0);
+        MenuResult("contextmenu: a right release with no press, in a frame made just now",
+                   FireMouseSeh(g_v.get(), M{ M::kType_MouseUp, 30, 302, M::kButton_Right }), "taE:false");
+    }
+    // The page's own document.open: a new document in the same window, every listener gone, no new window object.
+    Js("document.open();document.write(\"<textarea id='taD' style='position:absolute;left:10px;top:10px;width:300px;"
+       "height:60px'>reopened words to select</textarea>\");document.close();");
+    Pump(5);
+    Js(kMenuRecorder);
+    MenuResult("contextmenu: right-click after the page's own document.open",
+               MenuRightClick(run, "document.getElementById('taD')", textSel, 30, 22), "taD:false");
+
+    // A page with no script of its own has no window object, so no page core, until a script runs there: the host's
+    // re-arm is its first. The text is selected with Ctrl+A so that no script runs before it.
+    {
+        using M = MouseEvent;
+        std::printf("== contextmenu: a page with no script\n");
+        NewView(kMenuPage3, "file:///menu3.html", In::kPointerGuardScript);
+        Wait(700);
+        Mouse(M::kType_MouseMoved, 30, 22);
+        Mouse(M::kType_MouseDown, 30, 22, M::kButton_Left);
+        Mouse(M::kType_MouseUp, 30, 22, M::kButton_Left);
+        ThreadAllUp();
+        const std::uint16_t nl = In::kKbNumLock, ct = In::kKbNumLock | In::kKbLCtrl;
+        const HostMsg selectAll[] = { { WM_KEYDOWN, VK_CONTROL, KL(0x1D, false, false), ct },
+                                      { WM_KEYDOWN, 'A', KL(0x1E, false, false), ct },
+                                      { WM_KEYUP, 'A', KL(0x1E, false, true), ct },
+                                      { WM_KEYUP, VK_CONTROL, KL(0x1D, false, true), nl } };
+        for (const HostMsg& m : selectAll) { g_v->FireKeyEvent(HostKeyEvent(m)); Pump(1); }
+        DWORD fault = FireMouseSeh(g_v.get(), M{ M::kType_MouseDown, 30, 22, M::kButton_Right });
+        if (!fault) {
+            Pump(1);
+            MenuHostArm(run, WM_RBUTTONUP, 0);
+            Js(kMenuRecorder);
+            fault = FireMouseSeh(g_v.get(), M{ M::kType_MouseUp, 30, 22, M::kButton_Right });
+        }
+        MenuResult("contextmenu: right-click on text selected with Ctrl+A", fault, "taS:false");
+    }
+}
+
 // ── routes: Input::PointerRoutes, as DrainInputQueue drives it ───────────
 // Views are ids (1 the page, 2 the keyboard page, 3 another); `hit` is the view under a source's point. Each step
 // does what the drain does: the target is the source's pressed view, else the hit; the hover is noted, then the event.
@@ -1428,12 +1719,12 @@ static void LostKeysTest()
 
 static int ToolMain(int argc, char** argv)
 {
-    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|queue|lostkeys|keys|dead|state|mouse|wheel ...]\n"); return 2; }
+    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|queue|lostkeys|keys|dead|state|mouse|wheel|contextmenu|menufault|armfault ...]\n"); return 2; }
     const std::string sdk = argv[1];
     std::vector<std::string> want;
     for (int i = 2; i < argc; ++i) want.push_back(argv[i]);
     auto on = [&](const char* s) {
-        if (want.empty()) return std::string(s) != "polledcontrol";
+        if (want.empty()) return std::string(s) != "polledcontrol" && std::string(s) != "menufault" && std::string(s) != "armfault";
         return std::find(want.begin(), want.end(), std::string(s)) != want.end();
     };
     Config cfg;
@@ -1460,6 +1751,10 @@ static int ToolMain(int argc, char** argv)
     if (on("state")) { NewView(); StateTest(); }
     if (on("mouse")) { NewView(); MouseTest(); }
     if (on("wheel")) WheelTest();
+    // Last: a fault ends the run, which must not hide another section's results.
+    if (on("contextmenu")) ContextMenuTest(MenuRun::Guard);
+    if (on("menufault")) ContextMenuTest(MenuRun::NoGuard);
+    if (on("armfault")) ContextMenuTest(MenuRun::NoArm);
     if (g_made) {
         std::printf("== MakeKeyEvent over the run (%d events)\n", g_made);
         Expect("the bits reached the constructor every time", std::to_string(g_notApplied) + " misses", "0 misses");

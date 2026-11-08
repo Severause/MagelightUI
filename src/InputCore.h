@@ -9,8 +9,9 @@
 // key message (its state is all up), so each key carries the state it was queued with (KeyBits) and MakeKeyEvent
 // applies that state around the constructor alone.
 //
-// Pointer: the page core's guard for the buttons other than the left one (kPointerGuardScript), and which view each
-// pointer source's events go to (PointerRoutes).
+// Pointer: the page core's guard (kPointerGuardScript) for the buttons other than the left one and for WebKit's context
+// menu in every frame, armed again before the input that can open it (ArmsMenuGuard), and which view each pointer
+// source's events go to (PointerRoutes).
 //
 // Polled keys: which module the host's GetKeyState / GetAsyncKeyState filter hides keys from (IsForeignPluginPath).
 //
@@ -264,14 +265,59 @@ namespace Magelight::Input {
     // autoscroll), and it fires no `auxclick`: a trusted non-primary click is stopped and dispatched again on its target
     // as `auxclick`, as a browser sends it. A second press of the same button within the double-click time also fires
     // `dblclick`, even after its click was stopped, and a browser sends one for the primary button only, so a trusted
-    // non-primary dblclick is stopped too. Listeners on window in the capture phase, added before any page script, run
-    // first. tools/input-test checks each part.
+    // non-primary dblclick is stopped too. In the main frame these listeners on window, in the capture phase and added
+    // before any page script, run first.
+    // Every `contextmenu` has its default cancelled, a page's own dispatch included: that default builds WebKit's
+    // context menu, which Ultralight never shows, and over selected text in an editable field it faults in a spelling
+    // lookup (2.0), which turns the overlay off or, inside a page's script, ends the process (invariant 28). A page's
+    // dispatch of one that is not cancelable (a MouseEvent: the menu needs one) is replaced by a cancelable copy, since
+    // its default cannot be cancelled (dispatchEvent, wrapped in each armed realm). The page is not told: the event's
+    // own defaultPrevented, returnValue and preventDefault report only the page's calls, those made before the guard ran
+    // included (a frame's own listeners can run first), since libraries skip their own menu when the flag is already
+    // set (WebKit reads its internal flag). A field in a frame faults the same way, so each frame is armed when its
+    // element's load reaches an armed document (a load never reaches the window), and arming one arms the frames it
+    // holds: document.open erases a frame's listeners, and its child frames load first. The named functions make arming
+    // again add nothing. What load cannot reach (a frame not yet loaded, one opened and never closed or rewritten in its
+    // own load, one in an open shadow root, a document.open of the page itself) the host covers by running
+    // kArmMenuGuardScript before each input that can open the menu (ArmsMenuGuard); a page's own dispatch there is
+    // covered from the next such input on. A frame in a closed shadow root is not reached. tools/input-test checks each
+    // part.
     inline constexpr const char* kPointerGuardScript =
         "(function(){window.addEventListener('mousedown',function(e){if(e.button===1&&e.isTrusted)e.preventDefault();},true);"
         "window.addEventListener('click',function(e){if(e.button!==0&&e.isTrusted){e.stopImmediatePropagation();"
         "e.preventDefault();try{e.target.dispatchEvent(new MouseEvent('auxclick',e));}catch(x){}}},true);"
         "window.addEventListener('dblclick',function(e){if(e.button!==0&&e.isTrusted){e.stopImmediatePropagation();"
-        "e.preventDefault();}},true);})();";
+        "e.preventDefault();}},true);"
+        "var PD=Event.prototype.preventDefault;"
+        "function cm(e){var p=e.defaultPrevented;PD.call(e);try{"
+        "Object.defineProperty(e,'defaultPrevented',{configurable:true,get:function(){return p;}});"
+        "Object.defineProperty(e,'returnValue',{configurable:true,get:function(){return !p;},"
+        "set:function(v){if(v===false)p=true;}});"
+        "Object.defineProperty(e,'preventDefault',{configurable:true,writable:true,value:function(){p=true;}});}catch(x){}}"
+        "function wrap(w){var P=w.EventTarget.prototype,o=P.dispatchEvent;if(o.__mlMenu)return;"
+        "var f=function(e){if(e&&e.type==='contextmenu'&&!e.cancelable&&'button' in e){var c;try{"
+        "c=new w.MouseEvent('contextmenu',{bubbles:e.bubbles,cancelable:true,composed:e.composed,view:e.view,"
+        "detail:e.detail,screenX:e.screenX,screenY:e.screenY,clientX:e.clientX,clientY:e.clientY,ctrlKey:e.ctrlKey,"
+        "shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey,button:e.button,buttons:e.buttons,"
+        "relatedTarget:e.relatedTarget});}catch(x){}if(c){o.call(this,c);return true;}}return o.apply(this,arguments);};"
+        "f.__mlMenu=1;P.dispatchEvent=f;}"
+        "function ld(e){var w=e.target&&e.target.contentWindow;if(w)arm(w);}"
+        "function arm(w){try{w.addEventListener('contextmenu',cm,true);w.document.addEventListener('load',ld,true);wrap(w);"
+        "for(var i=0;i<w.frames.length;i++)arm(w.frames[i]);}catch(x){}}"
+        "function walk(r){var n=r.querySelectorAll('*');for(var i=0;i<n.length;i++){"
+        "if(n[i].shadowRoot)walk(n[i].shadowRoot);var c=n[i].contentWindow;if(c)deep(c);}}"
+        "function deep(w){arm(w);try{walk(w.document);}catch(x){}}"
+        "arm(window);try{Object.defineProperty(window,'__mlArmMenu',{value:function(){deep(window);}});}catch(x){}})();";
+
+    // The input that can open WebKit's context menu: a right release (it fires `contextmenu`, with or without a press
+    // before it) and a key-down of the Menu key or F10 (Shift+F10). Before each, DrainInputQueue runs
+    // kArmMenuGuardScript in the page it goes to, and so does its own release of a held right button.
+    inline bool ArmsMenuGuard(UINT msg, WPARAM w)
+    {
+        if (msg == WM_RBUTTONUP) return true;
+        return (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && (w == VK_APPS || w == VK_F10);
+    }
+    inline constexpr const char* kArmMenuGuardScript = "window.__mlArmMenu&&window.__mlArmMenu()";
 
     // The input queue (QueueInput) between the threads that make input and the render thread, which drains it once a
     // frame, or once a page frame with pageThread, where a page's script can make one seconds long while the mouse
