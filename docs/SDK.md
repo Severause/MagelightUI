@@ -52,7 +52,9 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
   `visibilitychange` events that both read `'hidden'`. So take the page as open from the state at load or in
   a `visibilitychange` handler, never from a `'visible'` read in one of those callbacks, and read the state
   rather than count events. `capabilities.pageVisibility` says the host does this ([CPP.md](CPP.md), "Hidden
-  pages").
+  pages"). From host 1.8.0 a hidden page can be unloaded while the game is low on memory, whether or not its
+  view hibernates, and loads again later: keep what must survive in `localStorage` or in the plugin
+  ([CPP.md](CPP.md), "When the game runs low on memory").
 - **Frame rate** (host 1.5.0, Ultralight 2.0 Free): a shown page animates and repaints at most 60 times a second,
   whatever the game's frame rate: `requestAnimationFrame` callbacks, CSS animations and transitions, smooth
   scrolling and the changes your script makes wait for the next of those frames; input, a resize and a show paint at
