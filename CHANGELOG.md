@@ -174,8 +174,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **Pages run on a thread of their own** (flat only; `Magelight.json` `"pageThread": false` puts them back in the
-  game's frame). A page's scripts, layout and painting no longer take time out of the game's frame: the game
+- **Pages run on a thread of their own** (from ColdSun's PR #9; flat only; `Magelight.json` `"pageThread": false` puts
+  them back in the game's frame). A page's scripts, layout and painting no longer take time out of the game's frame: the game
   thread only runs the GPU work the page thread recorded and draws the result, so a page that runs heavy script every
   frame costs its own frame rate, not the game's. A page stuck in a script freezes every page (they share the one
   page thread) but not the game: the game keeps running, the page's key and the toggle key still close it (Escape
@@ -271,7 +271,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **Pages that opt in can be used with a gamepad** (flat only). While such a page holds UI mode the pad is the
+- **Pages that opt in can be used with a gamepad** (from ColdSun's PR #8, a port of ColdSun's controller layer from
+  Meridian UI; flat only). While such a page holds UI mode the pad is the
   page's: the d-pad and left stick move between its controls (or type the arrow keys), A presses, B goes back or
   closes, and nothing reaches the game: Magelight takes the pad ahead of the game's own input handling, so no button
   draws a weapon, attacks or shouts behind the page. The button that opened the page (a favorite power cast with a

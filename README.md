@@ -142,6 +142,22 @@ properties of the old host — CPU rasterization, locked view files, no lifecycl
 path — went away. The host layer is deliberately the seam that would let the engine be swapped
 later without touching any frontend. SeverActions runs on it in the field.
 
+## Credits
+
+- **[Ultralight](https://ultralig.ht)**, the engine that renders every page (its terms are under Licensing below).
+- **ColdSun** ([heathbrownkeyworks](https://github.com/heathbrownkeyworks)) contributed the gamepad layer (1.6.0,
+  [PR #8](https://github.com/Severause/MagelightUI/pull/8), a port of ColdSun's own controller layer from Meridian UI,
+  given under MIT) and the page thread (1.7.0, [PR #9](https://github.com/Severause/MagelightUI/pull/9)). Meridian UI's
+  `mod://` scheme also gave the idea for 0.26.4's host pinning (removed in 0.31.5).
+- **Dekana** contributed the IME candidate list drawn in the page (1.5.0, from
+  [PR #7](https://github.com/Severause/MagelightUI/pull/7)).
+- **langfod**: a review of their fork led to 0.31.6's diagnostics and build changes.
+- Other projects, with no code from them:
+  - **OpenComposite Unleashed** (Wondernutts and ColdBomb1): Magelight's VR laser is modelled on its pointer, a thin
+    white beam shown only over a panel. Magelight clears its `OC_MENU_ACTIVE` window flag so its laser stands down over
+    a page, and accepts the `WM_OC_CHAR` messages its keyboard sends.
+  - **SimpleIME** (cyfewlp): SimpleIME types into Magelight pages because Magelight follows its mod author guide.
+
 ## Licensing
 
 Magelight UI is **MIT** (see `LICENSE`, `LICENSE.txt` in the download): the host plugin, the API header, the Papyrus script,
