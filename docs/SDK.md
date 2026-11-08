@@ -97,7 +97,12 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
   `mouseleave`, clearing its `:hover`. In VR each hand is its own pointer: a press holds its page for that hand
   only, and one hand moving to another page never clears the `:hover` where the other ray points. Leaving UI
   mode, or the game losing focus, mid-drag or with Shift, Ctrl or Alt held sends the page that `mouseup` and
-  those `keyup`s. `capabilities.keyboardCode` and `capabilities.auxButtons` say the host does this.
+  those `keyup`s. `capabilities.keyboardCode` and `capabilities.auxButtons` say the host does this. From host
+  1.8.0, `contextmenu` (the right button, the Menu key, Shift+F10, or your own `dispatchEvent`) reaches your
+  listeners as before, but Magelight cancels WebKit's default for it, in the page and its iframes: Ultralight shows
+  no menu, and building one over selected text in a field crashed it. `defaultPrevented` reports only your own
+  `preventDefault()`, so your own or a library's right-click menu opens as before; your `dispatchEvent()` of a
+  cancelable `contextmenu` returns false, and one that is not cancelable reaches your listeners as a cancelable copy.
 - **Text fields** (host 1.5.0): the host follows the focused field itself (an input, a textarea, a
   `contenteditable` region, a field in an iframe); the page needs no script for it. A page has window focus
   (`document.hasFocus()`, the window's `focus` and `blur` events, `:focus` matching) only while it holds UI mode,

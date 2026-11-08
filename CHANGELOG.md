@@ -97,9 +97,18 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   
   For the smoothest typing in pages, set SimpleIME's `enable_mod = false` before starting the game. Magelight's own
   IME then handles Japanese, Chinese and Korean, and SimpleIME no longer covers the console and other game text fields.
+- **A right-click on selected text in a page's text box no longer turns the UI off.** Ultralight crashed building a
+  context menu it never shows, and the overlay then stayed off until the game restarted (`MgWCore.dll +0x1D635DC` in
+  `Magelight.log`). It happened in any text field, `contenteditable` region or field inside an iframe, with the right
+  button, the keyboard's Menu key or Shift+F10.
 
 ### For mod authors
 
+- Magelight now cancels WebKit's default for each `contextmenu` event, in the page and its iframes: Ultralight shows
+  no menu of its own, and building one over selected text in a field crashed it. Pages are not told, so a page's or a
+  library's own right-click menu opens as before: `defaultPrevented` and `returnValue` report only the page's own
+  `preventDefault()`. What differs: a page's `dispatchEvent()` of a cancelable `contextmenu` returns false, and one
+  that is not cancelable reaches the listeners as a cancelable copy of it (its default could not be cancelled).
 - With SimpleIME loaded, UI mode no longer raises the game's text-entry flag for its whole length: Magelight raises it
   while a page text field that takes an IME has focus, as SimpleIME's guide asks, and lowers it when the field loses focus or UI mode
   ends. Without SimpleIME nothing changes, and `kUIModeFlagNoTextEntry` keeps its meaning.
