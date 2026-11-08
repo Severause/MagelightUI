@@ -269,7 +269,7 @@ namespace Magelight::Input {
     // before any page script, run first.
     // Every `contextmenu` has its default cancelled, a page's own dispatch included: that default builds WebKit's
     // context menu, which Ultralight never shows, and over selected text in an editable field it faults in a spelling
-    // lookup (2.0), which turns the overlay off or, inside a page's script, ends the process (invariant 28). A page's
+    // lookup (2.0), which turns the overlay off or, inside a page's script, ends the process (invariant 29). A page's
     // dispatch of one that is not cancelable (a MouseEvent: the menu needs one) is replaced by a cancelable copy, since
     // its default cannot be cancelled (dispatchEvent, wrapped in each armed realm). The page is not told: the event's
     // own defaultPrevented, returnValue and preventDefault report only the page's calls, those made before the guard ran

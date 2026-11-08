@@ -27,6 +27,7 @@ src/GamepadCore.h           the gamepad layer's rules (1.6.0): who holds the pad
 src/PathTextCore.h          paths as text: every std::string path is UTF-8 (FromUtf8 / ToUtf8, ToFileUrl, what the file system is asked for); never path(std::string) or path::string()
 src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
 src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
+src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): the floor, the lift's hysteresis, the setting's clamp
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -53,6 +54,7 @@ tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCo
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
+tools/lowmemory-test/       src/LowMemoryCore.h's floor, hysteresis and setting clamp (build.bat)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
@@ -196,7 +198,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `ulFiberMB`, `pageThread`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `ulFiberMB`, `pageThread`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).
@@ -479,7 +481,23 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     share is atomic or under its mutex, and new shared state must be too. `tools/deferred-test`, `tools/pagethread-test`
     and `fiber-gc-test --thread` are its gates; re-run them, and the page-facing tools with `MG_PAGE_THREAD=1`, at
     every SDK bump.
-28. **WebKit's context menu never runs.** Its default for a `contextmenu` over selected text in an editable field
+28. **Low memory: prevent the throw, never survive it (1.8.0).** An allocation that fails inside Ultralight throws
+    through closed-source frames, and the frame guard turns the overlay off for the session (`LogSehAndDisable`); never
+    resume after one. Instead, while free commit is under `lowMemoryFloorMB` (`s_lowMemory`, raised and lifted by
+    `TickLowMemoryGuard` in `PageWorkBegin` before hibernation; `src/LowMemoryCore.h`), nothing new is shown or loaded:
+    `SetUIModeImpl` and `SwitchUIModeView` refuse a view not already on screen (`OnScreenLocked`; `UIModeRefused`
+    "low memory", with a reading of their own, `LowMemoryNow`, ahead of a main-menu request), `MaterializeViews` holds
+    first loads and wakes, no prepaint or new inspector runs, and `HibernateIdleViews` releases every hidden view whose
+    page reached DOM ready; the released views that never hibernate load again hidden once the guard has been down a
+    minute (doubled each time such a reload brought it back, `Guard::ReloadDue`). Views already shown stay up, the views
+    a UI mode that is on needs (`NeededByUIMode`) load and stay, and a shown view a rebuild released that frame loads
+    (`s_rebuiltShown`; holding the rebuild would leave its scale out of step with its View). A switch refused for
+    memory while the holder's view is hidden (a reclaim's withdrawn release) ends UI mode. `Navigate` and
+    `ReloadView` replace a page in its own View and are not held: holding one stops a shown page's calls. A new path
+    that creates a View or shows a page checks the guard too. After render death nothing is released: on the GPU path
+    every page target is made and freed by Ultralight or the driver, and calling either after the throw is the resume
+    this rules out (the CPU path's host copies, `forceCpu` only, are left too).
+29. **WebKit's context menu never runs.** Its default for a `contextmenu` over selected text in an editable field
     faults in a spelling lookup in Ultralight 2.0 (`MgWCore.dll +0x1D635DC`, 1.7.1 field log: the overlay off for the
     session), in any frame, for a right release, the Menu key, Shift+F10 or a page's own dispatch (one inside a page's
     script can end the process). `Input::kPointerGuardScript` cancels the default of every `contextmenu` in the page
