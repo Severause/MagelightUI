@@ -2324,11 +2324,106 @@ namespace Magelight {
     // ── Low-memory guard (1.8.0): the why in LowMemoryCore.h, the sites it gates in CLAUDE.md invariant 28 ──────
     struct MemoryNow {
         bool read = false;
-        std::uint64_t freeCommit = 0;       // MEMORYSTATUSEX::ullAvailPageFile: the room left under the commit limit
+        std::uint64_t freeCommit = 0;       // the room left under the commit limit (ullAvailPageFile) + pageFileGrowth
+        std::uint64_t pageFileGrowth = 0;   // what the page files can still grow by; 0 when not asked or not known
         std::uint64_t processPrivate = 0;   // the whole game process; 0 when it could not be read
     };
 
-    // Any thread, no lock: two cheap system calls.
+    // What the page files can still grow by (LowMemory::GrowthRoom), from NtQuerySystemInformation's page-file list
+    // (SystemPageFileInformationEx, 144: ntdll, undocumented, Windows 8 and later) and each volume's free space; 0 when
+    // Windows does not say (logged once). commitLimit: ullTotalPageFile now; a reading is kept LowMemory::kGrowthCacheMs
+    // while the limit stays, and taken again when it moves (a page file grew or shrank, so the room it is added to
+    // already holds part of the old growth). The layout is logged when it changes. Any thread; a leaf lock held only
+    // over the system calls.
+    static std::uint64_t PageFileGrowthNow(std::uint64_t commitLimit)
+    {
+        static std::mutex s_mx;
+        static std::uint64_t s_readAt = 0, s_room = 0, s_limit = 0;
+        static std::string s_logged;
+        static bool s_failLogged = false;
+        std::lock_guard<std::mutex> lk(s_mx);
+        const std::uint64_t now = GetTickCount64();
+        if (s_readAt && now - s_readAt < LowMemory::kGrowthCacheMs && s_limit == commitLimit) return s_room;
+        s_readAt = now;
+        s_limit = commitLimit;
+        s_room = 0;
+        const auto fail = [](const std::string& why) {
+            if (s_failLogged) return;
+            s_failLogged = true;
+            SKSE::log::warn("Magelight: page files unread ({}) - free commit is the room under the commit limit alone", why);
+        };
+        using QueryFn = LONG(WINAPI*)(ULONG, PVOID, ULONG, PULONG);
+        static const auto query = reinterpret_cast<QueryFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation")));
+        if (!query) {
+            fail("no NtQuerySystemInformation");
+            return 0;
+        }
+        struct PageFileInfoEx {   // SYSTEM_PAGEFILE_INFORMATION_EX; sizes in pages
+            ULONG nextEntryOffset, totalSize, totalInUse, peakUsage;
+            USHORT nameLength, nameMaximumLength;   // UNICODE_STRING
+            PWSTR nameBuffer;
+            ULONG minimumSize, maximumSize;
+        };
+        constexpr ULONG kSystemPageFileInformationEx = 144;
+        // Doubled on a length mismatch: the length the call returns then is not the whole answer's.
+        std::vector<std::uint64_t> buf;
+        ULONG got = 0;
+        LONG status = 0;
+        for (std::size_t words = 2048; words <= 32768; words *= 2) {   // 16 KB to 256 KB, 8-aligned
+            buf.assign(words, 0);
+            got = 0;
+            status = query(kSystemPageFileInformationEx, buf.data(), static_cast<ULONG>(words * 8), &got);
+            if (status != static_cast<LONG>(0xC0000004)) break;
+        }
+        if (status != 0) {
+            fail(fmt::format("status 0x{:08X}", static_cast<std::uint32_t>(status)));
+            return 0;
+        }
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        const std::uint64_t page = si.dwPageSize ? si.dwPageSize : 4096;
+        std::vector<LowMemory::PageFile> files;
+        const auto* base = reinterpret_cast<const std::uint8_t*>(buf.data());
+        for (std::size_t off = 0; got && off + sizeof(PageFileInfoEx) <= got && files.size() < 16;) {
+            const auto* e = reinterpret_cast<const PageFileInfoEx*>(base + off);
+            LowMemory::PageFile f;
+            if (e->nameBuffer) f.drive = LowMemory::DriveOfPageFile(std::wstring_view(e->nameBuffer, e->nameLength / 2));
+            f.currentBytes = e->totalSize * page;
+            f.maximumBytes = e->maximumSize * page;
+            files.push_back(f);
+            if (!e->nextEntryOffset) break;
+            off += e->nextEntryOffset;
+        }
+        std::string unreadDisks;
+        s_room = LowMemory::GrowthRoom(files, [&unreadDisks](wchar_t d) -> std::optional<std::uint64_t> {
+            const wchar_t root[] = { d, L':', L'\\', 0 };
+            ULARGE_INTEGER total{}, free{};
+            if (!GetDiskFreeSpaceExW(root, nullptr, &total, &free)) {
+                unreadDisks += static_cast<char>(d);
+                return std::nullopt;
+            }
+            return free.QuadPart;
+        });
+        constexpr double kGB = 1073741824.0;
+        std::string layout;
+        for (const auto& f : files) {
+            layout += fmt::format("{}{}: {:.1f} GB, at most {:.1f} GB", layout.empty() ? "" : "; ",
+                                  f.drive ? static_cast<char>(f.drive) : '?', f.currentBytes / kGB, f.maximumBytes / kGB);
+        }
+        if (!unreadDisks.empty()) layout += fmt::format("; free space unread on {}", unreadDisks);
+        if (layout.empty()) layout = "none";
+        if (layout != s_logged) {
+            s_logged = layout;
+            SKSE::log::info("Magelight: page files - {} (they can still grow by {:.2f} GB, counted as free commit)", layout,
+                            s_room / kGB);
+        }
+        return s_room;
+    }
+
+    // Any thread: two cheap system calls, and while the room under the commit limit is short of the lift, the system's
+    // own room and PageFileGrowthNow (its leaf lock, system calls only). No growth counts when a job object caps the
+    // game's commit (LowMemory::JobCapped).
     static MemoryNow ReadMemoryNow()
     {
         MemoryNow out;
@@ -2337,6 +2432,18 @@ namespace Magelight {
         if (!GlobalMemoryStatusEx(&ms)) return out;
         out.read = true;
         out.freeCommit = ms.ullAvailPageFile;
+        if (LowMemory::NeedsGrowth(ms.ullAvailPageFile, s_lowMemoryFloorMb.load())) {
+            PERFORMANCE_INFORMATION pi{};
+            pi.cb = sizeof(pi);
+            const bool sys = K32GetPerformanceInfo(&pi, sizeof(pi)) != FALSE;
+            const std::uint64_t sysRoom = sys && pi.CommitLimit > pi.CommitTotal
+                                              ? static_cast<std::uint64_t>(pi.CommitLimit - pi.CommitTotal) * pi.PageSize
+                                              : 0;
+            if (sys && !LowMemory::JobCapped(ms.ullAvailPageFile, sysRoom)) {
+                out.pageFileGrowth = PageFileGrowthNow(ms.ullTotalPageFile);
+                out.freeCommit += out.pageFileGrowth;
+            }
+        }
         PROCESS_MEMORY_COUNTERS_EX pmc{};
         pmc.cb = sizeof(pmc);
         if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc)))
@@ -2349,7 +2456,10 @@ namespace Magelight {
     {
         constexpr double kGB = 1073741824.0;
         if (!m.read) return "free commit unread";
-        return fmt::format("{:.2f} GB of commit free, the game's private memory {:.1f} GB", m.freeCommit / kGB,
+        return fmt::format("{:.2f} GB of commit free{}, the game's private memory {:.1f} GB", m.freeCommit / kGB,
+                           m.pageFileGrowth ? fmt::format(" ({:.2f} GB of it the page files can still grow by)",
+                                                          m.pageFileGrowth / kGB)
+                                            : std::string(),
                            m.processPrivate / kGB);
     }
 

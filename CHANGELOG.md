@@ -64,6 +64,18 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 1.8.1 - Unreleased
+
+### What players notice
+
+- **Pages no longer stop opening while Windows can still grow the page file.** The low-memory guard read only the
+  room under Windows' current commit limit. With a page file Windows manages (or one whose maximum is above its
+  minimum) that room stays small until commit reaches it, and only then does Windows grow the file, so the guard said
+  "Windows is nearly out of memory" and refused pages long before memory ran short. It now counts what the page files
+  can still grow by, up to their maximum and their disk's free space, and the log names each page file and its
+  maximum (`page files - ...`). A fixed page file (the same minimum and maximum) is read as before. See "Pages stop
+  opening: the game is low on memory" in `docs/TROUBLESHOOTING.md`.
+
 ## 1.8.0 - Unreleased
 
 ### What players notice

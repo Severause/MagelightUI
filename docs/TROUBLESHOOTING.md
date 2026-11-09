@@ -516,7 +516,10 @@ Since 1.8.0 Magelight stops opening and loading pages before memory runs out (se
 ## Pages stop opening: the game is low on memory
 
 Since 1.8.0, when Windows has nearly run out of memory to give programs (commit, which the game shares with every
-other program open), Magelight opens no new page and loads none until memory recovers. When a page is asked to
+other program open), Magelight opens no new page and loads none until memory recovers. From 1.8.1 that counts what
+Windows can still add by growing the page file: a page file Windows manages (or one whose maximum is above its
+minimum) grows only when commit reaches the commit limit (the RAM plus the page file's current size), so before
+1.8.1 the guard could stop pages opening while Windows still had plenty to give. When a page is asked to
 open, the HUD says `Magelight UI: Windows is nearly out of memory - the page was not opened` (at most every 30 s),
 and the log has lines like these:
 
@@ -531,7 +534,12 @@ Magelight: low memory - view 12's first load waits until memory recovers
 Magelight: memory recovered - 1.40 GB of commit free, the game's private memory 14.9 GB; pages open and load again
 (1 views waited)
 Magelight: views released for low memory load again, hidden: 4, 5
+Magelight: page files - C: 4.0 GB, at most 48.0 GB (they can still grow by 44.00 GB, counted as free commit)
 ```
+
+The `page files` line (1.8.1) comes the first time the room under the commit limit runs short, and again when a page
+file's size changes: each file's size now and the most Windows may grow it to, and what that leaves (no more than the
+disk's free space, less 1 GB). A file whose size and maximum are equal is fixed and never grows.
 
 Pages already on screen stay up, and a page already on screen can still take the mouse and keys. Pages that were
 hidden load again when they are next opened, and most come back on their own a minute or more after memory recovers.
@@ -543,13 +551,15 @@ Magelight does not try to carry on after one. A page already on screen can still
 Magelight's own share is the figures at the start of a `memory` line (see "Memory"). A private memory that grows
 minute after minute is a leak in the game or another mod. What helps:
 
-- A bigger page file, or one Windows manages (Windows can grow it, and the guard lifts once it has).
+- A bigger page file, or one Windows manages: from 1.8.1 what Windows can still grow it by counts as free, as long
+  as the disk it is on has room.
 - Fewer programs open beside the game.
 - Saving and restarting the game when the line appears.
 
 `lowMemoryFloorMB` in `Magelight.json` sets the floor (768 MB). The guard lifts once free commit is back above it by
 half the floor (at least 256 MB) and it has been up 10 s. `0` turns it off, which brings back the risk it guards
-against.
+against: when memory does run out, a page that opens can fail inside Ultralight and the overlay turns itself off until
+the game restarts.
 
 ## A page error ends the UI or the game (stack overflow, 0xC00000FD)
 

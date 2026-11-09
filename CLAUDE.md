@@ -484,7 +484,11 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
 28. **Low memory: prevent the throw, never survive it (1.8.0).** An allocation that fails inside Ultralight throws
     through closed-source frames, and the frame guard turns the overlay off for the session (`LogSehAndDisable`); never
     resume after one. Instead, while free commit is under `lowMemoryFloorMB` (`s_lowMemory`, raised and lifted by
-    `TickLowMemoryGuard` in `PageWorkBegin` before hibernation; `src/LowMemoryCore.h`), nothing new is shown or loaded:
+    `TickLowMemoryGuard` in `PageWorkBegin` before hibernation; `src/LowMemoryCore.h`), nothing new is shown or loaded.
+    Free commit is the room under the commit limit plus what the page files can still grow by (1.8.1,
+    `PageFileGrowthNow`, asked only while the room alone is short of the lift, and never when a job object caps the
+    game's commit): Windows grows a page file only once commit reaches the commit limit (RAM plus the page files'
+    current sizes), so the room alone is not what Windows can still give. While the guard is up:
     `SetUIModeImpl` and `SwitchUIModeView` refuse a view not already on screen (`OnScreenLocked`; `UIModeRefused`
     "low memory", with a reading of their own, `LowMemoryNow`, ahead of a main-menu request), `MaterializeViews` holds
     first loads and wakes, no prepaint or new inspector runs, and `HibernateIdleViews` releases every hidden view whose

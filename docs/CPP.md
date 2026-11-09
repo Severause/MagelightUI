@@ -821,7 +821,8 @@ api->RequestUIMode(barterView, MAGELIGHT_API::kUIModeFlagPause);
 
 ## When the game runs low on memory (1.8.0)
 
-Free commit is the room left under Windows' commit limit, which the game shares with every other program. When it
+Free commit is the room left under Windows' commit limit, which the game shares with every other program, plus (from
+1.8.1) what the page files can still grow by, up to their maximum and their disk's free space less 1 GB. When it
 falls below the player's `lowMemoryFloorMB` (768 MB unless they changed it), the host shows and loads nothing new for
 Ultralight until memory recovers. An allocation that fails inside Ultralight throws through code Magelight cannot
 see, and the overlay then turns itself off for the session (`RenderDead`); the guard keeps that throw from happening.

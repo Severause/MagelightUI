@@ -84,6 +84,43 @@ int main()
         Check(g.Update(0, 1000, 0) == LM::Change::None && !g.up, "guard off: nothing raises it");
     }
 
+    // What the page files can still grow by.
+    Check(LM::DriveOfPageFile(L"\\??\\C:\\pagefile.sys") == L'C', "drive: the native name");
+    Check(LM::DriveOfPageFile(L"z:\\pagefile.sys") == L'Z', "drive: a plain path, lower case");
+    Check(LM::DriveOfPageFile(L"\\Device\\HarddiskVolume3\\pagefile.sys") == 0, "drive: a device path is unknown");
+    Check(LM::DriveOfPageFile(L"") == 0 && LM::DriveOfPageFile(L"\\??\\") == 0, "drive: nothing is unknown");
+    {
+        const auto plenty = [](wchar_t) { return std::optional<std::uint64_t>(MB(500000)); };
+        const auto none = [](wchar_t) { return std::optional<std::uint64_t>(); };
+        using PF = LM::PageFile;
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(4096), MB(4096) } }, plenty) == 0, "growth: a fixed page file");
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(4096), MB(49152) } }, plenty) == MB(45056),
+              "growth: a system-managed one grows to its maximum");
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(4096), MB(49152) } },
+                             [](wchar_t) { return std::optional<std::uint64_t>(MB(3000)); }) == MB(3000 - 1024),
+              "growth: at most the disk's free space less the reserve");
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(4096), MB(49152) } },
+                             [](wchar_t) { return std::optional<std::uint64_t>(MB(900)); }) == 0,
+              "growth: a disk under the reserve gives nothing");
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(1000), MB(9000) }, { L'C', MB(1000), MB(9000) } },
+                             [](wchar_t) { return std::optional<std::uint64_t>(MB(11024)); }) == MB(10000),
+              "growth: two files on one disk share its free space");
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(1000), MB(3000) }, { L'D', MB(1000), MB(2000) } }, plenty) ==
+                  MB(3000),
+              "growth: files on two disks add up");
+        Check(LM::GrowthRoom(std::vector<PF>{ { 0, MB(1000), MB(9000) } }, plenty) == 0, "growth: an unknown volume is not counted");
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(1000), MB(9000) } }, none) == 0,
+              "growth: a disk whose free space is unknown is not counted");
+        Check(LM::GrowthRoom(std::vector<PF>{ { L'C', MB(9000), MB(1000) } }, plenty) == 0,
+              "growth: a file over its maximum gives nothing");
+        Check(LM::GrowthRoom(std::vector<PF>{}, plenty) == 0, "growth: no page file");
+    }
+    Check(LM::NeedsGrowth(MB(100), 768) && LM::NeedsGrowth(MB(1151), 768) && !LM::NeedsGrowth(MB(1152), 768),
+          "growth: asked only while the room is short of the lift");
+    Check(!LM::NeedsGrowth(0, 0), "growth: never while the guard is off");
+    Check(!LM::JobCapped(MB(500), MB(500)) && !LM::JobCapped(MB(500), MB(560)), "job: the same room, or within the tolerance");
+    Check(LM::JobCapped(MB(500), MB(4000)), "job: a process room under the system's is a job's cap");
+
     std::printf("%s (%d failed)\n", g_fails ? "FAILED" : "ALL PASSED", g_fails);
     return g_fails ? 1 : 0;
 }
