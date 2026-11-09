@@ -259,6 +259,9 @@ namespace Magelight {
         UIModeEntered, UIModeExited, DisplayResized, ConsoleMessage, RenderDead,
         UIModeRefused,   // EnterUIModeEx's game-thread task declined (detail = reason)
         UIModeSwitched,  // SwitchUIModeView retargeted an ACTIVE UI mode (view = the new target)
+        // 1.9.0 (invariant 30): the keyboard moved while UI mode stays. view = the view that gained or lost it; x = the
+        // view on the other side (0 when UI mode starting, moving or ending took it back); detail = x as decimal text.
+        KeyFocusGained, KeyFocusLost,
     };
     using HostEventFn = void (*)(HostEvent type, ViewId view, int x, int y, const char* detail);
     void SetHostEventSink(HostEventFn fn);
@@ -356,6 +359,10 @@ namespace Magelight {
     // thread. A page sets the same slot through magelight.hostTheme (the reserved '__hosttheme' channel).
     bool SetViewKeyboardTheme(ViewId view, const HostTheme::KbTheme* theme);
     bool SetViewMainMenu(ViewId view, bool on);   // 1.7.1 false: the view is gone or an inspector
+    // 1.9.0 (invariant 30): FocusShare::kGive / kTake on a view. false: the view is gone or an inspector. Any thread.
+    bool SetViewFocusSharing(ViewId view, std::uint32_t flags);
+    // The view a click shared the keyboard with while UI mode is on; 0 while the UI-mode view has it. Any thread.
+    ViewId GetSharedKeyView();
     bool ViewOpensAtMainMenu(ViewId view);        // 1.7.1 the main menu is open and this view may show over it
     bool MainMenuPagesAvailable();                // 1.7.1 the "mainMenu" capability: the page thread is on or wanted
     bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)

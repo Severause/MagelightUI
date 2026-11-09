@@ -28,6 +28,7 @@ src/PathTextCore.h          paths as text: every std::string path is UTF-8 (From
 src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
 src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
 src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): the floor, the lift's hysteresis, the setting's clamp
+src/FocusShareCore.h        focus sharing's rules (1.9.0): which view a press moves the keyboard to, when it goes back
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -55,6 +56,7 @@ tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zi
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
 tools/lowmemory-test/       src/LowMemoryCore.h's floor, hysteresis and setting clamp (build.bat)
+tools/focusshare-test/      src/FocusShareCore.h's press and settle rules (build.bat)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
@@ -215,8 +217,10 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     enter UI mode while an engine menu is up (the Main Menu alone does not stop a
     main-menu page, invariant 27), the console is open or
     `textEntryCount > 0`, and while a page has key focus only the ACTIVE view's
-    own binding fires (to close). Anything looser turns a letter typed into a
-    text field into another mod's panel opening.
+    own binding fires (to close), and not even that while the keyboard is shared
+    (invariant 30; a VR binding still closes, and a ToggleVisible binding fires
+    either way). Anything looser turns a letter typed into a text field into
+    another mod's panel opening.
 
 16. **Ultralight load-listener callbacks can fire synchronously inside the call
     that triggers them.** `OnBeginLoading` runs INSIDE `LoadURL`, which
@@ -512,3 +516,23 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     `tools/input-test`'s `contextmenu` section checks each case, and its `menufault` (no guard) and `armfault` (no
     re-arm) controls, each in a process of its own, must still fault: when an SDK bump stops them faulting, the guard
     may go.
+30. **The keyboard follows the key view; UI mode stays the holder's** (1.9.0, `SetViewFocusSharing`,
+    `src/FocusShareCore.h`). `KeyViewNow()` (`s_keyView`, else the UI-mode view) is the page that keys, typed text,
+    the IME, View focus, text focus (`DrainEditableStates`), the VR keyboard's theme and the keyboard's Escape
+    capture follow. The cursor, the pause, the gamepad (its keys are tagged `kKeySourcePad` and go to the holder's
+    page, and the flat focus menu's Cancel reads the holder's capture), B/Y, the polled-key rule and the owner stay
+    with `s_uiModeView`. Only `DrainInputQueue` writes `s_keyView` (and `s_keyHolder`, the holder it was shared
+    under):
+    - a left press inside a view moves it, before the press is fired (`FocusShare::OnPress`: back to the holder
+      always, elsewhere only when the holder gives and that view takes);
+    - `FocusShare::Settle` gives it back once the share no longer holds, checked every frame, input or not, and only
+      under the holder it was shared under: a share under another holder is the marker's to end;
+    - the focus marker clears it (UI mode starting, moving or ending, and a new View for the view that has it:
+      `MaterializeView` re-runs the marker for that view only, since a new View has no focus; the holder's own new
+      View is focused by the move that gives it back).
+
+    A move releases the held modifiers and finishes the composition of the page that had the keyboard before its
+    `Unfocus`, and `Focus`es the new page under `s_hostFocusCall` (never a keyboard raise: the press that follows
+    focuses the field). Its `KeyFocusGained` / `KeyFocusLost` are emitted after the drain, outside every lock. A new
+    reader of "the page the player types into" calls `KeyViewNow()`, never `s_uiModeView`. While the keyboard is
+    shared no hotkey fires: the key may be going into another mod's field (invariant 15).

@@ -105,9 +105,10 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
   cancelable `contextmenu` returns false, and one that is not cancelable reaches your listeners as a cancelable copy.
 - **Text fields** (host 1.5.0): the host follows the focused field itself (an input, a textarea, a
   `contenteditable` region, a field in an iframe); the page needs no script for it. A page has window focus
-  (`document.hasFocus()`, the window's `focus` and `blur` events, `:focus` matching) only while it holds UI mode,
-  so a page that never held UI mode has none from its load. On VR the host's keyboard rises when a field of the
-  page holding UI mode takes the focus (a click, Tab, the page's own `focus()`), and again when the player clicks
+  (`document.hasFocus()`, the window's `focus` and `blur` events, `:focus` matching) only while it has the
+  keyboard: while it holds UI mode, or (host 1.9.0) after a click shared the keyboard with it (C++
+  `SetViewFocusSharing`, manifest `acceptFocus`). A page that never had it has none from its load. On VR the host's
+  keyboard rises when a field of the page that has the keyboard takes the focus (a click, Tab, the page's own `focus()`), and again when the player clicks
   the field that has it after closing the keyboard; it does not rise when UI mode opens on a page whose field
   already has the focus. The field's `inputmode` picks the layout: `numeric`, `decimal` and `tel` a keypad, `email`
   adds `@` and `.com`, `url` adds `/` and `.com`, and `none` keeps the keyboard down (a page with its own keypad).
@@ -150,7 +151,8 @@ magelight.hostTheme({
   well as a dark one. A given `action` or `danger` with under 3:1 contrast on `key` or `keyHover`, or a
   given `pressedText` with under 4.5:1 on `pressed`, is replaced by its fill-in; an `accent` with under
   3:1 on `key` is kept (Shift, Caps and the title use it), and both are warnings in `Magelight.log`. It
-  shows while this view holds UI mode with the keyboard up; another view in UI mode shows its own. Flat
+  shows while this view has the keyboard (it holds UI mode, or from 1.9.0 the keyboard was shared with it) and
+  the keyboard is up; another view shows its own. Flat
   has no on-screen keyboard: the theme is kept there and never shown.
 - **`cursor`**: `lit`, `shade`, `ink`, `glow`, `ibeam`, all optional (one left out keeps the host's
   colour). The same slot as C++ `SetViewCursorTint`, with its rules: the view's own cursor images win,

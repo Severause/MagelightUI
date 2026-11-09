@@ -30,6 +30,7 @@
 #include "MagelightDevWatch.h"
 #include "MagelightGameTask.h"
 #include "CxxThrowCore.h"
+#include "FocusShareCore.h"
 
 #include <windows.h>
 #include "PathTextCore.h"   // after windows.h
@@ -447,7 +448,7 @@ namespace Magelight::Api4 {
         // UI-mode owner, or everyone.
         void HostSink(HostEvent type, ViewId view, int x, int y, const char* detail)
         {
-            const std::string d = detail ? detail : "";
+            std::string d = detail ? detail : "";
             std::vector<std::pair<Sink, Event>> targets;
             bool drainQueue = false;
             {
@@ -517,6 +518,14 @@ namespace Magelight::Api4 {
                 case HostEvent::DisplayResized:
                     for (auto& [id, m] : s_mods) targets.emplace_back(SinkOf(m), Event::DisplayResized);
                     break;
+                case HostEvent::KeyFocusGained:
+                case HostEvent::KeyFocusLost: {
+                    // detail: the other view's mod ("" for none, or a host or v1-v3 view); x stays its id.
+                    const Mod* other = FindLocked(OwnerLocked(static_cast<ViewId>(std::strtoull(d.c_str(), nullptr, 10))));
+                    d = other ? other->modId : std::string();
+                    ownerSink(view, type == HostEvent::KeyFocusGained ? Event::KeyFocusGained : Event::KeyFocusLost);
+                    break;
+                }
                 case HostEvent::RenderDead:
                     for (auto& [id, m] : s_mods) targets.emplace_back(SinkOf(m), Event::RenderDead);
                     break;
@@ -1181,6 +1190,7 @@ namespace Magelight::Api4 {
         if (n == "vrgaze") return 1;        // VRPlacementDesc::flags kVRPlacementAtGaze / manifest vr.atGaze (1.6.1)
         if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
         if (n == "polledkeys") return 1;    // SetViewPolledKeys / kUIModeFlagPassPolledKeys / manifest "polledKeys" (1.8.0)
+        if (n == "focusshare") return 1;    // SetViewFocusSharing / KeyFocusGained / KeyFocusLost / manifest "shareFocus", "acceptFocus" (1.9.0)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1319,7 +1329,7 @@ namespace Magelight::Api4 {
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
                                         "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu",
-                                        "polledKeys" };
+                                        "polledKeys", "focusShare" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1837,6 +1847,20 @@ namespace Magelight::Api4 {
         return Result::Ok;
     }
 
+    // 1.9.0 (FocusShareCore.h; the moves are DrainInputQueue's, CLAUDE.md invariant 30).
+    static_assert(FocusShare::kGive == MAGELIGHT_API::kFocusShareGive && FocusShare::kTake == MAGELIGHT_API::kFocusShareTake,
+                  "FocusShareCore's flags must be the API's");
+    Result SetViewFocusSharing(ViewId view, std::uint32_t flags)
+    {
+        if (const Result g = GateView(view, "SetViewFocusSharing"); g != Result::Ok) return g;
+        if (!FocusShare::KnownFlags(flags))
+            return Fail(OwnerOf(view), Result::InvalidArgument, "SetViewFocusSharing: flags holds a bit other than "
+                                                                "kFocusShareGive and kFocusShareTake");
+        if (!Magelight::SetViewFocusSharing(view, flags))
+            return Fail(OwnerOf(view), Result::InvalidView, "SetViewFocusSharing: view is gone or is an inspector");
+        return Result::Ok;
+    }
+
     std::shared_ptr<const PolledKeys::Rule> GetUIModePolledRule()
     {
         return s_uiPolledRule.load();
@@ -1937,8 +1961,12 @@ namespace Magelight::Api4 {
             if (active) {
                 // While a page has key focus only ITS OWN key closes it — a
                 // letter typed into a text field must never open another
-                // mod's panel. Other bindings are swallowed.
-                if (Magelight::GetUIModeView() == hk.view) {
+                // mod's panel. Other bindings are swallowed, and so is its
+                // own key while it has shared the keyboard: the key may be
+                // going into another mod's field (invariant 30). A VR binding
+                // is a controller chord, never typing.
+                const bool typed = src != "vr";
+                if (Magelight::GetUIModeView() == hk.view && !(typed && Magelight::GetSharedKeyView())) {
                     const Result r = ReleaseUIModeAs(OwnerOf(hk.view), false);
                     if (r != Result::Ok)
                         SKSE::log::warn("Magelight[v4]: hotkey close refused — {}", LastErrorText(OwnerOf(hk.view)));

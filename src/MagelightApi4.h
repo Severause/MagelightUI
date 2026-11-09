@@ -145,6 +145,7 @@ namespace Magelight::Api4 {
     Result GetViewGamepadState(ViewId view, MAGELIGHT_API::GamepadState* out);              // 1.6.0
     Result SetViewMainMenu(ViewId view, bool on);                                           // 1.7.1 load and show at the main menu
     Result SetViewPolledKeys(ViewId view, const MAGELIGHT_API::PolledKeysConfig* config);   // 1.8.0 other plugins' key reads that pass
+    Result SetViewFocusSharing(ViewId view, std::uint32_t flags);                           // 1.9.0 the keyboard shared on a click
     // 0.31.0: a manifest's top-level "cursor", the default for every view of the mod without a cursor of its own
     // (existing views now, later ones at CreateViewEx).
     void SetModCursor(ModId mod, const Magelight::CursorSet& set);

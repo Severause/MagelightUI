@@ -114,7 +114,8 @@ PINNED_ENUMS = {
     "NetworkPolicy": {"LoopbackOnly": 0, "Any": 1, "FileOnly": 2},
     "Event": {"ViewDomReady": 0, "ViewLoadFailed": 1, "ViewReloaded": 2, "ViewDestroyed": 3,
               "UIModeEntered": 4, "UIModeExited": 5, "FocusDenied": 6, "DisplayResized": 7,
-              "ConsoleMessage": 8, "RenderDead": 9, "HostShutdown": 10, "UIModeRefused": 11},
+              "ConsoleMessage": 8, "RenderDead": 9, "HostShutdown": 10, "UIModeRefused": 11,
+              "KeyFocusGained": 12, "KeyFocusLost": 13},
 }
 
 ENUM = re.compile(r"enum class (\w+)\s*:\s*[\w:]+\s*\{(.*?)\};", re.S)

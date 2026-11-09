@@ -30,6 +30,7 @@
       "h": 240,
       "hotkey": "F7",
       "hotkeyPause": false,
+      "shareFocus": true,
       "vrHotkey": {
         "button": "a",
         "modifier": "grip",
@@ -40,6 +41,19 @@
         "distance": 1.6,
         "width": 1.4
       }
+    },
+    "note": {
+      "path": "views/note/index.html",
+      "layer": "hud",
+      "anchor": "bottom-right",
+      "x": 24,
+      "y": 120,
+      "w": 300,
+      "h": 170,
+      "clickThrough": false,
+      "startVisible": false,
+      "hotkey": "F11",
+      "acceptFocus": true
     }
   }
 }

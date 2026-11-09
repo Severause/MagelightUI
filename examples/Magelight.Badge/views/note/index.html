@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Magelight note</title>
+<style>
+  html, body { margin: 0; background: transparent; }
+  .note {
+    box-sizing: border-box; width: 300px; height: 170px; padding: 10px 12px;
+    background: #1e1913; border: 1px solid #5a4a2e; border-radius: 6px;
+    color: #e8dcc4; font: 13px Georgia, serif;
+  }
+  .note.has-keys { border-color: #cba560; }
+  h1 { margin: 0 0 4px; font-size: 14px; color: #cba560; font-weight: normal; }
+  .sub { margin: 0 0 6px; color: #8a7a5a; font-size: 11px; line-height: 1.35; }
+  textarea {
+    box-sizing: border-box; width: 100%; height: 82px; padding: 6px 8px; resize: none;
+    background: #100e0a; border: 1px solid #3b3221; border-radius: 4px;
+    color: #e8dcc4; font: 13px Georgia, serif; outline: none;
+  }
+  textarea:focus { border-color: #cba560; }
+  kbd { background: #292118; border: 1px solid #3b3221; border-radius: 3px; padding: 0 4px; font: 11px monospace; }
+</style></head>
+<body>
+  <div class="note" id="n">
+    <h1>Shared note</h1>
+    <!-- Host 1.9.0: this view sets "acceptFocus" and the panel "shareFocus" (manifest.json). -->
+    <p class="sub">Open the panel with <kbd>F7</kbd>, then click here: the keyboard moves to this note while
+      the panel keeps UI mode. Click the panel to move it back. <kbd>F11</kbd> shows or hides the note.</p>
+    <textarea id="t" placeholder="type here once you have clicked the note"></textarea>
+  </div>
+  <script>
+    var t = document.getElementById('t'), n = document.getElementById('n');
+    try {
+      t.value = localStorage.getItem('note') || '';
+      t.addEventListener('input', function () { localStorage.setItem('note', t.value); });
+    } catch (e) {}
+    // The window has focus only while this view has the keyboard.
+    window.addEventListener('focus', function () { n.classList.add('has-keys'); });
+    window.addEventListener('blur', function () { n.classList.remove('has-keys'); });
+  </script>
+</body></html>

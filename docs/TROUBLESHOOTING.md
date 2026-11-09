@@ -104,7 +104,8 @@ v1-v3 C++ `CreateView` belong to no mod: they are file-only and cannot opt in.
   `Magelight.json` says otherwise). A manifest adds its file and view name to the line.
 - A hotkey never *opens* a page while an engine menu, the console, or a game text field is
   active (`hotkey ignored — an engine menu, the console or text entry is open`), and while a
-  page has key focus only that page's own key fires (to close it).
+  page has key focus only that page's own key fires (to close it), and not even that while it has
+  shared the keyboard with another view (1.9.0).
 - The user may have rebound or disabled it in `Magelight.json` (`"hotkeys"`); the log says
   `hotkey for 'Mod/view' rebound ...` or `disabled by Magelight.json`.
 - While Windows is low on memory (1.8.0) a page does not open: `UI mode refused for view N - low
