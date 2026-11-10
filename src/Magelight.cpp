@@ -2347,12 +2347,18 @@ namespace Magelight {
         static std::uint64_t s_readAt = 0, s_room = 0, s_limit = 0;
         static std::string s_logged;
         static bool s_failLogged = false;
-        std::lock_guard<std::mutex> lk(s_mx);
+        // Never waited for: a caller that finds a reading under way on another thread takes the last one. A fault
+        // inside a reading leaves the lock taken for good (ReleasePageLocksAfterFault does not know it), and a wait
+        // would then hang the game thread's next UI-mode entry.
+        static std::atomic<std::uint64_t> s_last{ 0 };
+        std::unique_lock<std::mutex> lk(s_mx, std::try_to_lock);
+        if (!lk.owns_lock()) return s_last.load();
         const std::uint64_t now = GetTickCount64();
         if (s_readAt && now - s_readAt < LowMemory::kGrowthCacheMs && s_limit == commitLimit) return s_room;
         s_readAt = now;
         s_limit = commitLimit;
         s_room = 0;
+        s_last.store(0);
         const auto fail = [](const std::string& why) {
             if (s_failLogged) return;
             s_failLogged = true;
@@ -2461,6 +2467,7 @@ namespace Magelight {
             SKSE::log::info("Magelight: page files - {} (they can still grow by {:.2f} GB, counted as free commit)", layout,
                             s_room / kGB);
         }
+        s_last.store(s_room);
         return s_room;
     }
 
@@ -2548,8 +2555,8 @@ namespace Magelight {
     {
         constexpr double kGB = 1073741824.0;
         if (!m.read) return "free commit unread";
-        return fmt::format("{:.2f} GB of commit free of a {:.1f} GB limit{}, the game's private memory {:.1f} GB, Windows "
-                           "reports commit {}",
+        return fmt::format("{:.2f} GB of commit free of a {:.1f} GB limit{}, the game's private memory {:.1f} GB, Windows' "
+                           "commit reading: {}",
                            m.freeCommit / kGB, m.commitLimit / kGB,
                            m.pageFileGrowth ? fmt::format(" ({:.2f} GB of it the page files can still grow by)",
                                                           m.pageFileGrowth / kGB)
@@ -2574,38 +2581,54 @@ namespace Magelight {
         return v.w > 0 && v.h > 0 ? static_cast<std::uint64_t>(v.w) * static_cast<std::uint64_t>(v.h) : 0;
     }
 
-    // What opening a view asks of memory (LowMemory::OpenNeedBytes): nothing when its page is on screen, a show when
-    // its page is built, else a load. No such view counts as a 1080p load. Caller holds s_viewsMutex.
-    struct OpenAsk {
-        bool onScreen = false, loaded = false;
-        std::uint64_t pixels = 0;
+    // The view a UI-mode entry or switch is deciding on (0 = none): from its memory check until UI mode holds it or
+    // the request ends, HibernateIdleViews does not release it, so a page judged as built is still built when it is
+    // shown. Stored on the game thread before the check takes s_viewsMutex; the release loop reads it under that lock.
+    static std::atomic<std::uint64_t> s_openingView{ 0 };
+    struct OpeningViewPin {
+        explicit OpeningViewPin(ViewId id) { s_openingView.store(id); }
+        ~OpeningViewPin() { s_openingView.store(0); }
+        OpeningViewPin(const OpeningViewPin&) = delete;
+        OpeningViewPin& operator=(const OpeningViewPin&) = delete;
     };
-    static OpenAsk OpenAskLocked(const MlView* v)
-    {
-        OpenAsk ask;
-        if (!v) return ask;
-        ask.onScreen = OnScreenLocked(*v);
-        ask.loaded = v->ul && v->docDomReady && !v->destroyPending;
-        ask.pixels = ViewPixels(*v);
-        return ask;
-    }
+    // The view that last held UI mode: the guard does not release it, since it is the page most likely to be opened
+    // again and a released page needs a load where a built one needs a show.
+    static std::atomic<std::uint64_t> s_lastUIModeView{ 0 };
 
-    // Whether the open would run short: one reading taken now against what that view needs, whatever the guard says
-    // (it lifts with hysteresis; a page the player asks for opens the moment the memory is there). Any thread; call
-    // it without s_viewsMutex.
-    static bool OpenShortNow(const OpenAsk& ask, MemoryNow& mem, std::uint64_t& needBytes)
+    // Whether opening the view would run short: one reading taken now against what that view needs
+    // (LowMemory::OpenShort), whatever the guard says (it lifts with hysteresis; a page the player asks for opens the
+    // moment the memory is there). The page counts as built only at DOM ready with no rebuild pending (a rebuild loads
+    // it again); no such view counts as a 1080p load. onScreen: nothing new would be shown, and the caller lets the
+    // view through. Any thread; takes s_viewsMutex for the snapshot only. The caller holds an OpeningViewPin on it.
+    struct OpenCheck {
+        bool isShort = false, onScreen = false, loaded = false;
+        std::uint64_t needBytes = 0;
+        MemoryNow mem;
+    };
+    static OpenCheck CheckOpenNow(ViewId id)
     {
+        OpenCheck c;
         const int floorMb = s_lowMemoryFloorMb.load();
-        if (floorMb <= 0 || ask.onScreen) return false;
-        needBytes = LowMemory::OpenNeedBytes(floorMb, ask.loaded, ask.pixels);
-        mem = ReadMemoryNow(needBytes);
-        return mem.read && mem.freeCommit < needBytes;
+        if (floorMb <= 0) return c;
+        std::uint64_t pixels = 0;
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            if (const MlView* v = FindViewLocked(id)) {
+                c.onScreen = OnScreenLocked(*v);
+                c.loaded = v->ul && v->docDomReady && !v->rebuildPending && !v->destroyPending;
+                pixels = ViewPixels(*v);
+            }
+        }
+        c.needBytes = LowMemory::OpenNeedBytes(floorMb, c.loaded, pixels);
+        c.mem = ReadMemoryNow(c.needBytes);
+        c.isShort = c.mem.read && LowMemory::OpenShort(c.mem.freeCommit, floorMb, c.loaded, pixels);
+        return c;
     }
 
     // Ultralight's thread only. s_lowMemoryWaited: the views whose load waited while the guard was up, each named once
     // in the log per time it comes up (NoteLowMemoryWait). s_lowMemoryReleased: the views it released that never
     // hibernate, which load again hidden once memory has been back a while (TickLowMemoryGuard). s_guardSample: the
-    // guard's last reading, at most LowMemory::kSampleMs old (ShownLoadFits).
+    // guard's last reading, at most LowMemory::kSampleMs old, less the loads started since (LoadAllowed, SpendLoad).
     // s_rebuiltShown: the shown views ApplyPendingRebuilds released this frame, whose new View MaterializeViews makes
     // whatever the guard says (holding it would leave a shown page blank).
     static std::unordered_set<ViewId> s_lowMemoryWaited;
@@ -2613,12 +2636,25 @@ namespace Magelight {
     static MemoryNow s_guardSample;
     static std::vector<ViewId> s_rebuiltShown;
 
-    // While the guard is up: a view a mod is showing loads all the same when the guard's last sample covers what its
-    // load needs. Ultralight's thread; caller holds s_viewsMutex.
-    static bool ShownLoadFits(const MlView& v)
+    // Whether a load may start, by the guard's last sample taken as a budget (LowMemory::LoadFits): a view a mod is
+    // showing loads when its own load fits, guard up or down; any other view loads in the background only with the
+    // guard down and the guard's floor left over. Before the first sample, as the guard says. Ultralight's thread;
+    // caller holds s_viewsMutex.
+    static bool LoadAllowed(const MlView& v, bool guardUp)
     {
-        return v.visible && s_guardSample.read &&
-               !LowMemory::OpenShort(s_guardSample.freeCommit, s_lowMemoryFloorMb.load(), false, ViewPixels(v));
+        const int floorMb = s_lowMemoryFloorMb.load();
+        if (floorMb <= 0) return true;
+        if (!s_guardSample.read) return !guardUp;
+        if (v.visible) return LowMemory::LoadFits(s_guardSample.freeCommit, floorMb, ViewPixels(v), 0);
+        return !guardUp && LowMemory::LoadFits(s_guardSample.freeCommit, floorMb, ViewPixels(v), s_guardFloorBytes.load());
+    }
+
+    // Every load takes its need out of that budget, the exempt ones too: the page's cost lands over the next frames,
+    // where the sample does not show it yet. Ultralight's thread.
+    static void SpendLoad(const MlView& v)
+    {
+        if (s_guardSample.read)
+            s_guardSample.freeCommit = LowMemory::AfterLoad(s_guardSample.freeCommit, s_lowMemoryFloorMb.load(), ViewPixels(v));
     }
 
     static void NoteLowMemoryWait(ViewId id, const char* what)
@@ -3977,21 +4013,18 @@ namespace Magelight {
     {
         if (s_focused.load() == on) return;
         const ViewId uiView = static_cast<ViewId>(s_uiModeView.load());
-        // Low memory: refused when one reading is short of what the view's page needs (OpenShortNow), unless the view
+        // Low memory: refused when one reading is short of what the view's page needs (CheckOpenNow), unless the view
         // is already on screen. Ahead of a main-menu request, which would make the view a main-menu page and start
-        // the renderer.
-        if (on && s_lowMemoryFloorMb.load() > 0) {
-            OpenAsk ask;
-            {
-                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-                ask = OpenAskLocked(FindViewLocked(uiView));
-            }
-            MemoryNow mem;
-            std::uint64_t need = 0;
-            if (OpenShortNow(ask, mem, need)) {
+        // the renderer. The pin keeps the page it judged until UI mode holds the view.
+        std::optional<OpeningViewPin> opening;
+        if (on) {
+            opening.emplace(uiView);
+            const OpenCheck open = CheckOpenNow(uiView);
+            if (open.isShort && !open.onScreen) {
                 SKSE::log::warn("Magelight: UI mode refused for view {} - not enough free memory to {} its page ({}; it "
                                 "needs {} MB). Windows' limit is the RAM plus the page file: a larger page file raises it",
-                                uiView, ask.loaded ? "show" : "load", MemoryText(mem), need / LowMemory::kMiB);
+                                uiView, open.loaded ? "show" : "load", MemoryText(open.mem),
+                                open.needBytes / LowMemory::kMiB);
                 Emit(HostEvent::UIModeRefused, uiView, 0, 0, "low memory");
                 // The player pressed something and nothing opened: say why, at most every 30 s. Game thread only.
                 static std::uint64_t s_lastNotice = 0;
@@ -4038,6 +4071,7 @@ namespace Magelight {
         SKSE::log::info("Magelight: SetUIMode({}{}) begin - {}", on, (on && pauseGame) ? ", paused" : "",
                         s_uiModeLabel);
         s_focused.store(on);
+        if (!on) s_lastUIModeView.store(uiView);
         if (on) { s_escLogSession.store(20); s_keySession.fetch_add(1); }
         s_focusMenuHideSeen.store(false);   // a hide from an earlier session is no news about this one
         if (on) s_uiModeEnteredMs.store(GetTickCount64());
@@ -7007,6 +7041,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // The UI-mode target loading late (a wake, or an entry while it waited in the queue): the focus marker ran
         // against a null View, so re-run it for keys to reach the new page.
         if (s_focused.load() && v.id == static_cast<ViewId>(s_uiModeView.load())) QueueInput(0, 1, 0);
+        SpendLoad(v);
         return true;
     }
 
@@ -7091,12 +7126,12 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (v.ul || v.w <= 0 || v.h <= 0 || v.destroyPending) continue;
             if (!v.mainMenu && !s_viewsReleased.load()) continue;      // loads at the first in-game frame
             if ((v.dormant || v.loadOnShow) && !v.visible) continue;   // wakes / first loads on ShowView(true)
-            // Low memory: the record stays and loads once memory is back, but for a view UI mode needs, a shown view
-            // a rebuild released this frame, and a view a mod is showing whose load fits (ShownLoadFits).
-            if (lowMemory && !NeededByUIMode(v) &&
-                std::find(s_rebuiltShown.begin(), s_rebuiltShown.end(), v.id) == s_rebuiltShown.end() &&
-                !ShownLoadFits(v)) {
-                NoteLowMemoryWait(v.id, v.dormant ? "wake" : "first load");
+            // Low memory: a view UI mode needs and a shown view a rebuild released this frame load whatever it says.
+            // Any other load comes out of the guard's last sample (LoadAllowed); the record stays and loads once it fits.
+            const bool exempt = NeededByUIMode(v) ||
+                                std::find(s_rebuiltShown.begin(), s_rebuiltShown.end(), v.id) != s_rebuiltShown.end();
+            if (!exempt && !LoadAllowed(v, lowMemory)) {
+                if (lowMemory) NoteLowMemoryWait(v.id, v.dormant ? "wake" : "first load");
                 continue;
             }
             const bool now = !stagger || v.dormant || v.loadNow || v.loadOnShow || v.id == uiView;
@@ -7127,7 +7162,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             // The batch ran past its wall-time cap: start everything still waiting now.
             std::vector<MlView*> retry;
             for (MlView* v : queued) {
-                if (!LoadViewLocked(*v)) { retry.push_back(v); continue; }   // CreateView failed: a later frame
+                // Out of budget (the loads before it in this pass took it), or CreateView failed: a later frame.
+                if (!LoadAllowed(*v, lowMemory) || !LoadViewLocked(*v)) { retry.push_back(v); continue; }
                 ++s_stagger.batchAtCap;
                 s_stagger.last = v->id;
                 s_stagger.lastLoadAt = nowT;
@@ -7141,7 +7177,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (due || (settled && s_lastUlUpdateMs < static_cast<double>(s_loadBudgetMs.load()))) {
                 std::sort(queued.begin(), queued.end(), [](const MlView* a, const MlView* b) { return a->id < b->id; });
                 for (auto it = queued.begin(); it != queued.end(); ++it) {
-                    if (!LoadViewLocked(**it)) continue;   // CreateView failed: retried on a later frame, the next goes now
+                    // Out of budget, or CreateView failed: retried on a later frame, the next goes now.
+                    if (!LoadAllowed(**it, lowMemory) || !LoadViewLocked(**it)) continue;
                     ++s_stagger.batchQueued;
                     s_stagger.last = (*it)->id;
                     s_stagger.lastLoadAt = nowT;
@@ -7188,9 +7225,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     // Render thread, before MaterializeViews: release the View + texture of
     // any view hidden longer than its hibernate budget. The record stays;
     // everything the page needs to come back (path, listeners, session,
-    // layer, cutout) is on it. Never a view UI mode needs, never an inspector.
+    // layer, cutout) is on it. Never a view UI mode needs or an entry is deciding on (s_openingView), never an
+    // inspector.
     // While the low-memory guard is up, every hidden view whose page reached DOM ready goes once hidden
-    // kReleaseHiddenAfterMs (a view never shown at once), whatever its budget, but not a page an inspector is bound to.
+    // kReleaseHiddenAfterMs (a view never shown at once), whatever its budget, but not a page an inspector is bound to
+    // nor the view that last held UI mode (s_lastUIModeView).
     // A release that drops a pending reload or rebuild, or of a view that never hibernates, wakes with a ViewReloaded:
     // its page was replaced. Released views that never hibernate load again hidden later (TickLowMemoryGuard).
     static void HibernateIdleViews()
@@ -7203,10 +7242,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             const std::uint64_t now = GetTickCount64();   // after the lock: a hide stamps hiddenSince under it
             for (auto& vp : s_views) {
                 MlView& v = *vp;
-                if (!v.ul || v.visible || v.destroyPending || v.isInspector || NeededByUIMode(v)) continue;
+                if (!v.ul || v.visible || v.destroyPending || v.isInspector || NeededByUIMode(v) ||
+                    v.id == static_cast<ViewId>(s_openingView.load()))
+                    continue;
                 const std::uint64_t hiddenMs = (v.hiddenSince && now > v.hiddenSince) ? now - v.hiddenSince : 0;
                 const bool budget = v.hibernateMs && v.hiddenSince && hiddenMs >= v.hibernateMs;
                 const bool memory = lowMemory && v.docDomReady && !s_inspectorOf.count(v.id) &&
+                                    v.id != static_cast<ViewId>(s_lastUIModeView.load()) &&
                                     (!v.hiddenSince || hiddenMs >= LowMemory::kReleaseHiddenAfterMs);
                 if (!budget && !memory) continue;
                 if (!v.hibernateMs || v.reloadPending || v.rebuildPending) v.reloadedFlag = true;
@@ -9016,7 +9058,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         SKSE::log::info("Magelight: memory ({}) - {}; views {} live, {} hibernated, {} not loaded{}{}{}; read in {:.1f} ms",
                         why, MemoryReport::Line(f), live, dormant, notLoaded, msaa,
                         haveSys ? fmt::format("; system RAM {:.1f} of {:.1f} GB free, commit {:.1f} of {:.1f} GB free "
-                                              "(Windows reports commit {})",
+                                              "(Windows' commit reading: {})",
                                               ms.ullAvailPhys / kGB, ms.ullTotalPhys / kGB, ms.ullAvailPageFile / kGB,
                                               ms.ullTotalPageFile / kGB, LowMemory::CommitEventsText(CommitEventsNow()))
                                 : std::string(),
@@ -12122,15 +12164,12 @@ float4 ps_straight(VSOut i) : SV_Target {
                 Emit(HostEvent::UIModeRefused, view, 0, 0, "switch: UI mode is not active");
                 return;
             }
-            // Whether the view's page would run short of memory (OpenShortNow), read before anything changes for it.
-            OpenAsk ask;
-            {
-                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-                ask = OpenAskLocked(FindViewLocked(view));
-            }
-            MemoryNow mem;
-            std::uint64_t need = 0;
-            const bool lowMemory = OpenShortNow(ask, mem, need);
+            // Whether the view's page would run short of memory (CheckOpenNow), read before anything changes for it,
+            // on screen or not: the lock below asks again whether it is on screen. The pin keeps the page it judged
+            // until the switch is done.
+            const OpeningViewPin opening(view);
+            const OpenCheck open = CheckOpenNow(view);
+            const bool lowMemory = open.isShort;
             // As a request at the main menu: the view it moves to becomes a main-menu page. Not while its page would
             // run short, when the view is refused below and must not load at the main menu later for it.
             if (s_mainMenuOpen.load() && MainMenuPagesAvailable() && !lowMemory) SetViewMainMenu(view, true);
@@ -12152,7 +12191,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                 }
                 else if (!ViewShows(*v)) refusal = "switch: view does not show here";
                 // Published under the lock that ran the checks: the page side's release of hidden views
-                // (HibernateIdleViews) reads s_uiModeView under it, so it cannot release the view in between.
+                // (HibernateIdleViews) reads s_uiModeView under it, so it cannot release the view in between (the
+                // pin above covers it from the memory check to here).
                 if (!refusal && old != view) {
                     s_uiModeView.store(view);
                     QueueKeyboardThemeLocked();   // the keyboard page, up or not, follows the new view's theme (0.31.9)
@@ -12160,8 +12200,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             if (refusal) {
                 SKSE::log::warn("Magelight: SwitchUIModeView({}) — {}{}", view, refusal,
-                                refusedForMemory ? fmt::format(" ({}; its page needs {} MB)", MemoryText(mem),
-                                                               need / LowMemory::kMiB)
+                                refusedForMemory ? fmt::format(" ({}; its page needs {} MB)", MemoryText(open.mem),
+                                                               open.needBytes / LowMemory::kMiB)
                                                  : std::string());
                 Emit(HostEvent::UIModeRefused, view, 0, 0, refusal);
                 // A reclaim's switch withdrew the holder's own release, which hid its view: UI mode is never left

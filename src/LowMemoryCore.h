@@ -9,8 +9,8 @@
 //   - May this page open now? One reading against what that page needs (OpenShort): less for a page already loaded,
 //     more on a larger view. No hysteresis: the moment the memory is there, the page opens.
 //   - Should the host give memory back? The Guard, raised under the largest load any view needs and lifted with
-//     hysteresis. While it is up, hidden views are released and background loads wait. Its floor is never under
-//     an open's need, so when an open is short the host is already giving back what it holds.
+//     hysteresis. While it is up, hidden views are released and background loads wait. Once it has sampled, its
+//     floor is never under an open's need, so when an open is short the guard is up or comes up at its next sample.
 //
 // std only: tools/lowmemory-test runs all of it on the desktop.
 
@@ -52,10 +52,10 @@ namespace Magelight::LowMemory {
 
     // ── What a page needs (1.8.1) ──
     // Two fifths of the floor is what showing a loaded page takes: its target and its layers' surfaces, which grow
-    // with the view's pixel count (never counted under 1920x1080, and at most kMaxPixelScale times it). The other
-    // three fifths is the page itself (script, DOM, decoded images), which does not.
+    // with the view's pixel count (never counted under 1920x1080; kMaxPixelScale times it, 7680x4320, only bounds a
+    // mis-sized view). The other three fifths is the page itself (script, DOM, decoded images), which does not.
     inline constexpr std::uint64_t kBasePixels = 1920ull * 1080ull;
-    inline constexpr std::uint64_t kMaxPixelScale = 8;
+    inline constexpr std::uint64_t kMaxPixelScale = 16;
 
     inline std::uint64_t ShowNeedBytes(int floorMb, std::uint64_t pixels)
     {
@@ -80,6 +80,21 @@ namespace Magelight::LowMemory {
     inline bool OpenShort(std::uint64_t freeBytes, int floorMb, bool loaded, std::uint64_t pixels)
     {
         return floorMb > 0 && freeBytes < OpenNeedBytes(floorMb, loaded, pixels);
+    }
+
+    // ── Loads against a budget ──
+    // The guard's last sample is a budget: each load the host starts takes its need out (AfterLoad), so views that
+    // load together do not all count the same room. keepBytes is what must stay free after the load: nothing for a
+    // view that is being shown, the guard's floor for one that loads in the background.
+    inline bool LoadFits(std::uint64_t budgetBytes, int floorMb, std::uint64_t pixels, std::uint64_t keepBytes)
+    {
+        return floorMb <= 0 || budgetBytes >= LoadNeedBytes(floorMb, pixels) + keepBytes;
+    }
+
+    inline std::uint64_t AfterLoad(std::uint64_t budgetBytes, int floorMb, std::uint64_t pixels)
+    {
+        const std::uint64_t need = LoadNeedBytes(floorMb, pixels);
+        return budgetBytes > need ? budgetBytes - need : 0;
     }
 
     // ── The guard's own floor, in bytes: LoadNeedBytes of the largest view (0 = off) ──
@@ -221,12 +236,14 @@ namespace Magelight::LowMemory {
         bool low = false, high = false, maximum = false;
     };
 
+    // After "Windows' commit reading: ". Windows' low event means little commit in use, which a bare "low" in a
+    // low-memory line would say the wrong way round.
     inline const char* CommitEventsText(const CommitEvents& e)
     {
         if (!e.known) return "unread";
-        if (e.maximum) return "at its maximum (the page files cannot grow)";
+        if (e.maximum) return "at the maximum (the page files cannot grow)";
         if (e.high) return "high (the page files may still grow)";
-        return e.low ? "low" : "normal";
+        return e.low ? "low use" : "normal";
     }
 
     enum class Change { None, Raised, Lifted };

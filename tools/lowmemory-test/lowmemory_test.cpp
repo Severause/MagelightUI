@@ -48,7 +48,7 @@ int main()
         Check(LM::ShowNeedBytes(320, k4K) == MB(512), "need: a 4K view's target is four times a 1080p one");
         Check(LM::LoadNeedBytes(320, k4K) == MB(512 + 192), "need: the page itself does not grow with the view");
         Check(LM::ShowNeedBytes(320, k1440) > MB(227) && LM::ShowNeedBytes(320, k1440) < MB(228), "need: 1440p in between");
-        Check(LM::ShowNeedBytes(320, k1080 * 100) == MB(128 * 8), "need: the pixel scale is capped");
+        Check(LM::ShowNeedBytes(320, k1080 * 100) == MB(128 * 16), "need: the pixel scale is capped");
         Check(LM::OpenNeedBytes(320, true, k1080) == MB(128) && LM::OpenNeedBytes(320, false, k1080) == MB(320),
               "need: an open shows a loaded page and loads any other");
         Check(LM::ShowNeedBytes(0, k4K) == 0 && LM::LoadNeedBytes(0, k4K) == 0, "need: nothing while off");
@@ -57,6 +57,22 @@ int main()
         Check(LM::OpenShort(MB(319), 320, false, k1080) && !LM::OpenShort(MB(320), 320, false, k1080),
               "open: a page that must load needs the floor");
         Check(!LM::OpenShort(0, 0, false, k4K), "open: never short while off");
+
+        // The guard's sample as a budget.
+        Check(LM::LoadFits(MB(320), 320, k1080, 0) && !LM::LoadFits(MB(319), 320, k1080, 0),
+              "budget: a shown view loads on exactly its need");
+        Check(!LM::LoadFits(MB(639), 320, k1080, MB(320)) && LM::LoadFits(MB(640), 320, k1080, MB(320)),
+              "budget: a background load leaves the guard's floor");
+        Check(LM::LoadFits(0, 0, k4K, MB(320)), "budget: anything fits while off");
+        Check(LM::AfterLoad(MB(1000), 320, k1080) == MB(680), "budget: a load takes its need out");
+        Check(LM::AfterLoad(MB(100), 320, k1080) == 0, "budget: never under nothing");
+        std::uint64_t budget = MB(700);
+        int loads = 0;
+        while (LM::LoadFits(budget, 320, k1080, 0)) {
+            budget = LM::AfterLoad(budget, 320, k1080);
+            ++loads;
+        }
+        Check(loads == 2, "budget: views shown together load only as far as one sample covers");
     }
 
     // The guard over time.
@@ -200,10 +216,10 @@ int main()
     {
         using CE = LM::CommitEvents;
         Check(std::string_view(LM::CommitEventsText(CE{})) == "unread", "events: unread");
-        Check(std::string_view(LM::CommitEventsText(CE{ true, true, false, false })) == "low", "events: low");
+        Check(std::string_view(LM::CommitEventsText(CE{ true, true, false, false })) == "low use", "events: low");
         Check(std::string_view(LM::CommitEventsText(CE{ true, false, false, false })) == "normal", "events: none set");
         Check(std::string_view(LM::CommitEventsText(CE{ true, false, true, false })).substr(0, 4) == "high", "events: high");
-        Check(std::string_view(LM::CommitEventsText(CE{ true, false, true, true })).substr(0, 14) == "at its maximum",
+        Check(std::string_view(LM::CommitEventsText(CE{ true, false, true, true })).substr(0, 14) == "at the maximum",
               "events: the maximum wins over high");
     }
 

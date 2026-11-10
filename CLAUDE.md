@@ -484,27 +484,32 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
 28. **Low memory: prevent the throw, never survive it (1.8.0).** An allocation that fails inside Ultralight throws
     through closed-source frames, and the frame guard turns the overlay off for the session (`LogSehAndDisable`); never
     resume after one. Free commit is the room under the commit limit plus what the page files can still grow by
-    (1.8.1, `PageFileGrowthNow`, asked only while the room alone is short of the guard's lift, and never when a job
-    object caps the game's commit; a file the registry says Windows manages gets at least the documented maximum).
-    Two questions are asked apart (1.8.1; `src/LowMemoryCore.h`), and mixing them back into one floor is the 1.8.0
-    bug that kept every page closed on a PC a few hundred MB from its limit:
-    - **May this page open?** One reading against what that page needs (`OpenShortNow`: a show when its page is
-      built, else a load; both grow with the view's pixels), with no hysteresis. `SetUIModeImpl` and
-      `SwitchUIModeView` refuse a view not already on screen (`OnScreenLocked`) on it (`UIModeRefused` "low memory",
-      ahead of a main-menu request), and `MaterializeViews` loads a view a mod is showing when its load fits the
-      guard's last sample (`ShownLoadFits`).
+    (1.8.1, `PageFileGrowthNow`, asked only while the room alone is short of the guard's lift or of what an open
+    asks, and never when a job object caps the game's commit; a file the registry says Windows manages gets at least
+    the documented maximum; the reading never waits for its lock). Two questions are asked apart (1.8.1;
+    `src/LowMemoryCore.h`), and mixing them back into one floor is the 1.8.0 bug that kept every page closed on a PC
+    a few hundred MB from its limit:
+    - **May this page open?** One reading against what that page needs (`CheckOpenNow`: a show when its page is
+      built with no rebuild pending, else a load; the show grows with the view's pixels), with no hysteresis.
+      `SetUIModeImpl` and `SwitchUIModeView` refuse a view not already on screen (`OnScreenLocked`) on it
+      (`UIModeRefused` "low memory", ahead of a main-menu request). From that check until UI mode holds the view,
+      `s_openingView` keeps `HibernateIdleViews` from releasing the page it judged.
     - **Should the host give memory back?** The guard (`s_lowMemory`, raised and lifted by `TickLowMemoryGuard` in
       `PageWorkBegin` before hibernation, below what loading the largest view needs, `s_guardFloorBytes`). While it
-      is up `MaterializeViews` holds the other first loads and wakes, no prepaint or new inspector runs, and
-      `HibernateIdleViews` releases every hidden view whose page reached DOM ready; the released views that never
-      hibernate load again hidden once the guard has been down a minute (doubled each time such a reload brought it
-      back, `Guard::ReloadDue`). Its floor is never under an open's need, so when an open is short the guard is
-      already up and the hidden views are going.
+      is up no prepaint or new inspector runs, and `HibernateIdleViews` releases every hidden view whose page reached
+      DOM ready, but for the view that last held UI mode (`s_lastUIModeView`: released, its next open would need a
+      load). The released views that never hibernate load again hidden once the guard has been down a minute
+      (doubled each time such a reload brought it back, `Guard::ReloadDue`). Once the guard has sampled, its floor is
+      never under an open's need, so when an open is short the guard is up or comes up at its next sample.
+    - **Loads come out of a budget.** The guard's last sample (`s_guardSample`) less every load started since
+      (`SpendLoad` in `LoadViewLocked`): `MaterializeViews` starts a view a mod is showing when its own load fits,
+      guard up or down, and a hidden view only with the guard down and the guard's floor left over (`LoadAllowed`),
+      so views that load together do not all count the same room.
     Views already shown stay up, the views a UI mode that is on needs (`NeededByUIMode`) load and stay, and a shown
     view a rebuild released that frame loads (`s_rebuiltShown`; holding the rebuild would leave its scale out of step
     with its View). A switch refused for memory while the holder's view is hidden (a reclaim's withdrawn release)
     ends UI mode. `Navigate` and `ReloadView` replace a page in its own View and are not held: holding one stops a
-    shown page's calls. A new path that creates a View or shows a page asks one of the two questions. Windows' commit
+    shown page's calls. A new path that creates a View or shows a page asks one of these questions. Windows' commit
     events (`CommitEventsNow`) are logged and never decided on: their thresholds are not documented. After render
     death nothing is released: on the GPU path every page target is made and freed by Ultralight or the driver, and
     calling either after the throw is the resume this rules out (the CPU path's host copies, `forceCpu` only, are

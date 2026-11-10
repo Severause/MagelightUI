@@ -829,7 +829,8 @@ did both, and nothing opened while the guard was up).
 
 **A page that is asked for opens when its own need fits.** The player's `lowMemoryFloorMB` (320 MB unless they
 changed it) is what a page on a 1920x1080 view needs before it loads. Showing a page that is already built needs two
-fifths of that (128 MB), and both grow with the view's pixel count. One reading is taken when the page is asked for:
+fifths of that (128 MB). The showing part grows with the view's pixel count above 1920x1080 (a smaller view counts
+as 1920x1080). One reading is taken when the page is asked for:
 
 - A UI-mode entry whose view is not already on screen (loaded and shown, as after `ReleaseUIMode` without a hide) is
   refused when free commit is under that need: `RequestUIMode` returns `Ok` as before, then `UIModeRefused` arrives
@@ -840,18 +841,21 @@ fifths of that (128 MB), and both grow with the view's pixel count. One reading 
   is on screen. UI mode then stays where it was, unless the view holding it is hidden (a reclaim whose release hid
   it): then it ends, with `UIModeExited`.
 - A view you show without UI mode loads when its load fits the guard's last reading (at most a second old), whether
-  or not the guard is up.
+  or not the guard is up. Views that load together are counted together: each takes its need out of that reading,
+  so the second of two views shown at once can wait up to a second for the next one.
 
 **The guard gives memory back.** It comes up when free commit falls below what the largest view needs to load, and
 while it is up:
 
-- The first load of a hidden view and everything else in the background waits until memory is back. Your calls to
-  the view stay queued, as during any load; no event says it waits, and `ViewDomReady` arrives when it lands. A shown
-  view whose load does not fit draws nothing until then. The view holding UI mode and the VR keyboard load as usual,
-  and so does the new View of a shown view you rebuild (`RebuildViewAtScale`). `Navigate` and `ReloadView` on a
-  loaded page run as usual: they replace the page in its own View.
+- The first load of a hidden view and everything else in the background waits. It goes on once the guard is down
+  and the load would still leave the guard's floor free. Your calls to the view stay queued, as during any load; no
+  event says it waits, and `ViewDomReady` arrives when it lands. A shown view whose load does not fit draws nothing
+  until then. The view holding UI mode and the VR keyboard load as usual, and so does the new View of a shown view
+  you rebuild (`RebuildViewAtScale`). `Navigate` and `ReloadView` on a loaded page run as usual: they replace the
+  page in its own View.
 - Hidden views are released as hibernation releases them, whether or not you called `SetViewHibernate`, once their
-  page has reached DOM ready and they have been hidden 2 s (a view never shown since it loaded, at once). A
+  page has reached DOM ready and they have been hidden 2 s (a view never shown since it loaded, at once). The view
+  that last held UI mode is kept: it is the page most likely to be opened again. A
   released view whose page you set to hibernate comes back when shown, as after hibernation. One you never set to
   hibernate (or load on show) loads again, hidden, about a minute after memory recovers (longer each time that
   reload brought the guard straight back), or when shown if that comes first; its `ViewDomReady` then comes with a
