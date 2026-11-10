@@ -84,34 +84,46 @@ namespace Magelight::LowMemory {
     }
 
     // ── Loads against a budget ──
-    // The guard's last sample is a budget: each load the host starts takes its need out (AfterLoad), so views that
-    // load together do not all count the same room. keepBytes is what must stay free after the load: nothing for a
-    // view that is being shown, the guard's floor for one that loads in the background. A load's memory lands over
-    // the frames after it starts, where a fresh reading does not show it yet: its need still counts for
-    // kLoadSettleMs (UnsettledBytes), against the next samples and against an open's reading.
-    inline constexpr std::uint64_t kLoadSettleMs = 2000;
-    struct StartedLoad {
-        std::uint64_t atMs = 0, bytes = 0;
-    };
-
-    // The needs of the loads started within kLoadSettleMs; the older ones leave the list.
-    inline std::uint64_t UnsettledBytes(std::vector<StartedLoad>& loads, std::uint64_t nowMs)
-    {
-        std::erase_if(loads, [nowMs](const StartedLoad& l) { return nowMs - l.atMs >= kLoadSettleMs; });
-        std::uint64_t total = 0;
-        for (const StartedLoad& l : loads) total += l.bytes;
-        return total;
-    }
-
+    // The guard's last sample is a budget that the loads the host starts are taken out of, so views that load
+    // together do not all count the same room. keepBytes is what must stay free after a load: nothing for a view that
+    // is being shown, the guard's floor for one that loads in the background.
     inline bool LoadFits(std::uint64_t budgetBytes, int floorMb, std::uint64_t pixels, std::uint64_t keepBytes)
     {
         return floorMb <= 0 || budgetBytes >= LoadNeedBytes(floorMb, pixels) + keepBytes;
     }
 
-    inline std::uint64_t AfterLoad(std::uint64_t budgetBytes, int floorMb, std::uint64_t pixels)
+    // A load's memory lands over the frames after it starts, where a reading does not show it yet: for kLoadSettleMs
+    // the load is still landing.
+    inline constexpr std::uint64_t kLoadSettleMs = 2000;
+    struct StartedLoad {
+        std::uint64_t atMs = 0;          // when it started
+        std::uint64_t bytes = 0;         // its need
+        std::uint64_t freeAtStart = 0;   // the free commit it was judged on
+    };
+
+    // The loads started kLoadSettleMs ago or more have landed, and readings show them.
+    inline void DropSettled(std::vector<StartedLoad>& loads, std::uint64_t nowMs)
     {
-        const std::uint64_t need = LoadNeedBytes(floorMb, pixels);
-        return budgetBytes > need ? budgetBytes - need : 0;
+        std::erase_if(loads, [nowMs](const StartedLoad& l) { return nowMs - l.atMs >= kLoadSettleMs; });
+    }
+
+    // What should be left once the loads still landing (oldest first) have all landed: what the oldest was judged on,
+    // less the needs of all of them. No such load: no bound.
+    inline constexpr std::uint64_t kNoBound = ~0ull;
+    inline std::uint64_t ExpectedFree(const std::vector<StartedLoad>& loads)
+    {
+        if (loads.empty()) return kNoBound;
+        std::uint64_t needs = 0;
+        for (const StartedLoad& l : loads) needs += l.bytes;
+        const std::uint64_t start = loads.front().freeAtStart;
+        return start > needs ? start - needs : 0;
+    }
+
+    // What counts as free while loads are still landing: the reading, held to ExpectedFree. The reading alone
+    // forgets what has not landed yet; the reading less the loads' needs would count what has landed twice.
+    inline std::uint64_t SettledFree(std::uint64_t freeBytes, const std::vector<StartedLoad>& loads)
+    {
+        return std::min(freeBytes, ExpectedFree(loads));
     }
 
     // ── The guard's own floor, in bytes: LoadNeedBytes of the largest view (0 = off) ──

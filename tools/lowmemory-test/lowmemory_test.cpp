@@ -67,22 +67,31 @@ int main()
         Check(!LM::LoadFits(MB(639), 320, k1080, MB(320)) && LM::LoadFits(MB(640), 320, k1080, MB(320)),
               "budget: a background load leaves the guard's floor");
         Check(LM::LoadFits(0, 0, k4K, MB(320)), "budget: anything fits while off");
-        Check(LM::AfterLoad(MB(1000), 320, k1080) == MB(680), "budget: a load takes its need out");
-        Check(LM::AfterLoad(MB(100), 320, k1080) == 0, "budget: never under nothing");
-        std::uint64_t budget = MB(700);
-        int loads = 0;
-        while (LM::LoadFits(budget, 320, k1080, 0)) {
-            budget = LM::AfterLoad(budget, 320, k1080);
-            ++loads;
-        }
-        Check(loads == 2, "budget: views shown together load only as far as one sample covers");
 
         // Loads still landing.
-        std::vector<LM::StartedLoad> started{ { 1000, MB(320) }, { 2500, MB(400) } };
-        Check(LM::UnsettledBytes(started, 2600) == MB(720) && started.size() == 2, "settle: both loads still count");
-        Check(LM::UnsettledBytes(started, 2999) == MB(720), "settle: one ms short of the window");
-        Check(LM::UnsettledBytes(started, 3000) == MB(400) && started.size() == 1, "settle: the older load has landed");
-        Check(LM::UnsettledBytes(started, 4500) == 0 && started.empty(), "settle: nothing left");
+        std::vector<LM::StartedLoad> started;
+        Check(LM::ExpectedFree(started) == LM::kNoBound && LM::SettledFree(MB(700), started) == MB(700),
+              "settle: no load landing, the reading stands");
+        int loads = 0;
+        while (LM::LoadFits(LM::SettledFree(MB(700), started), 320, k1080, 0)) {
+            started.push_back({ 1000, LM::LoadNeedBytes(320, k1080), MB(700) });
+            ++loads;
+        }
+        Check(loads == 2, "settle: views shown together load only as far as one sample covers");
+        started = { { 1000, MB(320), MB(700) } };
+        Check(LM::SettledFree(MB(700), started) == MB(380), "settle: a load not landed yet is taken out of the reading");
+        Check(LM::SettledFree(MB(450), started) == MB(380), "settle: a load that has landed is not counted twice");
+        Check(LM::SettledFree(MB(200), started) == MB(200), "settle: a reading under the bound stands");
+        started = { { 1000, MB(320), MB(100) } };
+        Check(LM::ExpectedFree(started) == 0, "settle: never under nothing");
+        started = { { 1000, MB(320), MB(2000) }, { 2500, MB(400), MB(1500) } };
+        Check(LM::ExpectedFree(started) == MB(2000 - 720), "settle: the oldest load's reading less every load's need");
+        LM::DropSettled(started, 2999);
+        Check(started.size() == 2, "settle: one ms short of the window");
+        LM::DropSettled(started, 3000);
+        Check(started.size() == 1 && LM::ExpectedFree(started) == MB(1500 - 400), "settle: the older load has landed");
+        LM::DropSettled(started, 4500);
+        Check(started.empty(), "settle: nothing left");
     }
 
     // The guard over time.

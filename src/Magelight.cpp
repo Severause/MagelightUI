@@ -2594,9 +2594,12 @@ namespace Magelight {
     // The view that last held UI mode: the guard does not release it, since it is the page most likely to be opened
     // again and a released page needs a load where a built one needs a show.
     static std::atomic<std::uint64_t> s_lastUIModeView{ 0 };
-    // What the loads started in the last LowMemory::kLoadSettleMs still have to take (s_startedLoads): Ultralight's
-    // thread writes it, an open's reading on any thread leaves it out (CheckOpenNow).
-    static std::atomic<std::uint64_t> s_unsettledBytes{ 0 };
+    // While loads are still landing (s_startedLoads), an open's reading on any thread is held to what should be left
+    // once they have (LowMemory::ExpectedFree), until the newest of them settles: s_settledAtMs is that time in
+    // GetTickCount64 terms, so the bound ends by itself when page frames stop coming (a loading screen). Ultralight's
+    // thread writes both (PublishBudget).
+    static std::atomic<std::uint64_t> s_expectedFree{ LowMemory::kNoBound };
+    static std::atomic<std::uint64_t> s_settledAtMs{ 0 };
 
     // Whether opening the view would run short: one reading taken now against what that view needs
     // (LowMemory::OpenShort), whatever the guard says (it lifts with hysteresis; a page the player asks for opens the
@@ -2606,7 +2609,7 @@ namespace Magelight {
     struct OpenCheck {
         bool isShort = false, onScreen = false, loaded = false;
         std::uint64_t needBytes = 0;
-        std::uint64_t unsettledBytes = 0;   // s_unsettledBytes at the reading, left out of what counts as free
+        std::uint64_t heldBytes = 0;   // how much of the reading loads still landing have spoken for
         MemoryNow mem;
     };
     static OpenCheck CheckOpenNow(ViewId id)
@@ -2624,9 +2627,10 @@ namespace Magelight {
             }
         }
         c.needBytes = LowMemory::OpenNeedBytes(floorMb, c.loaded, pixels);
-        c.unsettledBytes = s_unsettledBytes.load();
-        c.mem = ReadMemoryNow(c.needBytes + c.unsettledBytes);
-        const std::uint64_t free = c.mem.freeCommit > c.unsettledBytes ? c.mem.freeCommit - c.unsettledBytes : 0;
+        c.mem = ReadMemoryNow(c.needBytes);
+        std::uint64_t free = c.mem.freeCommit;
+        if (GetTickCount64() < s_settledAtMs.load()) free = std::min(free, s_expectedFree.load());
+        c.heldBytes = c.mem.freeCommit - free;
         c.isShort = c.mem.read && LowMemory::OpenShort(free, floorMb, c.loaded, pixels);
         return c;
     }
@@ -2635,16 +2639,16 @@ namespace Magelight {
     static std::string OpenNeedText(const OpenCheck& c)
     {
         return fmt::format("{} MB{}", c.needBytes / LowMemory::kMiB,
-                           c.unsettledBytes ? fmt::format(", with {} MB kept for pages still loading",
-                                                          c.unsettledBytes / LowMemory::kMiB)
-                                            : std::string());
+                           c.heldBytes ? fmt::format(", with {} MB kept for pages still loading",
+                                                     c.heldBytes / LowMemory::kMiB)
+                                       : std::string());
     }
 
     // Ultralight's thread only. s_lowMemoryWaited: the views whose load waited while the guard was up, each named once
     // in the log per time it comes up (NoteLowMemoryWait). s_lowMemoryReleased: the views it released that never
     // hibernate, which load again hidden once memory has been back a while (TickLowMemoryGuard). s_guardSample: the
-    // guard's last reading, at most LowMemory::kSampleMs old. s_guardBudget: its free commit less what the loads in
-    // s_startedLoads still have to take (JudgeLoad, SpendLoad).
+    // guard's last reading, at most LowMemory::kSampleMs old. s_guardBudget: its free commit, held to what should be
+    // left once the loads in s_startedLoads have landed (LowMemory::SettledFree; JudgeLoad, PublishBudget).
     // s_rebuiltShown: the shown views ApplyPendingRebuilds released this frame, whose new View MaterializeViews makes
     // whatever the guard says (holding it would leave a shown page blank).
     static std::unordered_set<ViewId> s_lowMemoryWaited;
@@ -2672,7 +2676,16 @@ namespace Magelight {
         return LowMemory::LoadFits(s_guardSample.freeCommit, floorMb, pixels, keep) ? LoadVerdict::Pace : LoadVerdict::Short;
     }
 
-    // Every load takes its need out of that budget, the exempt ones too, and counts as still landing for
+    // The budget from a reading and the loads still landing, for JudgeLoad and for an open on another thread
+    // (s_expectedFree until s_settledAtMs). Ultralight's thread, after s_startedLoads changed or a new sample.
+    static void PublishBudget(std::uint64_t freeBytes)
+    {
+        s_guardBudget = LowMemory::SettledFree(freeBytes, s_startedLoads);
+        s_expectedFree.store(LowMemory::ExpectedFree(s_startedLoads));
+        s_settledAtMs.store(s_startedLoads.empty() ? 0 : s_startedLoads.back().atMs + LowMemory::kLoadSettleMs);
+    }
+
+    // Every load is taken out of that budget, the exempt ones too, and counts as still landing for
     // LowMemory::kLoadSettleMs. Ultralight's thread; caller holds s_viewsMutex.
     static void SpendLoad(const MlView& v)
     {
@@ -2680,9 +2693,9 @@ namespace Magelight {
         const int floorMb = s_lowMemoryFloorMb.load();
         if (floorMb <= 0 || !s_guardSample.read) return;
         const std::uint64_t now = GetTickCount64();
-        s_startedLoads.push_back({ now, LowMemory::LoadNeedBytes(floorMb, ViewPixels(v)) });
-        s_guardBudget = LowMemory::AfterLoad(s_guardBudget, floorMb, ViewPixels(v));
-        s_unsettledBytes.store(LowMemory::UnsettledBytes(s_startedLoads, now));
+        LowMemory::DropSettled(s_startedLoads, now);
+        s_startedLoads.push_back({ now, LowMemory::LoadNeedBytes(floorMb, ViewPixels(v)), s_guardSample.freeCommit });
+        PublishBudget(s_guardSample.freeCommit);
     }
 
     static void NoteLowMemoryWait(ViewId id, const char* what)
@@ -9124,9 +9137,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_guardFloorBytes.store(floorBytes);
         const MemoryNow mem = ReadMemoryNow();
         s_guardSample = mem;
-        const std::uint64_t unsettled = LowMemory::UnsettledBytes(s_startedLoads, now);
-        s_unsettledBytes.store(unsettled);
-        s_guardBudget = mem.freeCommit > unsettled ? mem.freeCommit - unsettled : 0;
+        LowMemory::DropSettled(s_startedLoads, now);
+        PublishBudget(mem.freeCommit);
         if (!mem.read) return;
         switch (s_guard.Update(mem.freeCommit, now, floorBytes)) {
         case LowMemory::Change::Raised:
