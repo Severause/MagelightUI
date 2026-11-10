@@ -841,8 +841,9 @@ as 1920x1080). One reading is taken when the page is asked for:
   is on screen. UI mode then stays where it was, unless the view holding it is hidden (a reclaim whose release hid
   it): then it ends, with `UIModeExited`.
 - A view you show without UI mode loads when its load fits the guard's last reading (at most a second old), whether
-  or not the guard is up. Views that load together are counted together: each takes its need out of that reading,
-  so the second of two views shown at once can wait up to a second for the next one.
+  or not the guard is up. Views that load together are counted together: for two seconds after a load starts its
+  need still counts as taken (a UI-mode entry leaves it out too), so the second of two views shown at once can wait
+  that long.
 
 **The guard gives memory back.** It comes up when free commit falls below what the largest view needs to load, and
 while it is up:
@@ -865,7 +866,7 @@ while it is up:
 - No page is prepainted.
 - Views already shown stay up and keep painting.
 
-The guard lifts once free commit is back above its floor by half of it (at least 256 MB) and it has been up 10 s. The
+The guard lifts once free commit is back at twice its floor (at least 256 MB above it) and it has been up 10 s. The
 log has a line each way. `lowMemoryFloorMB` `0` turns both off.
 
 ## A gamepad (1.6.0)

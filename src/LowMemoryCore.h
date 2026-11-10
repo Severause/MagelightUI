@@ -28,8 +28,9 @@ namespace Magelight::LowMemory {
     // it, and the allocation failed with 100 MB free.
     inline constexpr int kDefaultFloorMb = 320;
     inline constexpr int kMaxFloorMb = 16384;
-    // The lift: free commit back above the guard's floor by half of it (at least 256 MB), with the guard up this long
-    // at least. The game's own use swings by hundreds of MB, so a guard that lifted at its floor would come and go.
+    // The lift: free commit back at twice the guard's floor (at least 256 MB above it), with the guard up this long
+    // at least. The game's own use swings by hundreds of MB, so a guard that lifted at its floor would come and go;
+    // and at twice the floor a background load of the largest view fits again (LoadFits with the floor kept).
     inline constexpr std::uint64_t kMinUpMs = 10000;
     inline constexpr std::uint64_t kMinResumeMarginMb = 256;
     // How often the host reads free commit (GlobalMemoryStatusEx, a few microseconds).
@@ -85,7 +86,23 @@ namespace Magelight::LowMemory {
     // ── Loads against a budget ──
     // The guard's last sample is a budget: each load the host starts takes its need out (AfterLoad), so views that
     // load together do not all count the same room. keepBytes is what must stay free after the load: nothing for a
-    // view that is being shown, the guard's floor for one that loads in the background.
+    // view that is being shown, the guard's floor for one that loads in the background. A load's memory lands over
+    // the frames after it starts, where a fresh reading does not show it yet: its need still counts for
+    // kLoadSettleMs (UnsettledBytes), against the next samples and against an open's reading.
+    inline constexpr std::uint64_t kLoadSettleMs = 2000;
+    struct StartedLoad {
+        std::uint64_t atMs = 0, bytes = 0;
+    };
+
+    // The needs of the loads started within kLoadSettleMs; the older ones leave the list.
+    inline std::uint64_t UnsettledBytes(std::vector<StartedLoad>& loads, std::uint64_t nowMs)
+    {
+        std::erase_if(loads, [nowMs](const StartedLoad& l) { return nowMs - l.atMs >= kLoadSettleMs; });
+        std::uint64_t total = 0;
+        for (const StartedLoad& l : loads) total += l.bytes;
+        return total;
+    }
+
     inline bool LoadFits(std::uint64_t budgetBytes, int floorMb, std::uint64_t pixels, std::uint64_t keepBytes)
     {
         return floorMb <= 0 || budgetBytes >= LoadNeedBytes(floorMb, pixels) + keepBytes;
@@ -100,7 +117,7 @@ namespace Magelight::LowMemory {
     // ── The guard's own floor, in bytes: LoadNeedBytes of the largest view (0 = off) ──
     inline std::uint64_t ResumeBytes(std::uint64_t floorBytes)
     {
-        return floorBytes + std::max<std::uint64_t>(floorBytes / 2, kMinResumeMarginMb * kMiB);
+        return floorBytes + std::max<std::uint64_t>(floorBytes, kMinResumeMarginMb * kMiB);
     }
 
     // One reading under the floor (never while the guard is off).

@@ -501,10 +501,14 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
       load). The released views that never hibernate load again hidden once the guard has been down a minute
       (doubled each time such a reload brought it back, `Guard::ReloadDue`). Once the guard has sampled, its floor is
       never under an open's need, so when an open is short the guard is up or comes up at its next sample.
-    - **Loads come out of a budget.** The guard's last sample (`s_guardSample`) less every load started since
-      (`SpendLoad` in `LoadViewLocked`): `MaterializeViews` starts a view a mod is showing when its own load fits,
-      guard up or down, and a hidden view only with the guard down and the guard's floor left over (`LoadAllowed`),
-      so views that load together do not all count the same room.
+    - **Loads come out of a budget.** `s_guardBudget` is the guard's last sample less what the loads started in the
+      last `kLoadSettleMs` still take (`SpendLoad` in `LoadViewLocked`, `s_startedLoads`): a page's memory lands
+      over the frames after its load starts, where a fresh reading does not show it. `MaterializeViews` starts a
+      view a mod is showing when its own load fits, guard up or down, and a hidden view only with the guard down and
+      the guard's floor left over (`JudgeLoad`), so views that load together do not all count the same room.
+      `CheckOpenNow` leaves the same unsettled amount (`s_unsettledBytes`) out of its reading. The guard lifts at
+      twice its floor, where a background load of the largest view fits again, and the released views are sent back
+      to load only once one fits.
     Views already shown stay up, the views a UI mode that is on needs (`NeededByUIMode`) load and stay, and a shown
     view a rebuild released that frame loads (`s_rebuiltShown`; holding the rebuild would leave its scale out of step
     with its View). A switch refused for memory while the holder's view is hidden (a reclaim's withdrawn release)

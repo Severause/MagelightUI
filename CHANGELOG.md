@@ -103,7 +103,9 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   works the moment the memory is there.
 - A view you show without UI mode loads when its load fits the guard's last reading (at most a second old), guard
   up or not. Loads of hidden views wait while the guard is up, and after it for as long as they would bring free
-  commit back under its floor. Views that load together are counted together.
+  commit back under its floor. Views that load together are counted together: a load's need counts as taken for two
+  seconds after it starts.
+- The guard lifts at twice its floor (it was the floor and a half).
 - While the guard is up, the view that last held UI mode is not released.
 - Nothing in the ABI changed. See "When the game runs low on memory" in `docs/CPP.md`.
 

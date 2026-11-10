@@ -32,8 +32,11 @@ int main()
     Check(LM::ClampFloorMb(512.9) == 512, "clamp: a fraction rounds down");
 
     // Thresholds.
-    Check(LM::ResumeBytes(MB(768)) == MB(768 + 384), "resume: floor + half the floor");
-    Check(LM::ResumeBytes(MB(256)) == MB(256 + 256), "resume: at least 256 MB above a small floor");
+    Check(LM::ResumeBytes(MB(768)) == MB(768 * 2), "resume: twice the floor");
+    Check(LM::ResumeBytes(MB(100)) == MB(100 + 256), "resume: at least 256 MB above a small floor");
+    Check(LM::LoadFits(LM::ResumeBytes(LM::LoadNeedBytes(320, 3840ull * 2160)), 320, 3840ull * 2160,
+                       LM::LoadNeedBytes(320, 3840ull * 2160)),
+          "resume: at the lift a background load of the largest view fits");
     Check(LM::Below(MB(767), MB(768)) && !LM::Below(MB(768), MB(768)), "below: strictly under the floor");
     Check(!LM::Below(0, 0), "below: never while off");
 
@@ -73,6 +76,13 @@ int main()
             ++loads;
         }
         Check(loads == 2, "budget: views shown together load only as far as one sample covers");
+
+        // Loads still landing.
+        std::vector<LM::StartedLoad> started{ { 1000, MB(320) }, { 2500, MB(400) } };
+        Check(LM::UnsettledBytes(started, 2600) == MB(720) && started.size() == 2, "settle: both loads still count");
+        Check(LM::UnsettledBytes(started, 2999) == MB(720), "settle: one ms short of the window");
+        Check(LM::UnsettledBytes(started, 3000) == MB(400) && started.size() == 1, "settle: the older load has landed");
+        Check(LM::UnsettledBytes(started, 4500) == 0 && started.empty(), "settle: nothing left");
     }
 
     // The guard over time.
@@ -83,10 +93,10 @@ int main()
         Check(g.Update(MB(700), 1000, MB(768)) == LM::Change::Raised && g.up, "guard: under the floor raises it");
         Check(g.Update(MB(100), 2000, MB(768)) == LM::Change::None && g.up, "guard: stays up lower still");
         Check(g.Update(MB(900), 3000, MB(768)) == LM::Change::None && g.up, "guard: above the floor is not enough");
-        Check(g.Update(MB(1152), 5000, MB(768)) == LM::Change::None && g.up, "guard: recovered, but up under 10 s");
-        Check(g.Update(MB(1151), 11000, MB(768)) == LM::Change::None && g.up, "guard: 10 s, one MB short of the lift");
+        Check(g.Update(MB(1536), 5000, MB(768)) == LM::Change::None && g.up, "guard: recovered, but up under 10 s");
+        Check(g.Update(MB(1535), 11000, MB(768)) == LM::Change::None && g.up, "guard: 10 s, one MB short of the lift");
         Check(!g.ReloadDue(11000), "guard: up, no reload");
-        Check(g.Update(MB(1152), 11000, MB(768)) == LM::Change::Lifted && !g.up, "guard: 10 s and the margin lift it");
+        Check(g.Update(MB(1536), 11000, MB(768)) == LM::Change::Lifted && !g.up, "guard: 10 s and the margin lift it");
         Check(!g.ReloadDue(11000 + LM::kReloadAfterLiftMs - 1), "reload: down, not long enough");
         Check(g.ReloadDue(11000 + LM::kReloadAfterLiftMs), "reload: down a minute");
         Check(g.Update(MB(900), 12000, MB(768)) == LM::Change::None && !g.up, "guard: above the floor after a lift stays down");
@@ -154,7 +164,7 @@ int main()
               "growth: a file over its maximum gives nothing");
         Check(LM::GrowthRoom(std::vector<PF>{}, plenty) == 0, "growth: no page file");
     }
-    Check(LM::NeedsGrowth(MB(100), MB(768)) && LM::NeedsGrowth(MB(1151), MB(768)) && !LM::NeedsGrowth(MB(1152), MB(768)),
+    Check(LM::NeedsGrowth(MB(100), MB(768)) && LM::NeedsGrowth(MB(1535), MB(768)) && !LM::NeedsGrowth(MB(1536), MB(768)),
           "growth: asked only while the room is short of the lift");
     Check(!LM::NeedsGrowth(0, 0), "growth: never while the guard is off");
     Check(!LM::JobCapped(MB(500), MB(500)) && !LM::JobCapped(MB(500), MB(560)), "job: the same room, or within the tolerance");
