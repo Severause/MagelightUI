@@ -97,7 +97,7 @@ namespace Magelight {
     //   "fontHinting": "normal", "fontGamma": 1.8   // text rasterization: smooth|normal|monochrome|none, gamma 1.0-3.0
     //   "msaa": 4             // GPU path: MSAA samples for page targets Ultralight antialiases (1 = off, 2, 4, 8)
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
-    //   "lowMemoryFloorMB": 768  // 1.8.0: below this much free commit no new page opens or loads (0 = off; LowMemoryCore.h)
+    //   "lowMemoryFloorMB": 320  // 1.8.0: the free commit a 1920x1080 page needs before it loads (0 = off; LowMemoryCore.h)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
     //                         // (and no main-menu pages, 1.7.1)
@@ -327,9 +327,11 @@ namespace Magelight {
     // Magelight.json "memoryLogMinutes" (1.5.0): minutes between the periodic memory lines (TickMemoryReport).
     static std::atomic<int>       s_memLogMinutes{ 10 };
     // Magelight.json "lowMemoryFloorMB" (1.8.0, LowMemoryCore.h). s_lowMemory is the guard: TickLowMemoryGuard writes
-    // it on Ultralight's thread, and any thread reads it.
+    // it on Ultralight's thread, and any thread reads it. s_guardFloorBytes is the guard's own floor, what loading the
+    // largest view needs: the same tick keeps it, and until its first sample it is a 1080p view's.
     static std::atomic<int>       s_lowMemoryFloorMb{ LowMemory::kDefaultFloorMb };
     static std::atomic<bool>      s_lowMemory{ false };
+    static std::atomic<std::uint64_t> s_guardFloorBytes{ LowMemory::LoadNeedBytes(LowMemory::kDefaultFloorMb, 0) };
     // Magelight.json "gamepad" (1.6.0): the gamepad layer's tuning (GamepadCore.h), read before the first input batch.
     static Gamepad::Tuning        s_gamepadTuning;
     static std::atomic<bool> s_renderDead{ false };  // latched on any init failure
@@ -686,8 +688,10 @@ namespace Magelight {
                 s_loadBudgetMs.store(std::clamp(it->get<int>(), 1, 100));
             if (auto it = j.find("memoryLogMinutes"); it != j.end() && it->is_number())
                 s_memLogMinutes.store(static_cast<int>(std::clamp(it->get<double>(), 0.0, 1440.0)));
-            if (auto it = j.find("lowMemoryFloorMB"); it != j.end() && it->is_number())
+            if (auto it = j.find("lowMemoryFloorMB"); it != j.end() && it->is_number()) {
                 s_lowMemoryFloorMb.store(LowMemory::ClampFloorMb(it->get<double>()));
+                s_guardFloorBytes.store(LowMemory::LoadNeedBytes(s_lowMemoryFloorMb.load(), 0));
+            }
             if (auto it = j.find("cursorFile"); it != j.end() && it->is_string())
                 s_cursorFile = it->get<std::string>();
             if (auto it = j.find("cursorHeight"); it != j.end() && it->is_number())
@@ -2326,16 +2330,18 @@ namespace Magelight {
         bool read = false;
         std::uint64_t freeCommit = 0;       // the room left under the commit limit (ullAvailPageFile) + pageFileGrowth
         std::uint64_t pageFileGrowth = 0;   // what the page files can still grow by; 0 when not asked or not known
+        std::uint64_t commitLimit = 0;      // RAM plus the page files' current sizes (ullTotalPageFile)
         std::uint64_t processPrivate = 0;   // the whole game process; 0 when it could not be read
     };
 
     // What the page files can still grow by (LowMemory::GrowthRoom), from NtQuerySystemInformation's page-file list
-    // (SystemPageFileInformationEx, 144: ntdll, undocumented, Windows 8 and later) and each volume's free space; 0 when
-    // Windows does not say (logged once). commitLimit: ullTotalPageFile now; a reading is kept LowMemory::kGrowthCacheMs
-    // while the limit stays, and taken again when it moves (a page file grew or shrank, so the room it is added to
-    // already holds part of the old growth). The layout is logged when it changes. Any thread; a leaf lock held only
-    // over the system calls.
-    static std::uint64_t PageFileGrowthNow(std::uint64_t commitLimit)
+    // (SystemPageFileInformationEx, 144: ntdll, undocumented, Windows 8 and later), the registry's page-file settings
+    // (a file Windows manages gets at least the documented maximum, LowMemory::RaiseSystemManaged) and each volume's
+    // size and free space; 0 when Windows does not say (logged once). commitLimit: ullTotalPageFile now; a reading is
+    // kept LowMemory::kGrowthCacheMs while the limit stays, and taken again when it moves (a page file grew or shrank,
+    // so the room it is added to already holds part of the old growth). The layout is logged when it changes. Any
+    // thread; a leaf lock held only over the system calls.
+    static std::uint64_t PageFileGrowthNow(std::uint64_t commitLimit, std::uint64_t ramBytes)
     {
         static std::mutex s_mx;
         static std::uint64_t s_readAt = 0, s_room = 0, s_limit = 0;
@@ -2395,21 +2401,58 @@ namespace Magelight {
             if (!e->nextEntryOffset) break;
             off += e->nextEntryOffset;
         }
-        std::string unreadDisks;
-        s_room = LowMemory::GrowthRoom(files, [&unreadDisks](wchar_t d) -> std::optional<std::uint64_t> {
-            const wchar_t root[] = { d, L':', L'\\', 0 };
-            ULARGE_INTEGER total{}, free{};
-            if (!GetDiskFreeSpaceExW(root, nullptr, &total, &free)) {
-                unreadDisks += static_cast<char>(d);
-                return std::nullopt;
+        // The registry's list of page-file settings. Zeroed, and read two characters short, so the walk below always
+        // meets the list's end.
+        std::vector<LowMemory::PagingSetting> settings;
+        {
+            wchar_t text[2048] = {};
+            DWORD bytes = sizeof(text) - 2 * sizeof(wchar_t);
+            if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",
+                             L"PagingFiles", RRF_RT_REG_MULTI_SZ, nullptr, text, &bytes) == ERROR_SUCCESS) {
+                for (const wchar_t* p = text; *p; p += wcslen(p) + 1) settings.push_back(LowMemory::ParsePagingSetting(p));
             }
-            return free.QuadPart;
+        }
+        struct Disk {
+            bool asked = false, read = false;
+            std::uint64_t total = 0, free = 0;
+        };
+        Disk disks[26];
+        std::string unreadDisks;
+        const auto disk = [&disks, &unreadDisks](wchar_t d) -> const Disk& {
+            Disk& k = disks[d - L'A'];
+            if (!k.asked) {
+                k.asked = true;
+                const wchar_t root[] = { d, L':', L'\\', 0 };
+                ULARGE_INTEGER total{}, free{};
+                if (GetDiskFreeSpaceExW(root, nullptr, &total, &free)) {
+                    k.read = true;
+                    k.total = total.QuadPart;
+                    k.free = free.QuadPart;
+                } else {
+                    unreadDisks += static_cast<char>(d);
+                }
+            }
+            return k;
+        };
+        std::vector<std::uint64_t> reported;
+        for (const auto& f : files) reported.push_back(f.maximumBytes);
+        LowMemory::RaiseSystemManaged(files, settings, ramBytes, [&disk](wchar_t d) -> std::optional<std::uint64_t> {
+            const Disk& k = disk(d);
+            return k.read ? std::optional<std::uint64_t>(k.total) : std::nullopt;
+        });
+        s_room = LowMemory::GrowthRoom(files, [&disk](wchar_t d) -> std::optional<std::uint64_t> {
+            const Disk& k = disk(d);
+            return k.read ? std::optional<std::uint64_t>(k.free) : std::nullopt;
         });
         constexpr double kGB = 1073741824.0;
         std::string layout;
-        for (const auto& f : files) {
-            layout += fmt::format("{}{}: {:.1f} GB, at most {:.1f} GB", layout.empty() ? "" : "; ",
-                                  f.drive ? static_cast<char>(f.drive) : '?', f.currentBytes / kGB, f.maximumBytes / kGB);
+        for (std::size_t i = 0; i < files.size(); ++i) {
+            const auto& f = files[i];
+            layout += fmt::format("{}{}: {:.1f} GB, at most {:.1f} GB{}", layout.empty() ? "" : "; ",
+                                  f.drive ? static_cast<char>(f.drive) : '?', f.currentBytes / kGB, f.maximumBytes / kGB,
+                                  f.maximumBytes != reported[i]
+                                      ? fmt::format(" (Windows manages its size; it reported {:.1f} GB)", reported[i] / kGB)
+                                      : std::string());
         }
         if (!unreadDisks.empty()) layout += fmt::format("; free space unread on {}", unreadDisks);
         if (layout.empty()) layout = "none";
@@ -2421,10 +2464,57 @@ namespace Magelight {
         return s_room;
     }
 
-    // Any thread: two cheap system calls, and while the room under the commit limit is short of the lift, the system's
-    // own room and PageFileGrowthNow (its leaf lock, system calls only). No growth counts when a job object caps the
-    // game's commit (LowMemory::JobCapped).
-    static MemoryNow ReadMemoryNow()
+    // Windows' own commit events, for the log lines only (LowMemory::CommitEvents). Win32 names do not reach
+    // \KernelObjects, hence ntdll's NtOpenEvent; the handles are opened once and kept. Any thread.
+    static LowMemory::CommitEvents CommitEventsNow()
+    {
+        struct Handles {
+            HANDLE low = nullptr, high = nullptr, maximum = nullptr;
+        };
+        static const Handles s_handles = [] {
+            Handles h;
+            struct UnicodeString {
+                USHORT length, maximumLength;
+                PWSTR buffer;
+            };
+            struct ObjectAttributes {
+                ULONG length;
+                HANDLE rootDirectory;
+                UnicodeString* objectName;
+                ULONG attributes;
+                PVOID securityDescriptor, securityQualityOfService;
+            };
+            using OpenFn = LONG(WINAPI*)(PHANDLE, ULONG, ObjectAttributes*);
+            const auto open = reinterpret_cast<OpenFn>(
+                reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtOpenEvent")));
+            if (!open) return h;
+            const auto one = [open](const wchar_t* name) -> HANDLE {
+                std::wstring path = std::wstring(L"\\KernelObjects\\") + name;
+                UnicodeString us{ static_cast<USHORT>(path.size() * sizeof(wchar_t)),
+                                  static_cast<USHORT>((path.size() + 1) * sizeof(wchar_t)), path.data() };
+                ObjectAttributes oa{ sizeof(ObjectAttributes), nullptr, &us, 0x40 /* OBJ_CASE_INSENSITIVE */, nullptr, nullptr };
+                HANDLE event = nullptr;
+                return open(&event, SYNCHRONIZE, &oa) == 0 ? event : nullptr;
+            };
+            h.low = one(L"LowCommitCondition");
+            h.high = one(L"HighCommitCondition");
+            h.maximum = one(L"MaximumCommitCondition");
+            return h;
+        }();
+        LowMemory::CommitEvents e;
+        if (!s_handles.low || !s_handles.high || !s_handles.maximum) return e;
+        e.known = true;
+        e.low = WaitForSingleObject(s_handles.low, 0) == WAIT_OBJECT_0;
+        e.high = WaitForSingleObject(s_handles.high, 0) == WAIT_OBJECT_0;
+        e.maximum = WaitForSingleObject(s_handles.maximum, 0) == WAIT_OBJECT_0;
+        return e;
+    }
+
+    // Any thread: two cheap system calls, and while the room under the commit limit is short of the guard's lift or of
+    // needBytes (what an open asks, which can be above the lift before the guard's first sample), the system's own
+    // room and PageFileGrowthNow (its leaf lock, system calls only). No growth counts when a job object caps the game's
+    // commit (LowMemory::JobCapped).
+    static MemoryNow ReadMemoryNow(std::uint64_t needBytes = 0)
     {
         MemoryNow out;
         MEMORYSTATUSEX ms{};
@@ -2432,7 +2522,8 @@ namespace Magelight {
         if (!GlobalMemoryStatusEx(&ms)) return out;
         out.read = true;
         out.freeCommit = ms.ullAvailPageFile;
-        if (LowMemory::NeedsGrowth(ms.ullAvailPageFile, s_lowMemoryFloorMb.load())) {
+        out.commitLimit = ms.ullTotalPageFile;
+        if (LowMemory::NeedsGrowth(ms.ullAvailPageFile, s_guardFloorBytes.load()) || ms.ullAvailPageFile < needBytes) {
             PERFORMANCE_INFORMATION pi{};
             pi.cb = sizeof(pi);
             const bool sys = K32GetPerformanceInfo(&pi, sizeof(pi)) != FALSE;
@@ -2440,7 +2531,7 @@ namespace Magelight {
                                               ? static_cast<std::uint64_t>(pi.CommitLimit - pi.CommitTotal) * pi.PageSize
                                               : 0;
             if (sys && !LowMemory::JobCapped(ms.ullAvailPageFile, sysRoom)) {
-                out.pageFileGrowth = PageFileGrowthNow(ms.ullTotalPageFile);
+                out.pageFileGrowth = PageFileGrowthNow(ms.ullTotalPageFile, ms.ullTotalPhys);
                 out.freeCommit += out.pageFileGrowth;
             }
         }
@@ -2451,26 +2542,19 @@ namespace Magelight {
         return out;
     }
 
-    // For the guard's log lines.
+    // For the guard's log lines: what a reporter's log needs to say which case it is (the commit limit, the page
+    // files' growth, the game's share, Windows' own reading).
     static std::string MemoryText(const MemoryNow& m)
     {
         constexpr double kGB = 1073741824.0;
         if (!m.read) return "free commit unread";
-        return fmt::format("{:.2f} GB of commit free{}, the game's private memory {:.1f} GB", m.freeCommit / kGB,
+        return fmt::format("{:.2f} GB of commit free of a {:.1f} GB limit{}, the game's private memory {:.1f} GB, Windows "
+                           "reports commit {}",
+                           m.freeCommit / kGB, m.commitLimit / kGB,
                            m.pageFileGrowth ? fmt::format(" ({:.2f} GB of it the page files can still grow by)",
                                                           m.pageFileGrowth / kGB)
                                             : std::string(),
-                           m.processPrivate / kGB);
-    }
-
-    // The guard is up, or a reading taken now is under the floor: a UI-mode request does not wait up to a second for
-    // the guard's next sample. Any thread.
-    static bool LowMemoryNow(MemoryNow& mem)
-    {
-        const int floorMb = s_lowMemoryFloorMb.load();
-        if (floorMb <= 0) return false;
-        mem = ReadMemoryNow();
-        return s_lowMemory.load() || (mem.read && LowMemory::Below(mem.freeCommit, floorMb));
+                           m.processPrivate / kGB, LowMemory::CommitEventsText(CommitEventsNow()));
     }
 
     // The views a UI mode that is already on needs: its own and the VR keyboard it types with. The guard neither
@@ -2481,18 +2565,61 @@ namespace Magelight {
         return v.id == static_cast<ViewId>(s_uiModeView.load()) || v.id == static_cast<ViewId>(s_kbViewId.load());
     }
 
-    // A UI-mode entry or switch shows its view: while memory is low only a view whose page is already on screen may
-    // take UI mode. Caller holds s_viewsMutex.
+    // A view whose page is already on screen takes UI mode whatever memory says: nothing new is shown. Caller holds
+    // s_viewsMutex.
     static bool OnScreenLocked(const MlView& v) { return v.ul && v.visible && !v.destroyPending; }
+
+    static std::uint64_t ViewPixels(const MlView& v)
+    {
+        return v.w > 0 && v.h > 0 ? static_cast<std::uint64_t>(v.w) * static_cast<std::uint64_t>(v.h) : 0;
+    }
+
+    // What opening a view asks of memory (LowMemory::OpenNeedBytes): nothing when its page is on screen, a show when
+    // its page is built, else a load. No such view counts as a 1080p load. Caller holds s_viewsMutex.
+    struct OpenAsk {
+        bool onScreen = false, loaded = false;
+        std::uint64_t pixels = 0;
+    };
+    static OpenAsk OpenAskLocked(const MlView* v)
+    {
+        OpenAsk ask;
+        if (!v) return ask;
+        ask.onScreen = OnScreenLocked(*v);
+        ask.loaded = v->ul && v->docDomReady && !v->destroyPending;
+        ask.pixels = ViewPixels(*v);
+        return ask;
+    }
+
+    // Whether the open would run short: one reading taken now against what that view needs, whatever the guard says
+    // (it lifts with hysteresis; a page the player asks for opens the moment the memory is there). Any thread; call
+    // it without s_viewsMutex.
+    static bool OpenShortNow(const OpenAsk& ask, MemoryNow& mem, std::uint64_t& needBytes)
+    {
+        const int floorMb = s_lowMemoryFloorMb.load();
+        if (floorMb <= 0 || ask.onScreen) return false;
+        needBytes = LowMemory::OpenNeedBytes(floorMb, ask.loaded, ask.pixels);
+        mem = ReadMemoryNow(needBytes);
+        return mem.read && mem.freeCommit < needBytes;
+    }
 
     // Ultralight's thread only. s_lowMemoryWaited: the views whose load waited while the guard was up, each named once
     // in the log per time it comes up (NoteLowMemoryWait). s_lowMemoryReleased: the views it released that never
-    // hibernate, which load again hidden once memory has been back a while (TickLowMemoryGuard).
+    // hibernate, which load again hidden once memory has been back a while (TickLowMemoryGuard). s_guardSample: the
+    // guard's last reading, at most LowMemory::kSampleMs old (ShownLoadFits).
     // s_rebuiltShown: the shown views ApplyPendingRebuilds released this frame, whose new View MaterializeViews makes
     // whatever the guard says (holding it would leave a shown page blank).
     static std::unordered_set<ViewId> s_lowMemoryWaited;
     static std::set<ViewId> s_lowMemoryReleased;
+    static MemoryNow s_guardSample;
     static std::vector<ViewId> s_rebuiltShown;
+
+    // While the guard is up: a view a mod is showing loads all the same when the guard's last sample covers what its
+    // load needs. Ultralight's thread; caller holds s_viewsMutex.
+    static bool ShownLoadFits(const MlView& v)
+    {
+        return v.visible && s_guardSample.read &&
+               !LowMemory::OpenShort(s_guardSample.freeCommit, s_lowMemoryFloorMb.load(), false, ViewPixels(v));
+    }
 
     static void NoteLowMemoryWait(ViewId id, const char* what)
     {
@@ -3850,17 +3977,21 @@ namespace Magelight {
     {
         if (s_focused.load() == on) return;
         const ViewId uiView = static_cast<ViewId>(s_uiModeView.load());
-        // Low memory: refused unless the view is already on screen (OnScreenLocked). Ahead of a main-menu request,
-        // which would make the view a main-menu page and start the renderer.
-        if (MemoryNow mem; on && LowMemoryNow(mem)) {
-            bool onScreen = false;
+        // Low memory: refused when one reading is short of what the view's page needs (OpenShortNow), unless the view
+        // is already on screen. Ahead of a main-menu request, which would make the view a main-menu page and start
+        // the renderer.
+        if (on && s_lowMemoryFloorMb.load() > 0) {
+            OpenAsk ask;
             {
                 std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-                if (const MlView* v = FindViewLocked(uiView)) onScreen = OnScreenLocked(*v);
+                ask = OpenAskLocked(FindViewLocked(uiView));
             }
-            if (!onScreen) {
-                SKSE::log::warn("Magelight: UI mode refused for view {} - low memory ({}; the floor is {} MB)", uiView,
-                                MemoryText(mem), s_lowMemoryFloorMb.load());
+            MemoryNow mem;
+            std::uint64_t need = 0;
+            if (OpenShortNow(ask, mem, need)) {
+                SKSE::log::warn("Magelight: UI mode refused for view {} - not enough free memory to {} its page ({}; it "
+                                "needs {} MB). Windows' limit is the RAM plus the page file: a larger page file raises it",
+                                uiView, ask.loaded ? "show" : "load", MemoryText(mem), need / LowMemory::kMiB);
                 Emit(HostEvent::UIModeRefused, uiView, 0, 0, "low memory");
                 // The player pressed something and nothing opened: say why, at most every 30 s. Game thread only.
                 static std::uint64_t s_lastNotice = 0;
@@ -3869,7 +4000,7 @@ namespace Magelight {
                     s_lastNotice = now;
                     GameTask::Post([]() {
                         RE::SendHUDMessage::ShowHUDMessage(
-                            "Magelight UI: Windows is nearly out of memory - the page was not opened");
+                            "Magelight UI: the page was not opened - Windows' memory limit (RAM + page file) is reached");
                     });
                 }
                 return;
@@ -6960,10 +7091,11 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (v.ul || v.w <= 0 || v.h <= 0 || v.destroyPending) continue;
             if (!v.mainMenu && !s_viewsReleased.load()) continue;      // loads at the first in-game frame
             if ((v.dormant || v.loadOnShow) && !v.visible) continue;   // wakes / first loads on ShowView(true)
-            // Low memory: the record stays and loads once memory is back, but for a view UI mode needs and a shown view
-            // a rebuild released this frame.
+            // Low memory: the record stays and loads once memory is back, but for a view UI mode needs, a shown view
+            // a rebuild released this frame, and a view a mod is showing whose load fits (ShownLoadFits).
             if (lowMemory && !NeededByUIMode(v) &&
-                std::find(s_rebuiltShown.begin(), s_rebuiltShown.end(), v.id) == s_rebuiltShown.end()) {
+                std::find(s_rebuiltShown.begin(), s_rebuiltShown.end(), v.id) == s_rebuiltShown.end() &&
+                !ShownLoadFits(v)) {
                 NoteLowMemoryWait(v.id, v.dormant ? "wake" : "first load");
                 continue;
             }
@@ -8883,8 +9015,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         constexpr double kGB = 1073741824.0;
         SKSE::log::info("Magelight: memory ({}) - {}; views {} live, {} hibernated, {} not loaded{}{}{}; read in {:.1f} ms",
                         why, MemoryReport::Line(f), live, dormant, notLoaded, msaa,
-                        haveSys ? fmt::format("; system RAM {:.1f} of {:.1f} GB free, commit {:.1f} GB free",
-                                              ms.ullAvailPhys / kGB, ms.ullTotalPhys / kGB, ms.ullAvailPageFile / kGB)
+                        haveSys ? fmt::format("; system RAM {:.1f} of {:.1f} GB free, commit {:.1f} of {:.1f} GB free "
+                                              "(Windows reports commit {})",
+                                              ms.ullAvailPhys / kGB, ms.ullTotalPhys / kGB, ms.ullAvailPageFile / kGB,
+                                              ms.ullTotalPageFile / kGB, LowMemory::CommitEventsText(CommitEventsNow()))
                                 : std::string(),
                         s_lowMemory.load() ? "; low-memory guard up" : "", reportMs);
         // A later SDK that reshaped the report gets the raw text once, so the parser can follow it.
@@ -8896,7 +9030,8 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // Ultralight's thread, in PageWorkBegin before hibernation and materialization: free commit once a second
-    // (kSampleMs), the guard raised below the floor and lifted with hysteresis (LowMemoryCore.h), one line each way;
+    // (kSampleMs), the guard raised below what loading the largest view needs (s_guardFloorBytes) and lifted with
+    // hysteresis (LowMemoryCore.h), one line each way;
     // then, once the guard has been down long enough (Guard::ReloadDue, a minute that grows each time the reload
     // brought it back), the views it released that never hibernate load again, hidden, through the load queue
     // (MaterializeViews), as they would have stayed loaded without it.
@@ -8909,18 +9044,28 @@ float4 ps_straight(VSOut i) : SV_Target {
         const std::uint64_t now = GetTickCount64();
         if (now < s_nextSample) return;
         s_nextSample = now + LowMemory::kSampleMs;
+        std::uint64_t largest = 0;
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            for (const auto& vp : s_views)
+                if (!vp->destroyPending) largest = std::max(largest, ViewPixels(*vp));
+        }
+        const std::uint64_t floorBytes = LowMemory::LoadNeedBytes(floorMb, largest);
+        s_guardFloorBytes.store(floorBytes);
         const MemoryNow mem = ReadMemoryNow();
+        s_guardSample = mem;
         if (!mem.read) return;
-        switch (s_guard.Update(mem.freeCommit, now, floorMb)) {
+        switch (s_guard.Update(mem.freeCommit, now, floorBytes)) {
         case LowMemory::Change::Raised:
             s_lowMemory.store(true);
-            SKSE::log::warn("Magelight: low memory - {} (the floor is {} MB). Until it recovers no page opens, loads or "
-                            "prepaints, and hidden views are released; pages already shown stay up",
-                            MemoryText(mem), floorMb);
+            SKSE::log::warn("Magelight: low memory - {} (under the {} MB the largest page needs to load). Until it "
+                            "recovers hidden views are released and nothing loads or prepaints in the background; a "
+                            "page that is asked for still opens while its own need fits, and pages already shown stay up",
+                            MemoryText(mem), floorBytes / LowMemory::kMiB);
             break;
         case LowMemory::Change::Lifted:
             s_lowMemory.store(false);
-            SKSE::log::info("Magelight: memory recovered - {}; pages open and load again ({} views waited)",
+            SKSE::log::info("Magelight: memory recovered - {}; background loads go on ({} views waited)",
                             MemoryText(mem), s_lowMemoryWaited.size());
             s_lowMemoryWaited.clear();
             break;
@@ -11977,10 +12122,17 @@ float4 ps_straight(VSOut i) : SV_Target {
                 Emit(HostEvent::UIModeRefused, view, 0, 0, "switch: UI mode is not active");
                 return;
             }
+            // Whether the view's page would run short of memory (OpenShortNow), read before anything changes for it.
+            OpenAsk ask;
+            {
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+                ask = OpenAskLocked(FindViewLocked(view));
+            }
             MemoryNow mem;
-            const bool lowMemory = LowMemoryNow(mem);
-            // As a request at the main menu: the view it moves to becomes a main-menu page. Not while memory is low,
-            // when a view not already shown is refused below and must not load at the main menu later for it.
+            std::uint64_t need = 0;
+            const bool lowMemory = OpenShortNow(ask, mem, need);
+            // As a request at the main menu: the view it moves to becomes a main-menu page. Not while its page would
+            // run short, when the view is refused below and must not load at the main menu later for it.
             if (s_mainMenuOpen.load() && MainMenuPagesAvailable() && !lowMemory) SetViewMainMenu(view, true);
             const char* refusal = nullptr;
             bool refusedForMemory = false, holderOnScreen = true;
@@ -12008,7 +12160,9 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             if (refusal) {
                 SKSE::log::warn("Magelight: SwitchUIModeView({}) — {}{}", view, refusal,
-                                refusedForMemory ? " (" + MemoryText(mem) + ")" : std::string());
+                                refusedForMemory ? fmt::format(" ({}; its page needs {} MB)", MemoryText(mem),
+                                                               need / LowMemory::kMiB)
+                                                 : std::string());
                 Emit(HostEvent::UIModeRefused, view, 0, 0, refusal);
                 // A reclaim's switch withdrew the holder's own release, which hid its view: UI mode is never left
                 // holding the controls over a hidden view, so that release runs after all.

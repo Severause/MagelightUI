@@ -822,24 +822,34 @@ api->RequestUIMode(barterView, MAGELIGHT_API::kUIModeFlagPause);
 ## When the game runs low on memory (1.8.0)
 
 Free commit is the room left under Windows' commit limit, which the game shares with every other program, plus (from
-1.8.1) what the page files can still grow by, up to their maximum and their disk's free space less 1 GB. When it
-falls below the player's `lowMemoryFloorMB` (768 MB unless they changed it), the host shows and loads nothing new for
-Ultralight until memory recovers. An allocation that fails inside Ultralight throws through code Magelight cannot
-see, and the overlay then turns itself off for the session (`RenderDead`); the guard keeps that throw from happening.
-While it is up:
+1.8.1) what the page files can still grow by, up to their maximum and their disk's free space less 1 GB. An
+allocation that fails inside Ultralight throws through code Magelight cannot see, and the overlay then turns itself
+off for the session (`RenderDead`). The host keeps that throw from happening, in two ways (1.8.1; in 1.8.0 one floor
+did both, and nothing opened while the guard was up).
 
-- A UI-mode entry is refused unless its view is already on screen (loaded and shown, as after `ReleaseUIMode` without
-  a hide): `RequestUIMode` returns `Ok` as before, then `UIModeRefused` arrives with the detail `low memory` (Papyrus:
-  `Magelight_UIModeRefused` with `modId|low memory`), and the player gets a HUD line, at most one every 30 s. Handle
-  it as any refusal; asking again works once memory is back. A `kUIModeFlagQueue` request whose turn comes then is
-  refused the same way, and the next one in the queue gets its turn. A switch to another of your views (a reclaim
-  included) is refused with `switch: low memory` unless that view is on screen. UI mode then stays where it was,
-  unless the view holding it is hidden (a reclaim whose release hid it): then it ends, with `UIModeExited`.
-- A view's first load and a hibernated view's wake wait until memory is back. Your calls to the view stay queued, as
-  during any load; no event says it waits, and `ViewDomReady` arrives when it lands. A view shown meanwhile draws
-  nothing until then. The view holding UI mode and the VR keyboard load as usual, and so does the new View of a
-  shown view you rebuild (`RebuildViewAtScale`). `Navigate` and `ReloadView` on a loaded page run as usual: they
-  replace the page in its own View.
+**A page that is asked for opens when its own need fits.** The player's `lowMemoryFloorMB` (320 MB unless they
+changed it) is what a page on a 1920x1080 view needs before it loads. Showing a page that is already built needs two
+fifths of that (128 MB), and both grow with the view's pixel count. One reading is taken when the page is asked for:
+
+- A UI-mode entry whose view is not already on screen (loaded and shown, as after `ReleaseUIMode` without a hide) is
+  refused when free commit is under that need: `RequestUIMode` returns `Ok` as before, then `UIModeRefused` arrives
+  with the detail `low memory` (Papyrus: `Magelight_UIModeRefused` with `modId|low memory`), and the player gets a
+  HUD line, at most one every 30 s. Handle it as any refusal; asking again works the moment the memory is there. A
+  `kUIModeFlagQueue` request whose turn comes then is refused the same way, and the next one in the queue gets its
+  turn. A switch to another of your views (a reclaim included) is refused with `switch: low memory` unless that view
+  is on screen. UI mode then stays where it was, unless the view holding it is hidden (a reclaim whose release hid
+  it): then it ends, with `UIModeExited`.
+- A view you show without UI mode loads when its load fits the guard's last reading (at most a second old), whether
+  or not the guard is up.
+
+**The guard gives memory back.** It comes up when free commit falls below what the largest view needs to load, and
+while it is up:
+
+- The first load of a hidden view and everything else in the background waits until memory is back. Your calls to
+  the view stay queued, as during any load; no event says it waits, and `ViewDomReady` arrives when it lands. A shown
+  view whose load does not fit draws nothing until then. The view holding UI mode and the VR keyboard load as usual,
+  and so does the new View of a shown view you rebuild (`RebuildViewAtScale`). `Navigate` and `ReloadView` on a
+  loaded page run as usual: they replace the page in its own View.
 - Hidden views are released as hibernation releases them, whether or not you called `SetViewHibernate`, once their
   page has reached DOM ready and they have been hidden 2 s (a view never shown since it loaded, at once). A
   released view whose page you set to hibernate comes back when shown, as after hibernation. One you never set to
@@ -851,8 +861,8 @@ While it is up:
 - No page is prepainted.
 - Views already shown stay up and keep painting.
 
-The guard lifts once free commit is back above the floor by half the floor (at least 256 MB) and it has been up
-10 s. The log has a line each way. `lowMemoryFloorMB` `0` turns the guard off.
+The guard lifts once free commit is back above its floor by half of it (at least 256 MB) and it has been up 10 s. The
+log has a line each way. `lowMemoryFloorMB` `0` turns both off.
 
 ## A gamepad (1.6.0)
 
