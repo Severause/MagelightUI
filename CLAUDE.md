@@ -1,7 +1,7 @@
 # Magelight UI — Claude Code Project Instructions
 
 Magelight is a GPU-rendered web UI host for Skyrim SE/AE and VR: an SKSE plugin that
-hooks `IDXGISwapChain::Present`, runs Ultralight 2.0 (2.0.0-beta.2 Free, WebKit 615) on the game's D3D11 device
+hooks `IDXGISwapChain::Present`, runs Ultralight 2.0 (2.0.0-beta.3 Free, WebKit 615) on the game's D3D11 device
 through our own driver DLL, composites views over the game, routes input, and
 exposes a versioned C ABI (`api/MagelightUI_API.h`) that other SKSE plugins consume. The
 first consumer is SeverActions; the goal is a public framework.
@@ -308,8 +308,8 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     cannot go on without the font of `FontLoader::fallback_font()`: Ultralight 1.4
     dereferenced it without a null check (an access violation inside a frame,
     and the overlay off for the session: 0.31.2 field log, `MgWCore.dll
-    +0xFB7F77`, a PC where Arial could not be loaded), and 2.0.0-beta.2 fails a
-    check there and stops at a breakpoint (`WebCore.dll +0x10113F` offline). The font loader is
+    +0xFB7F77`, a PC where Arial could not be loaded), and 2.0.0-beta.3 fails a
+    check there and stops at a breakpoint (`WebCore.dll +0x14F1E59` offline). The font loader is
     `MagelightFonts::CreateLoader`'s, never the bare platform one: it checks the
     last resort at startup and serves the bundled DejaVu Sans when nothing else
     loads. `tools/font-test` reproduces the crash on the stock loader, on the game's stack and, with

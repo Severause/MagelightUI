@@ -5,7 +5,7 @@ and check rendering changes in the desktop harness before asking for a game test
 
 ## Building the host
 
-1. Put the Ultralight SDK (the build of record, 2.0.0-beta.2 Free) in `extern/ultralight/` — see
+1. Put the Ultralight SDK (the build of record, 2.0.0-beta.3 Free) in `extern/ultralight/` — see
    [extern/README.md](extern/README.md) (third-party binaries and sources, never committed).
 2. Install standalone vcpkg (`git clone https://github.com/microsoft/vcpkg C:\vcpkg`, then
    `C:\vcpkg\bootstrap-vcpkg.bat`), or set `VCPKG_ROOT` to an existing standalone one;
@@ -21,7 +21,7 @@ and check rendering changes in the desktop harness before asking for a game test
 
 ### The Ultralight SDK pin
 
-`build.ps1` builds only against the SDK build of record, `2.0.0-beta.2` (`VERSION.txt` in
+`build.ps1` builds only against the SDK build of record, `2.0.0-beta.3` (`VERSION.txt` in
 the SDK):
 
 - **Locally**, any other SDK is refused. Copy a verified `extern/ultralight/` from a machine

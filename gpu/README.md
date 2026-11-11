@@ -1,7 +1,7 @@
 # gpu/ — the Magelight GPU backend (MagelightGPU.dll)
 
 **License: Zlib** (the notice is reproduced at the top of `MagelightGpuDriver.cpp`). This component is
-adapted from the Direct3D 11 reference GPUDriver that ships as source in the **Ultralight 2.0.0-beta.2 SDK**
+adapted from the Direct3D 11 reference GPUDriver that ships as source in the **Ultralight 2.0.0-beta.3 SDK**
 (`platform/src/GPUDriver.cpp`, `platform/src/gpu/d3d11/GPUDriverD3D11.cpp`,
 `platform/src/gpu/d3d11/GPUContextD3D11.cpp`; Copyright (c) 2026 Ultralight, Inc.). It is an altered version
 of that source: the changes are marked `// MG:` and listed below.

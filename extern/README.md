@@ -2,11 +2,11 @@
 
 ## ultralight/ (not committed)
 
-The Ultralight SDK, build of record **2.0.0-beta.2 (Free)**: `VERSION.txt` inside the SDK must
-read `2.0.0-beta.2`, and `build.ps1` refuses any other build, so moving to another one is a
+The Ultralight SDK, build of record **2.0.0-beta.3 (Free)**: `VERSION.txt` inside the SDK must
+read `2.0.0-beta.3`, and `build.ps1` refuses any other build, so moving to another one is a
 deliberate edit of that pin (see "The Ultralight SDK pin" in [CONTRIBUTING.md](../CONTRIBUTING.md)).
-Extract the Windows x64 Free SDK (`ul-sdk-2.0.0-beta.2-win-x64-free.7z` from https://ultralig.ht/download,
-SHA-256 `e17b3ca2f3c2063f1d14971e7ef756f28e71f2d426a91d2e21c5236d2dc67e6d`) so that
+Extract the Windows x64 Free SDK (`ul-sdk-2.0.0-beta.3-win-x64-free.7z` from https://ultralig.ht/download,
+SHA-256 `2f35c93cfe898c960225eea9e8135594e7aca1617c4efdb94e9de1319b881994`) so that
 `extern/ultralight/VERSION.txt` exists, or make `extern/ultralight` a junction to an extracted copy.
 Once Ultralight stops offering this build, the archive kept with the release records
 (RELEASING.md section 2) is the way to it.

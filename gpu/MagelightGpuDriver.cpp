@@ -150,10 +150,8 @@ namespace mggpu {
 
         void UpdateCommandList(const CommandList& list) override
         {
-            if (list.size) {
-                command_list_.resize(list.size);
-                std::memcpy(command_list_.data(), list.commands, sizeof(Command) * list.size);
-            }
+            // Appended: every list given before DrawCommandList runs, in order (two Render() calls in one frame).
+            if (list.size) command_list_.insert(command_list_.end(), list.commands, list.commands + list.size);
         }
 
     protected:
@@ -674,8 +672,8 @@ namespace mggpu {
             }
             const bool is_render_target = (flags & kGPUTextureFlag_RenderTarget) != 0;
             const bool is_compressed = bitmap->is_compressed();
-            // A block-compressed texture is always immutable (its content path cannot be mapped).
-            const bool use_immutable = (flags & kGPUTextureFlag_Immutable) || is_compressed;
+            // Only the flag selects immutable storage: the engine updates a block-compressed image source in place.
+            const bool use_immutable = (flags & kGPUTextureFlag_Immutable) != 0;
             const BitmapFormat format = bitmap->format();
             if (!(format == BitmapFormat::BGRA8_UNORM_SRGB || format == BitmapFormat::A8_UNORM
                   || format == BitmapFormat::RG8_UNORM || IsDataPageFormat(format) || is_compressed)) {
@@ -780,8 +778,11 @@ namespace mggpu {
                 return;
             }
             const IntRect full = { 0, 0, static_cast<int>(bitmap->width()), static_cast<int>(bitmap->height()) };
-            const IntRect rect = dirty_rect.IsValid() ? dirty_rect.Intersect(full) : full;
+            IntRect rect = dirty_rect.IsValid() ? dirty_rect.Intersect(full) : full;
             if (!rect.IsValid()) return;
+            // A dirty rect inside a block-compressed bitmap need not fall on block edges.
+            if (bitmap->is_compressed()) rect = full;
+            const BitmapFormatInfo info = GetBitmapFormatInfo(bitmap->format());
 
             auto pixels = bitmap->LockPixelsSafe();
             if (!pixels.data()) return;
@@ -792,7 +793,8 @@ namespace mggpu {
             // origin instead (Microsoft's documented workaround; tools/deferred-test's upload case on WARP).
             const uint8_t* src = static_cast<const uint8_t*>(pixels.data());
             if (!context_->deferred() || context_->native_lists())
-                src += static_cast<size_t>(rect.top) * bitmap->row_bytes() + static_cast<size_t>(rect.left) * bitmap->bpp();
+                src += static_cast<size_t>(rect.top) / info.block_height * bitmap->row_bytes()
+                       + static_cast<size_t>(rect.left) / info.block_width * info.block_bytes;
             const ScopedNoPredication no_predication(context_->immediate_context());   // MG: a no-op on a deferred one
             context_->immediate_context()->UpdateSubresource(entry.texture.Get(), 0, &box, src,
                                                              static_cast<UINT>(bitmap->row_bytes()), 0);

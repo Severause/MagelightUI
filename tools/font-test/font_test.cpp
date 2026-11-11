@@ -230,7 +230,7 @@ namespace
     // fails a check and stops at a breakpoint. The offset moves with the SDK build.
     bool LastResortCrash(const Result& r)
     {
-        return r.code == EXCEPTION_BREAKPOINT && r.out.find("at WebCore.dll +0x10113F") != std::string::npos &&
+        return r.code == EXCEPTION_BREAKPOINT && r.out.find("at WebCore.dll +0x14F1E59") != std::string::npos &&
                r.out.find("lastResortFallbackFont failed to create font") != std::string::npos;
     }
 }
@@ -276,11 +276,11 @@ int main(int argc, char** argv)
               "normal system: an unknown family, Times New Roman and Arial measure the same wrapped and stock");
         check(!Near(safeNormal.w[1], safeNormal.w[3]), "normal system: 'Magelight Fallback' is a font of its own when wrapped");
     }
-    check(LastResortCrash(stockStripped), "no fonts at all: the stock loader fails its last-resort check at WebCore.dll +0x10113F");
+    check(LastResortCrash(stockStripped), "no fonts at all: the stock loader fails its last-resort check at WebCore.dll +0x14F1E59");
     check(safeStripped.code == 0 && safeStripped.w.size() == 5, "no fonts at all: the wrapped loader renders");
     if (safeStripped.w.size() == 5 && safeNormal.w.size() == 5)
         check(Near(safeStripped.w[0], safeNormal.w[1]), "no fonts at all: text falls back to the bundled font");
-    check(LastResortCrash(stockBadpath), "unreadable font files: the stock loader fails its last-resort check at WebCore.dll +0x10113F");
+    check(LastResortCrash(stockBadpath), "unreadable font files: the stock loader fails its last-resort check at WebCore.dll +0x14F1E59");
     check(safeBadpath.code == 0 && safeBadpath.w.size() == 5, "unreadable font files: the wrapped loader renders");
     if (safeBadpath.w.size() == 5 && safeNormal.w.size() == 5)
         check(Near(safeBadpath.w[0], safeNormal.w[1]), "unreadable font files: text falls back to the bundled font");

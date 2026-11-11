@@ -38,11 +38,11 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1 -Version X.Y.Z
 ```
 
 - `extern/ultralight/` is not in git. Fetch it per `extern/README.md`; `build.ps1` refuses any
-  SDK whose `extern/ultralight/VERSION.txt` is not the pinned build of record (`2.0.0-beta.2`,
+  SDK whose `extern/ultralight/VERSION.txt` is not the pinned build of record (`2.0.0-beta.3`,
   the Free edition). Ultralight may stop offering a build once newer ones are out, so keep the
-  archive (`ul-sdk-2.0.0-beta.2-win-x64-free.7z`, SHA-256
-  `e17b3ca2f3c2063f1d14971e7ef756f28e71f2d426a91d2e21c5236d2dc67e6d`) with the release records.
-- **CI's SDK is the Actions cache entry `ultralight-sdk-2.0.0-beta.2`**, saved by a passing run
+  archive (`ul-sdk-2.0.0-beta.3-win-x64-free.7z`, SHA-256
+  `2f35c93cfe898c960225eea9e8135594e7aca1617c4efdb94e9de1319b881994`) with the release records.
+- **CI's SDK is the Actions cache entry `ultralight-sdk-2.0.0-beta.3`**, saved by a passing run
   on `main` and restored by every branch and pull request. GitHub removes a cache that goes
   unused for seven days (or when the repository's caches pass their size limit); the fetch step
   then asks Ultralight's release API for the pinned archive and checks its SHA-256 before
