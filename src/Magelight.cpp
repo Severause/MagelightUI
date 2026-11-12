@@ -10035,6 +10035,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         GameBookkeeping();
         TickImageProbe();
         std::vector<std::unique_ptr<PagePacket>> packets = s_pageHandoff->TakeAll();
+        const bool gotNew = !packets.empty();   // read here: pageGpu async moves the packets on before the cost line
         // The views wanted now, read here rather than from the page frame: one hidden since (Escape, a mod's hide) is
         // not drawn even when the page thread is slow or stuck in a script (it never runs script under the registry's
         // lock, invariant 16). Read before Go, while a page thread that finished its frame is waiting and the lock is
@@ -10144,7 +10145,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         acc.composite += MsBetween(tExecuted, tEnd);
         acc.worst = (std::max)(acc.worst, MsBetween(t0, tEnd));
         ++acc.frames;
-        if (packets.empty()) ++acc.withoutNew;
+        if (!gotNew) ++acc.withoutNew;
         if (acc.last == ClockT::time_point{}) {
             acc.last = tEnd;
             acc.pageFramesAtLast = s_pageFrames.load();
