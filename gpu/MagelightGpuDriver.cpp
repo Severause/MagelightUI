@@ -37,8 +37,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+#include <chrono>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -48,6 +51,8 @@
 #include <Ultralight/Bitmap.h>
 #include <Ultralight/Matrix.h>
 #include <Ultralight/platform/GPUDriver.h>
+// The async path's recorder (contract 4): the SDK's platform headers, its sources built in place (CMakeLists.txt).
+#include <Platform/GPUDriverAsync.h>
 
 #include "MagelightGpuApi.h"
 
@@ -890,6 +895,87 @@ namespace mggpu {
 
         void DestroyGeometry(uint32_t geometry_id) override { geometry_.erase(geometry_id); }
 
+        // ── MG, contract 4: what the async path's replay calls (the game thread, the immediate context) ─────────
+
+        // The rows of `rect` alone, `pitch` bytes apart: a recorded UpdateTexture carries its box, not the bitmap.
+        void UpdateTextureRows(uint32_t texture_id, const IntRect& rect, const void* rows, size_t pitch)
+        {
+            auto i = textures_.find(texture_id);
+            if (i == textures_.end()) {
+                LogErrorOnce("MgGpu: async UpdateTexture, texture id doesn't exist");
+                return;
+            }
+            auto& entry = i->second;
+            if (entry.is_immutable || entry.is_external || entry.is_render_target || !entry.texture) {
+                LogErrorOnce("MgGpu: async UpdateTexture, texture cannot be updated (immutable, external or render target)");
+                return;
+            }
+            D3D11_TEXTURE2D_DESC desc{};
+            entry.texture->GetDesc(&desc);
+            if (!rows || !rect.IsValid() || rect.left < 0 || rect.top < 0 || static_cast<UINT>(rect.right) > desc.Width
+                || static_cast<UINT>(rect.bottom) > desc.Height || pitch > UINT_MAX) {
+                LogErrorOnce("MgGpu: async UpdateTexture, the box lies outside the texture");
+                return;
+            }
+            const D3D11_BOX box = { static_cast<UINT>(rect.left), static_cast<UINT>(rect.top), 0,
+                                    static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom), 1 };
+            const ScopedNoPredication no_predication(context_->immediate_context());
+            context_->immediate_context()->UpdateSubresource(entry.texture.Get(), 0, &box, rows, static_cast<UINT>(pitch), 0);
+        }
+
+        // Buffers that keep their contents: the recorder writes ranges into them (WriteGeometryRange) and the draws
+        // read bytes an earlier frame wrote, so they are never mapped with a discard as UpdateGeometry's are.
+        bool CreateGeometryStorage(uint32_t geometry_id, VertexBufferFormat format, uint32_t vertex_capacity,
+                                   uint32_t index_capacity)
+        {
+            if (geometry_.find(geometry_id) != geometry_.end()) {
+                LogErrorOnce("MgGpu: async CreateGeometry, geometry id already exists");
+                return false;
+            }
+            GeometryEntry geometry;
+            geometry.format = format;
+            if (!CreateDefaultBuffer(D3D11_BIND_VERTEX_BUFFER, vertex_capacity, geometry.vertexBuffer)
+                || !CreateDefaultBuffer(D3D11_BIND_INDEX_BUFFER, index_capacity, geometry.indexBuffer))
+                return false;
+            geometry.vertex_capacity = vertex_capacity;
+            geometry.index_capacity = index_capacity;
+            geometry_.insert({ geometry_id, std::move(geometry) });
+            return true;
+        }
+
+        void WriteGeometryRange(uint32_t geometry_id, bool indices, uint32_t offset, const void* data, size_t size)
+        {
+            if (!data || !size) return;
+            auto i = geometry_.find(geometry_id);
+            if (i == geometry_.end()) {
+                LogErrorOnce("MgGpu: async UpdateGeometry, geometry id doesn't exist");
+                return;
+            }
+            ID3D11Buffer* buffer = indices ? i->second.indexBuffer.Get() : i->second.vertexBuffer.Get();
+            const uint32_t capacity = indices ? i->second.index_capacity : i->second.vertex_capacity;
+            if (!buffer || static_cast<uint64_t>(offset) + size > capacity) {
+                LogErrorOnce("MgGpu: async UpdateGeometry, the range lies outside the buffer");
+                return;
+            }
+            const D3D11_BOX box = { offset, 0, 0, offset + static_cast<UINT>(size), 1, 1 };
+            const ScopedNoPredication no_predication(context_->immediate_context());
+            context_->immediate_context()->UpdateSubresource(buffer, 0, &box, data, 0, 0);
+        }
+
+        // One recorded frame's commands, with the game's state saved and put back around them as for any list.
+        void DrawCommands(const Command* commands, size_t count)
+        {
+            if (!commands || !count) return;
+            command_list_.assign(commands, commands + count);
+            DrawCommandList();
+        }
+
+        // An external texture under an id the recorder handed out (RegisterExternal draws on this driver's counter).
+        void RegisterExternalAt(uint32_t texture_id, ID3D11ShaderResourceView* srv)
+        {
+            if (texture_id && srv) SetExternal(textures_[texture_id], srv);
+        }
+
         void GetDeviceCaps(GPUDeviceCaps& caps) override { context_->FillCaps(caps); }
 
         void BindTexture(uint8_t texture_unit, uint32_t texture_id) override
@@ -1254,6 +1340,29 @@ namespace mggpu {
                 && !std::memcmp(a.clip, b.clip, num_clips * sizeof(a.clip[0]));
         }
 
+        // MG, contract 4: see CreateGeometryStorage.
+        bool CreateDefaultBuffer(UINT bind, uint32_t capacity, ComPtr<ID3D11Buffer>& out)
+        {
+            out.Reset();
+            if (!capacity) {
+                LogErrorOnce("MgGpu: async CreateGeometry, a buffer of no size");
+                return false;
+            }
+            D3D11_BUFFER_DESC desc;
+            ZeroMemory(&desc, sizeof(desc));
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.ByteWidth = capacity;
+            desc.BindFlags = bind;
+            const HRESULT hr = context_->device()->CreateBuffer(&desc, nullptr, out.GetAddressOf());
+            if (FAILED(hr)) {
+                LogFailure(bind == D3D11_BIND_VERTEX_BUFFER ? "async CreateGeometry (vertex buffer)"
+                                                            : "async CreateGeometry (index buffer)",
+                           hr, context_->device());
+                return false;
+            }
+            return true;
+        }
+
         bool CreateDynamicBuffer(UINT bind, const void* data, uint32_t size, ComPtr<ID3D11Buffer>& out,
                                  uint32_t& capacity)
         {
@@ -1605,6 +1714,240 @@ namespace mggpu {
         MgGpuStats stats_{};  // MG: live counts (Account) and creation totals; the flush count is the base's
     };
 
+    // ── The async path (MG, contract 4) ─────────────────────────────────────────
+    // The SDK's recorder (platform::GPUDriverAsync, built in place from platform/src/gpu/async) is the driver
+    // Ultralight sees: on the thread that owns Ultralight every driver call becomes part of a GPUFrame, and no
+    // Direct3D call is made there. The game thread replays the frames in order on the driver above, on the
+    // immediate context, within a budget (Drain). Frames are never dropped or reordered: each builds on the last.
+    class AsyncPath {
+    public:
+        explicit AsyncPath(GPUDriverD3D11* sync) : sync_(sync)
+        {
+            platform::GPUDriverAsync::Options options;
+            sync_->GetDeviceCaps(options.caps);   // read once by Ultralight: the sample count is set before this
+            recorder_ = std::make_unique<platform::GPUDriverAsync>(options);
+            stats_ = sync_->Stats();
+        }
+        ~AsyncPath()
+        {
+            current_ = platform::GPUFrame();   // a frame goes before the recorder that pools its memory
+            recorder_.reset();
+            for (auto& op : external_)
+                if (op.srv) op.srv->Release();
+        }
+        AsyncPath(const AsyncPath&) = delete;
+        AsyncPath& operator=(const AsyncPath&) = delete;
+
+        ultralight::GPUDriver* recorder() { return recorder_.get(); }
+
+        // Any thread.
+        void State(MgGpuAsyncState& s) const
+        {
+            s.ready = recorder_->ready_for_frame() ? 1u : 0u;
+            s.framesInFlight = recorder_->frames_in_flight();
+            s.lastQueued = recorder_->last_queued_frame_id();
+            s.lastExecuted = lastExecuted_.load();
+            s.memoryInUse = recorder_->memory_in_use();
+        }
+        MgGpuStats Stats() const
+        {
+            std::lock_guard<std::mutex> lk(statsMutex_);
+            return stats_;
+        }
+
+        // Any thread (the thread that owns Ultralight registers a mod's images): the id now, the entry once every
+        // frame queued before this call has run, so no frame meets an SRV that came after it.
+        uint32_t RegisterExternal(ID3D11ShaderResourceView* srv)
+        {
+            if (!srv) return 0;
+            const uint32_t id = recorder_->NextTextureId();
+            QueueExternal(ExternalOp::Kind::Register, id, srv);
+            return id;
+        }
+        bool SetExternalSRV(uint32_t texture_id, ID3D11ShaderResourceView* srv)
+        {
+            if (!texture_id || !srv) return false;
+            QueueExternal(ExternalOp::Kind::Set, texture_id, srv);
+            return true;
+        }
+        void UnregisterExternal(uint32_t texture_id)
+        {
+            if (texture_id) QueueExternal(ExternalOp::Kind::Unregister, texture_id, nullptr);
+        }
+
+        // Game thread. Runs queued frames in order until none is left or the budget is spent (0 = no limit); the
+        // first operation of a call always runs, and a frame the budget cut short resumes at its next operation.
+        // Returns the id of the last frame run completely.
+        uint64_t Drain(double maxMs, uint64_t maxBytes)
+        {
+            Budget budget{ std::chrono::steady_clock::now(), maxMs, maxBytes };
+            for (;;) {
+                if (!current_) {
+                    ApplyExternal();
+                    if (!recorder_->TryDequeue(current_)) break;
+                    stage_ = kTextures;
+                    index_ = 0;
+                }
+                if (!RunCurrent(budget)) break;
+                lastExecuted_.store(current_.id());
+                current_ = platform::GPUFrame();
+            }
+            if (!current_) ApplyExternal();
+            {
+                std::lock_guard<std::mutex> lk(statsMutex_);
+                stats_ = sync_->Stats();
+            }
+            return lastExecuted_.load();
+        }
+
+    private:
+        struct ExternalOp {
+            enum class Kind { Register, Set, Unregister } kind;
+            uint32_t id;
+            ID3D11ShaderResourceView* srv;   // holds a reference until it is applied
+            uint64_t after;                  // the last frame queued when it was asked for
+        };
+        struct Budget {
+            std::chrono::steady_clock::time_point t0;
+            double maxMs;
+            uint64_t maxBytes;
+            uint64_t bytes = 0;
+            bool any = false;
+            bool Allow(uint64_t opBytes)
+            {
+                if (any) {
+                    if (maxBytes && bytes >= maxBytes) return false;
+                    if (maxMs > 0.0
+                        && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() >= maxMs)
+                        return false;
+                }
+                any = true;
+                bytes += opBytes;
+                return true;
+            }
+        };
+        // A frame's order (GPUDriverAsync.h): creates and updates, then its commands, then the destroys.
+        enum Stage { kTextures, kRenderBuffers, kGeometry, kCommands, kDestroyTextures, kDestroyRenderBuffers,
+                     kDestroyGeometry, kStages };
+
+        void QueueExternal(ExternalOp::Kind kind, uint32_t id, ID3D11ShaderResourceView* srv)
+        {
+            if (srv) srv->AddRef();
+            std::lock_guard<std::mutex> lk(externalMutex_);
+            external_.push_back({ kind, id, srv, recorder_->last_queued_frame_id() });
+        }
+
+        // The operations whose frames have all run, oldest first (`after` never falls along the queue).
+        void ApplyExternal()
+        {
+            std::vector<ExternalOp> due;
+            {
+                std::lock_guard<std::mutex> lk(externalMutex_);
+                const uint64_t done = lastExecuted_.load();
+                size_t n = 0;
+                while (n < external_.size() && external_[n].after <= done) ++n;
+                due.assign(external_.begin(), external_.begin() + static_cast<std::ptrdiff_t>(n));
+                external_.erase(external_.begin(), external_.begin() + static_cast<std::ptrdiff_t>(n));
+            }
+            for (auto& op : due) {
+                if (op.kind == ExternalOp::Kind::Register) sync_->RegisterExternalAt(op.id, op.srv);
+                else if (op.kind == ExternalOp::Kind::Set) sync_->SetExternalSRV(op.id, op.srv);
+                else sync_->UnregisterExternal(op.id);
+                if (op.srv) op.srv->Release();
+            }
+        }
+
+        bool RunCurrent(Budget& budget)
+        {
+            using Action = platform::GPUResourceAction;
+            const auto& textures = current_.textures();
+            const auto& buffers = current_.render_buffers();
+            const auto& geometry = current_.geometry();
+            for (; stage_ < kStages; stage_ = static_cast<Stage>(stage_ + 1), index_ = 0) {
+                const bool destroys = stage_ >= kDestroyTextures;
+                if (stage_ == kTextures || stage_ == kDestroyTextures) {
+                    for (; index_ < textures.size(); ++index_) {
+                        const auto& op = textures[index_];
+                        if ((op.action == Action::Destroy) != destroys) continue;
+                        if (!budget.Allow(op.pixels.size)) return false;
+                        ApplyTexture(op);
+                    }
+                } else if (stage_ == kRenderBuffers || stage_ == kDestroyRenderBuffers) {
+                    for (; index_ < buffers.size(); ++index_) {
+                        const auto& op = buffers[index_];
+                        if ((op.action == Action::Destroy) != destroys) continue;
+                        if (!budget.Allow(0)) return false;
+                        if (destroys) sync_->DestroyRenderBuffer(op.id);
+                        else sync_->CreateRenderBuffer(op.id, op.desc);
+                    }
+                } else if (stage_ == kGeometry || stage_ == kDestroyGeometry) {
+                    for (; index_ < geometry.size(); ++index_) {
+                        const auto& op = geometry[index_];
+                        if ((op.action == Action::Destroy) != destroys) continue;
+                        if (!budget.Allow(op.vertices.size + op.indices.size)) return false;
+                        ApplyGeometry(op);
+                    }
+                } else if (index_ == 0 && !current_.commands().empty()) {
+                    if (!budget.Allow(0)) return false;
+                    sync_->DrawCommands(current_.commands().data(), current_.commands().size());
+                }
+            }
+            return true;
+        }
+
+        void ApplyTexture(const platform::GPUTextureOp& op)
+        {
+            using Action = platform::GPUResourceAction;
+            if (op.action == Action::Destroy) {
+                sync_->DestroyTexture(op.id);
+                return;
+            }
+            if (op.action == Action::Update) {
+                sync_->UpdateTextureRows(op.id, op.rect, op.pixels.data(), op.row_pitch);
+                return;
+            }
+            // The frame's pixels wrapped, not copied: CreateTexture hands them to Direct3D before this returns.
+            const BitmapFormatInfo info = GetBitmapFormatInfo(op.format);
+            const uint32_t minPitch = (op.width + info.block_width - 1) / info.block_width * info.block_bytes;
+            RefPtr<Bitmap> bitmap;
+            if (!op.width || !op.height) bitmap = Bitmap::Create();
+            else if (!op.pixels.data()) bitmap = Bitmap::Create(op.width, op.height, op.format, minPitch, nullptr, 0, false);
+            else if (op.row_pitch >= minPitch && op.row_pitch <= UINT_MAX)
+                bitmap = Bitmap::Create(op.width, op.height, op.format, static_cast<uint32_t>(op.row_pitch),
+                                        op.pixels.data(), op.pixels.size, false);
+            if (!bitmap) {
+                LogErrorOnce("MgGpu: async CreateTexture, a recorded texture has an invalid size or row pitch");
+                return;
+            }
+            sync_->CreateTexture(op.id, bitmap, op.flags);
+        }
+
+        void ApplyGeometry(const platform::GPUGeometryOp& op)
+        {
+            using Action = platform::GPUResourceAction;
+            if (op.action == Action::Destroy) {
+                sync_->DestroyGeometry(op.id);
+                return;
+            }
+            if (op.action == Action::Create
+                && !sync_->CreateGeometryStorage(op.id, op.format, op.vertex_capacity, op.index_capacity))
+                return;
+            sync_->WriteGeometryRange(op.id, false, op.vertex_offset, op.vertices.data(), op.vertices.size);
+            sync_->WriteGeometryRange(op.id, true, op.index_offset, op.indices.data(), op.indices.size);
+        }
+
+        GPUDriverD3D11*                          sync_;
+        std::unique_ptr<platform::GPUDriverAsync> recorder_;
+        platform::GPUFrame                       current_;   // game thread: the frame being run, across calls
+        Stage                                    stage_ = kTextures;
+        size_t                                   index_ = 0;
+        std::atomic<uint64_t>                    lastExecuted_{ 0 };
+        std::mutex                               externalMutex_;
+        std::vector<ExternalOp>                  external_;
+        mutable std::mutex                       statsMutex_;
+        MgGpuStats                               stats_{};   // the driver's counts as of the last Drain
+    };
+
 }  // namespace mggpu
 
 // ── C ABI (MG) ──────────────────────────────────────────────────────────────────
@@ -1613,6 +1956,7 @@ namespace {
     struct MgGpuHandle {
         mggpu::GPUContextD3D11* context;
         mggpu::GPUDriverD3D11* driver;
+        mggpu::AsyncPath* async = nullptr;   // contract 4: Ultralight records, the game thread replays on `driver`
     };
 }
 
@@ -1644,10 +1988,24 @@ extern "C" {
         return h;
     }
 
+    void* MgGpu_CreateAsync(ID3D11Device* device, ID3D11DeviceContext* immediate, int samples, MgGpuLogFn log)
+    {
+        auto* h = static_cast<MgGpuHandle*>(MgGpu_Create(device, immediate, log));
+        if (!h) return nullptr;
+        if (h->context->deferred()) {   // the replay needs the immediate context
+            MgGpu_Destroy(h);
+            return nullptr;
+        }
+        h->context->SetSampleCount(samples > 0 ? static_cast<UINT>(samples) : 1u);
+        h->async = new mggpu::AsyncPath(h->driver);
+        return h;
+    }
+
     void MgGpu_Destroy(void* handle)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
         if (!h) return;
+        delete h->async;
         delete h->driver;
         delete h->context;
         delete h;
@@ -1656,25 +2014,28 @@ extern "C" {
     void* MgGpu_GetGPUDriver(void* handle)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        return h ? static_cast<ultralight::GPUDriver*>(h->driver) : nullptr;
+        if (!h) return nullptr;
+        return h->async ? h->async->recorder() : static_cast<ultralight::GPUDriver*>(h->driver);
     }
 
     int MgGpu_HasCommandsPending(void* handle)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        return (h && h->driver->HasCommandsPending()) ? 1 : 0;
+        return (h && !h->async && h->driver->HasCommandsPending()) ? 1 : 0;   // async: MgGpu_AsyncDrain runs them
     }
 
     void MgGpu_DrawCommandList(void* handle)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        if (h) h->driver->DrawCommandList();
+        if (h && !h->async) h->driver->DrawCommandList();
     }
 
     int MgGpu_SetSampleCount(void* handle, int samples)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        return h ? static_cast<int>(h->context->SetSampleCount(samples > 0 ? static_cast<UINT>(samples) : 1u)) : 0;
+        if (!h) return 0;
+        if (h->async) return static_cast<int>(h->context->sample_count());   // fixed at MgGpu_CreateAsync
+        return static_cast<int>(h->context->SetSampleCount(samples > 0 ? static_cast<UINT>(samples) : 1u));
     }
 
     void* MgGpu_GetTextureSRV(void* handle, std::uint32_t texture_id)
@@ -1686,19 +2047,23 @@ extern "C" {
     std::uint32_t MgGpu_RegisterExternalTexture(void* handle, ID3D11ShaderResourceView* srv)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        return h ? h->driver->RegisterExternal(srv) : 0;
+        if (!h) return 0;
+        return h->async ? h->async->RegisterExternal(srv) : h->driver->RegisterExternal(srv);
     }
 
     int MgGpu_SetExternalTextureSRV(void* handle, std::uint32_t texture_id, ID3D11ShaderResourceView* srv)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        return (h && h->driver->SetExternalSRV(texture_id, srv)) ? 1 : 0;
+        if (!h) return 0;
+        return (h->async ? h->async->SetExternalSRV(texture_id, srv) : h->driver->SetExternalSRV(texture_id, srv)) ? 1 : 0;
     }
 
     void MgGpu_UnregisterExternalTexture(void* handle, std::uint32_t texture_id)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        if (h) h->driver->UnregisterExternal(texture_id);
+        if (!h) return;
+        if (h->async) h->async->UnregisterExternal(texture_id);
+        else h->driver->UnregisterExternal(texture_id);
     }
 
     ID3D11CommandList* MgGpu_TakeCommandList(void* handle)
@@ -1711,8 +2076,26 @@ extern "C" {
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
         if (!h || !out || out->size < sizeof(std::uint32_t)) return 0;
-        MgGpuStats s = h->driver->Stats();
+        MgGpuStats s = h->async ? h->async->Stats() : h->driver->Stats();
         const std::uint32_t n = (std::min)(out->size, static_cast<std::uint32_t>(sizeof(MgGpuStats)));
+        s.size = n;
+        std::memcpy(out, &s, n);
+        return 1;
+    }
+
+    std::uint64_t MgGpu_AsyncDrain(void* handle, double maxMs, std::uint64_t maxBytes)
+    {
+        auto* h = static_cast<MgGpuHandle*>(handle);
+        return (h && h->async) ? h->async->Drain(maxMs, maxBytes) : 0;
+    }
+
+    int MgGpu_AsyncGetState(void* handle, MgGpuAsyncState* out)
+    {
+        auto* h = static_cast<MgGpuHandle*>(handle);
+        if (!h || !h->async || !out || out->size < sizeof(std::uint32_t)) return 0;
+        MgGpuAsyncState s{};
+        h->async->State(s);
+        const std::uint32_t n = (std::min)(out->size, static_cast<std::uint32_t>(sizeof(MgGpuAsyncState)));
         s.size = n;
         std::memcpy(out, &s, n);
         return 1;

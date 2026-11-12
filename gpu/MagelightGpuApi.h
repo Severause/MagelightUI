@@ -25,7 +25,7 @@ struct ID3D11CommandList;
 
 // The C ABI's revision: bump it whenever an MgGpu_* signature or meaning changes. The host refuses a backend built
 // with another revision. A backend exports every function below; the host treats a missing one as a broken build.
-#define MGGPU_CONTRACT 3u
+#define MGGPU_CONTRACT 4u
 
 extern "C" {
 
@@ -124,7 +124,37 @@ extern "C" {
         std::uint64_t msaaBytes;             // live multisample surfaces
         std::uint64_t flushes;               // CommandType::Flush commands since MgGpu_Create (a flush, or on a deferred context a split)
     };
-    // 1 when filled, 0 for a null handle or `out`. Render thread (the counters are the driver's, unlocked).
+    // 1 when filled, 0 for a null handle or `out`. Render thread (the counters are the driver's, unlocked); on an
+    // async handle any thread (the counts as of the last MgGpu_AsyncDrain).
     MGGPU_API int MgGpu_GetStats(void* handle, MgGpuStats* out);
+
+    // ── The async path (contract 4) ─────────────────────────────────────
+    // A driver in two halves. MgGpu_GetGPUDriver hands back a recorder (the SDK's GPUDriverAsync): the thread that
+    // owns Ultralight calls it, every call becomes part of a frame, and that thread makes no Direct3D call. The game
+    // thread runs the frames in order on `immediate` with MgGpu_AsyncDrain. Create it on the game thread, which also
+    // fixes the MSAA sample count (MgGpu_SetSampleCount only reports it afterwards). On such a handle
+    // MgGpu_HasCommandsPending is 0, MgGpu_DrawCommandList and MgGpu_TakeCommandList do nothing, the three
+    // external-texture calls may come from any thread (they take effect once the frames queued before them have
+    // run), and MgGpu_GetTextureSRV belongs to the game thread, after a drain: a texture is known only once the
+    // frame that made it has run.
+    MGGPU_API void* MgGpu_CreateAsync(ID3D11Device* device, ID3D11DeviceContext* immediate, int samples, MgGpuLogFn log);
+
+    // Game thread: run queued frames in order until none is left or the budget is spent (0 = no limit for that
+    // part). The first operation of a call always runs; a frame cut short resumes at its next operation on the next
+    // call. Returns the id of the last frame run completely (ids count up from 1; 0 = none yet). Uploads and state
+    // changes outside a frame's commands are not saved and restored here: the caller brackets the call as it
+    // brackets Renderer::Render on the in-frame path.
+    MGGPU_API std::uint64_t MgGpu_AsyncDrain(void* handle, double maxMs, std::uint64_t maxBytes);
+
+    struct MgGpuAsyncState {
+        std::uint32_t size;
+        std::uint32_t ready;            // 1: the recorder takes another Renderer::Render now (fewer than 2 frames in flight)
+        std::uint32_t framesInFlight;   // queued or being run
+        std::uint64_t lastQueued;       // id of the last frame recorded
+        std::uint64_t lastExecuted;     // id of the last frame run completely
+        std::uint64_t memoryInUse;      // bytes the queued frames hold
+    };
+    // Any thread. 1 when filled, 0 for a handle that is not async. `size` as MgGpuStats'.
+    MGGPU_API int MgGpu_AsyncGetState(void* handle, MgGpuAsyncState* out);
 
 }  // extern "C"
