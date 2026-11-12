@@ -6,7 +6,7 @@
 // lines (compare.py). Numbers are comparable only between runs on one PC with nothing else using the GPU.
 //
 //   bench.exe <assetsDir> <url> --gpu <dir> --name <label> --sdk <label> [--w N] [--h N] [--scale F] [--frames N] [--warmup N]
-//             [--msaa N] [--threads N] [--tickfile file.js] [--mouse] [--probe "<js>"]
+//             [--msaa N] [--threads N] [--tickfile file.js] [--mouse] [--probe "<js>"] [--memreport file]
 //
 // <assetsDir> holds resources\ (the SDK's) and the pages; <url> is file:///... inside it. The tick is the page's
 // window.__bench(n), called once a frame after the page is ready; --tickfile defines it for a page that has none.
@@ -36,7 +36,7 @@ using namespace ultralight;
 
 namespace
 {
-    std::string g_assets, g_url, g_gpuDir, g_name = "page", g_sdk = "?", g_tickFile, g_probe;
+    std::string g_assets, g_url, g_gpuDir, g_name = "page", g_sdk = "?", g_tickFile, g_probe, g_memReport;
     int         g_w = 1920, g_h = 1080, g_frames = 600, g_warmup = 60, g_msaa = 4, g_threads = 0;
     double      g_scale = 1.0;
     bool        g_mouse = false;
@@ -154,8 +154,8 @@ int main(int argc, char** argv)
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     SetUnhandledExceptionFilter(&OnCrash);
     if (argc < 3) {
-        std::printf("usage: bench <assetsDir> <url> --gpu dir --name label [--w N] [--h N] [--scale F] [--frames N] "
-                    "[--warmup N] [--msaa N] [--threads N] [--tickfile file.js] [--mouse] [--probe js]\n");
+        std::printf("usage: bench <assetsDir> <url> --gpu dir --name label --sdk label [--w N] [--h N] [--scale F] [--frames N] "
+                    "[--warmup N] [--msaa N] [--threads N] [--tickfile file.js] [--mouse] [--probe js] [--memreport file]\n");
         return 2;
     }
     g_assets = argv[1];
@@ -176,6 +176,7 @@ int main(int argc, char** argv)
         else if (a == "--tickfile") g_tickFile = next();
         else if (a == "--mouse") g_mouse = true;
         else if (a == "--probe") g_probe = next();
+        else if (a == "--memreport") g_memReport = next();
         else { std::printf("unknown option %s\n", a.c_str()); return 2; }
     }
     LARGE_INTEGER f;
@@ -319,6 +320,11 @@ int main(int argc, char** argv)
     if (!g_probe.empty()) {
         const String out = view->EvaluateScript(String(g_probe.c_str()));
         std::printf("  probe: %s\n", out.utf8().data());
+    }
+    // Renderer::GetMemoryUsage()'s text after the run: a fixture for tools/memreport-test at an SDK bump.
+    if (!g_memReport.empty()) {
+        std::ofstream out(g_memReport, std::ios::binary);
+        out << renderer->GetMemoryUsage().utf8().data();
     }
     MgGpuStats st{};
     st.size = sizeof(st);

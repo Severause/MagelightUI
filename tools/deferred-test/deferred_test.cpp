@@ -19,7 +19,7 @@
 // game leaves them, must still be bound after every page frame. --warp runs on WARP, which prints its
 // DriverCommandLists (0 exercises the emulated path).
 //
-//   deferred_test.exe <sdkDir> <page.html> --gpu <dir> --mode immediate|thread --out <file.raw> [--msaa N] [--warp]
+//   deferred_test.exe <sdkDir> <page.html> --gpu <dir> --mode immediate|thread|async --out <file.raw> [--msaa N] [--warp]
 //                     [--case release|upload|state] [--frames N] [--budget ms,bytes]
 //   deferred_test.exe --compare a.raw b.raw     exit 0 when every byte matches
 
@@ -178,12 +178,22 @@ namespace
         Platform::instance().set_font_loader(GetPlatformFontLoader());
         Platform::instance().set_file_system(GetPlatformFileSystem(String(g_sdk.c_str())));
         Platform::instance().set_logger(GetDefaultLogger("deferred_test_ul.log"));
-        if (!InitDriver(ctx)) return false;
+        if (!g_mg && !InitDriver(ctx)) return false;   // async mode made its driver on the main thread
         Platform::instance().set_gpu_driver(static_cast<GPUDriver*>(g_mgDrv(g_mg)));
         g_renderer = Renderer::Create();
         if (!g_renderer) return false;
         MakeView();
         return true;
+    }
+
+    // --case release, on Ultralight's thread: at frame 60 the View is released and made again on the same page.
+    // Ultralight keeps a released View's target in its caches; the purge frees it.
+    void ReleaseCase(int frame)
+    {
+        if (g_case != "release" || frame != 60) return;
+        g_view = nullptr;
+        g_renderer->PurgeMemory();
+        MakeView();
     }
 
     void LateContent(int frame)
@@ -204,13 +214,7 @@ namespace
     // One page frame. Returns the View's target SRV, AddRef'ed (the host's snapshot), or nullptr.
     ID3D11ShaderResourceView* PageFrame(int frame)
     {
-        if (g_case == "release" && frame == 60) {
-            // Ultralight keeps a released View's target in its caches; the purge frees it, while the main thread still
-            // holds its SRV and frame 59's lists that draw it wait.
-            g_view = nullptr;
-            g_renderer->PurgeMemory();
-            MakeView();
-        }
+        ReleaseCase(frame);   // the main thread still holds the old target's SRV, and frame 59's lists that draw it wait
         LateContent(frame);
         g_renderer->Update();
         g_renderer->RefreshDisplay(0);
@@ -604,25 +608,12 @@ namespace
         return st;
     }
 
-    bool InitPageAsync()
-    {
-        Platform::instance().set_config(Config{});
-        Platform::instance().set_font_loader(GetPlatformFontLoader());
-        Platform::instance().set_file_system(GetPlatformFileSystem(String(g_sdk.c_str())));
-        Platform::instance().set_logger(GetDefaultLogger("deferred_test_ul.log"));
-        Platform::instance().set_gpu_driver(static_cast<GPUDriver*>(g_mgDrv(g_mg)));
-        g_renderer = Renderer::Create();
-        if (!g_renderer) return false;
-        MakeView();
-        return true;
-    }
-
     DWORD WINAPI AsyncPageThread(void*)
     {
         SetThreadDescription(GetCurrentThread(), L"deferred_test page thread");
         ULONG g = 64 * 1024;
         SetThreadStackGuarantee(&g);
-        const bool ok = InitPageAsync();
+        const bool ok = InitPage(nullptr);
         {
             std::lock_guard<std::mutex> lk(g_mx);
             g_pageFailed = !ok;
@@ -634,16 +625,12 @@ namespace
                 std::unique_lock<std::mutex> lk(g_mx);
                 g_cv.wait(lk, [&] { return g_go >= f; });
             }
-            if (g_case == "release" && f == 60) {
-                g_view = nullptr;
-                g_renderer->PurgeMemory();
-                MakeView();
-            }
+            ReleaseCase(f);
             LateContent(f);
             g_renderer->Update();
             g_renderer->RefreshDisplay(0);
-            // The host skips a Render the recorder is not ready for; here every frame renders, so the run matches
-            // the other modes frame for frame. The main thread keeps draining while it waits for this packet.
+            // Every frame renders, once the recorder takes one, so the run matches the other modes frame for frame (the
+            // host renders regardless and stops only at a long backlog). The main thread keeps draining meanwhile.
             while (!AsyncState().ready) Sleep(0);
             g_renderer->Render();
             AsyncPacket p;
@@ -703,13 +690,12 @@ namespace
         if (g_case == "state" && !MakeSentinels()) return 2;
         HANDLE t = CreateThread(nullptr, static_cast<SIZE_T>(8) << 20, AsyncPageThread, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
         if (!t) return 2;
-        std::uint64_t drains = 0, cutShort = 0;
+        std::uint64_t drains = 0;
         const auto drain = [&] {
             if (g_case == "state") BindSentinels();
             const std::uint64_t done = g_mgDrain(g_mg, g_budgetMs, g_budgetBytes);
             if (g_case == "state") CheckSentinels();
             ++drains;
-            if (done < AsyncState().lastQueued) ++cutShort;
             return done;
         };
         AsyncPacket newest;
@@ -737,15 +723,15 @@ namespace
         if (!g_ready) { std::printf("the page never loaded\n"); return 2; }
         while (drain() < newest.frameId) {}
         const MgGpuAsyncState st = AsyncState();
-        std::printf("  frames recorded %llu, run %llu; %llu drains, %llu ended with frames still queued\n",
+        std::printf("  frames recorded %llu, run %llu; %llu drains, %llu stopped inside a frame by the budget\n",
                     static_cast<unsigned long long>(st.lastQueued), static_cast<unsigned long long>(st.lastExecuted),
-                    static_cast<unsigned long long>(drains), static_cast<unsigned long long>(cutShort));
+                    static_cast<unsigned long long>(drains), static_cast<unsigned long long>(st.cutShort));
         if (st.lastExecuted != st.lastQueued || st.framesInFlight != 0) {
             std::printf("FAIL: frames are left over (%u in flight)\n", st.framesInFlight);
             return 1;
         }
-        if ((g_budgetMs > 0.0 || g_budgetBytes) && !cutShort) {
-            std::printf("FAIL: no drain ended with frames still queued, so the budget and the resume were not exercised\n");
+        if ((g_budgetMs > 0.0 || g_budgetBytes) && !st.cutShort) {
+            std::printf("FAIL: the budget never stopped a drain inside a frame, so the resume was not exercised\n");
             return 1;
         }
         auto* srv = static_cast<ID3D11ShaderResourceView*>(g_mgSrv(g_mg, newest.textureId));   // resolves MSAA

@@ -1,5 +1,5 @@
 // MagelightGPU — Direct3D 11 GPUDriver for Ultralight 2.0, adapted from the Ultralight 2.0.0-beta.2
-// SDK's reference driver: platform/src/GPUDriver.cpp, platform/src/gpu/d3d11/GPUDriverD3D11.cpp and
+// SDK's reference driver and brought in line with 2.0.0-beta.3's: platform/src/GPUDriver.cpp, platform/src/gpu/d3d11/GPUDriverD3D11.cpp and
 // platform/src/gpu/d3d11/GPUContextD3D11.cpp (Zlib licence, reproduced below). This is an ALTERED
 // version of that source: the changes are marked "MG:" (see gpu/README.md for the list).
 //
@@ -1717,7 +1717,7 @@ namespace mggpu {
     // ── The async path (MG, contract 4) ─────────────────────────────────────────
     // The SDK's recorder (platform::GPUDriverAsync, built in place from platform/src/gpu/async) is the driver
     // Ultralight sees: on the thread that owns Ultralight every driver call becomes part of a GPUFrame, and no
-    // Direct3D call is made there. The game thread replays the frames in order on the driver above, on the
+    // device or context call is made there. The game thread replays the frames in order on the driver above, on the
     // immediate context, within a budget (Drain). Frames are never dropped or reordered: each builds on the last.
     class AsyncPath {
     public:
@@ -1748,6 +1748,9 @@ namespace mggpu {
             s.lastQueued = recorder_->last_queued_frame_id();
             s.lastExecuted = lastExecuted_.load();
             s.memoryInUse = recorder_->memory_in_use();
+            s.cutShort = cutShort_.load();
+            std::lock_guard<std::mutex> lk(externalMutex_);
+            s.externalPending = static_cast<std::uint32_t>(external_.size());
         }
         MgGpuStats Stats() const
         {
@@ -1777,22 +1780,29 @@ namespace mggpu {
 
         // Game thread. Runs queued frames in order until none is left or the budget is spent (0 = no limit); the
         // first operation of a call always runs, and a frame the budget cut short resumes at its next operation.
-        // Returns the id of the last frame run completely.
+        // A frame's destroys are not metered: they follow its commands at once, so no frame is left done but for
+        // them (the host shows a page frame only once its frame is done). Returns the id of the last frame run
+        // completely.
         uint64_t Drain(double maxMs, uint64_t maxBytes)
         {
             Budget budget{ std::chrono::steady_clock::now(), maxMs, maxBytes };
             for (;;) {
                 if (!current_) {
+                    // The frame first, then the external textures asked for before it was recorded. In the other
+                    // order one asked for, and drawn by a frame queued, between the two steps would come a frame late.
+                    const bool got = recorder_->TryDequeue(current_);
                     ApplyExternal();
-                    if (!recorder_->TryDequeue(current_)) break;
+                    if (!got) break;
                     stage_ = kTextures;
                     index_ = 0;
                 }
-                if (!RunCurrent(budget)) break;
+                if (!RunCurrent(budget)) {
+                    cutShort_.fetch_add(1);
+                    break;
+                }
                 lastExecuted_.store(current_.id());
                 current_ = platform::GPUFrame();
             }
-            if (!current_) ApplyExternal();
             {
                 std::lock_guard<std::mutex> lk(statsMutex_);
                 stats_ = sync_->Stats();
@@ -1869,14 +1879,14 @@ namespace mggpu {
                     for (; index_ < textures.size(); ++index_) {
                         const auto& op = textures[index_];
                         if ((op.action == Action::Destroy) != destroys) continue;
-                        if (!budget.Allow(op.pixels.size)) return false;
+                        if (!destroys && !budget.Allow(op.pixels.size)) return false;
                         ApplyTexture(op);
                     }
                 } else if (stage_ == kRenderBuffers || stage_ == kDestroyRenderBuffers) {
                     for (; index_ < buffers.size(); ++index_) {
                         const auto& op = buffers[index_];
                         if ((op.action == Action::Destroy) != destroys) continue;
-                        if (!budget.Allow(0)) return false;
+                        if (!destroys && !budget.Allow(0)) return false;
                         if (destroys) sync_->DestroyRenderBuffer(op.id);
                         else sync_->CreateRenderBuffer(op.id, op.desc);
                     }
@@ -1884,7 +1894,7 @@ namespace mggpu {
                     for (; index_ < geometry.size(); ++index_) {
                         const auto& op = geometry[index_];
                         if ((op.action == Action::Destroy) != destroys) continue;
-                        if (!budget.Allow(op.vertices.size + op.indices.size)) return false;
+                        if (!destroys && !budget.Allow(op.vertices.size + op.indices.size)) return false;
                         ApplyGeometry(op);
                     }
                 } else if (index_ == 0 && !current_.commands().empty()) {
@@ -1942,7 +1952,8 @@ namespace mggpu {
         Stage                                    stage_ = kTextures;
         size_t                                   index_ = 0;
         std::atomic<uint64_t>                    lastExecuted_{ 0 };
-        std::mutex                               externalMutex_;
+        std::atomic<uint64_t>                    cutShort_{ 0 };   // drains the budget stopped inside a frame
+        mutable std::mutex                       externalMutex_;
         std::vector<ExternalOp>                  external_;
         mutable std::mutex                       statsMutex_;
         MgGpuStats                               stats_{};   // the driver's counts as of the last Drain
@@ -2069,7 +2080,7 @@ extern "C" {
     ID3D11CommandList* MgGpu_TakeCommandList(void* handle)
     {
         auto* h = static_cast<MgGpuHandle*>(handle);
-        return h ? h->driver->TakePart() : nullptr;
+        return (h && !h->async) ? h->driver->TakePart() : nullptr;
     }
 
     int MgGpu_GetStats(void* handle, MgGpuStats* out)

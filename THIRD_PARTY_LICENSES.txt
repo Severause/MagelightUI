@@ -348,7 +348,8 @@ SOFTWARE
 Ultralight SDK platform reference code (Ultralight 2.0.0-beta.3, the SDK's platform/ folder)
 https://ultralig.ht
 Used in: MagelightGPU.dll (an altered version of the Direct3D 11 reference GPU driver; source with the changes marked:
-gpu/ in the Magelight UI repository) and Magelight.dll (the Windows font loader, platform/src/fonts, compiled unmodified).
+gpu/ in the Magelight UI repository; and the async GPU recorder, platform/src/gpu/async, compiled unmodified) and
+Magelight.dll (the Windows font loader, platform/src/fonts, compiled unmodified).
 MagelightGPU.dll's embedded compiled shaders are not covered: they are Ultralight, Inc.'s, licensed only for use with Ultralight.
 License: zlib
 --------------------------------------------------------------------------------

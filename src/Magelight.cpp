@@ -103,9 +103,10 @@ namespace Magelight {
     //                         // (and no main-menu pages, 1.7.1)
     //   "pageGpu": "deferred" // with pageThread, how the page thread's GPU work reaches the game's context: "deferred"
     //                         // = a deferred context whose lists the game thread runs; "async" = frames the page
-    //                         // thread records and the game thread replays (no Direct3D call off the game thread)
-    //   "asyncBudgetMs": 1.5  // pageGpu async: the time one Present may spend replaying page frames (0 = no limit)
-    //   "asyncBudgetMB": 8    // pageGpu async: the uploads one Present may replay, in MB (0 = no limit)
+    //                         // thread records and the game thread replays (no device or context call off it)
+    //   "asyncBudgetMs": 1.5  // pageGpu async: a Present that spent this long replaying page frames starts no further
+    //                         // operation (one always finishes; 0 = no limit)
+    //   "asyncBudgetMB": 8    // pageGpu async: the same for the data it uploaded, in MB (0 = no limit)
     //   "keyFallback": true   // 1.7.0: keys that reach DirectInput but not the window go to the page anyway (flat only)
     //   "vr": { "enabled": true, "submitViews": true, "mirror": true, "alpha": "straight",
     //            "beam": true, "beamAlpha": 0.55, "cursorScale": 0.012, "cursorDot": true,   // laser-end pointer: a point (0.26.12); false = the arrow art
@@ -187,13 +188,16 @@ namespace Magelight {
     static std::atomic<PageThread::Mode> s_pageThreadMode{ PageThread::Mode::Off };
     static bool PageThreadOn() { return s_pageThreadMode.load() == PageThread::Mode::On; }
     // Magelight.json "pageGpu": "async" (with the page thread). The page thread's driver is then the recorder of
-    // MagelightGPU's async path (contract 4): it makes no Direct3D call, so nothing about the device can refuse it,
-    // and the game thread replays what it recorded at Present, at most asyncBudgetMs / asyncBudgetMB a frame
+    // MagelightGPU's async path (contract 4): it makes no device or context call (it still takes and drops references
+    // on a mod's image SRVs), so only a single-threaded device refuses it, and the game thread replays what it
+    // recorded at Present, starting no further operation once asyncBudgetMs or asyncBudgetMB are spent in a frame
     // (ThreadModeFrame). Wanted from the file; s_pageAsync once StartPageThread made the driver.
     static bool              s_pageAsyncWanted = false;
     static std::atomic<bool> s_pageAsync{ false };
     static double            s_asyncBudgetMs = 1.5;
     static std::uint64_t     s_asyncBudgetBytes = 8ull << 20;
+    // With this many recorded frames waiting for the game thread, a page frame records no more (PageThreadFrame).
+    static constexpr std::uint32_t kAsyncBacklogFrames = 8;
     // Main-menu pages (1.7.1, page thread only). A view is one once a mod asks for UI mode on it at the main menu, or
     // calls SetViewMainMenu; that also starts Ultralight there. All of it runs on the main thread's Presents, which take
     // over from the engine's own thread after the Main Menu opens; s_mainPresenting says they have. The carrier menu
@@ -746,11 +750,11 @@ namespace Magelight {
             static constexpr const char* kConsoleLogNames[] = { "none", "errors", "warnings", "all" };
             SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
                             "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={}, ulFiberMB={}, "
-                            "pageThread={}, exceptionTelemetry={}, memoryLogMinutes={}, lowMemoryFloorMB={}, clipCursor={}, "
+                            "pageThread={}, pageGpu={}, exceptionTelemetry={}, memoryLogMinutes={}, lowMemoryFloorMB={}, clipCursor={}, "
                             "gamepad={})",
                 s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
                 s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa,
-                s_ulFiberMb, s_pageThreadMode.load() != PageThread::Mode::Off,
+                s_ulFiberMb, s_pageThreadMode.load() != PageThread::Mode::Off, s_pageAsyncWanted ? "async" : "deferred",
                 s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_lowMemoryFloorMb.load(), s_clipCursorCfg.load(),
                 s_gamepadTuning.enabled);
             if (s_gamepadTuning.enabled) {
@@ -810,7 +814,7 @@ namespace Magelight {
     static MgGpuCreateAsyncFn s_gpuCreateAsync = nullptr;
     static MgGpuAsyncDrainFn  s_gpuAsyncDrain = nullptr;   // game thread only
     static MgGpuAsyncStateFn  s_gpuAsyncState = nullptr;   // any thread
-    static void*          s_gpu = nullptr;       // backend handle (render thread)
+    static void*          s_gpu = nullptr;       // backend handle (Ultralight's thread; pageGpu async: the game thread's)
     static std::atomic<bool> s_gpuActive{ false };   // accelerated path in use (set by Ultralight's thread at its start)
 
     // Why a backend's build does not match this host's, or "" when it does. A mod manager can pair this
@@ -6605,7 +6609,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // `ctx` is what the GPU driver draws through: the game's immediate context, or with pageThread the page thread's
-    // deferred one (MgGpu_Create, contract 3). Ultralight's thread: whichever thread calls this owns WebKit from here on.
+    // deferred one (MgGpu_Create, contract 3), or null with pageGpu async, whose driver StartPageThread made. Ultralight's thread: whichever thread calls this owns WebKit from here on.
     static bool CreateUltralight(ID3D11DeviceContext* ctx)
     {
         ultralight::Config cfg;
@@ -9678,11 +9682,14 @@ float4 ps_straight(VSOut i) : SV_Target {
     // (tools/deferred-test). No fiber here: the thread's stack is WebKit's own, in a frame and between frames
     // (tools/fiber-gc-test --thread passes without the VM lock); it holds the lock between frames for speed only (an
     // idle frame about 13 us against 235). Flat only (VR never asks for it).
+    // pageGpu async (s_pageAsync): no deferred context and no list. The driver is a recorder; a packet names the last
+    // frame it recorded and each view's texture, and the game thread replays the frames within a budget and looks the
+    // SRVs up itself, from the driver, once a packet's frame has run.
     struct PagePacket {
         // The frame's recorded GPU work, in order: the parts the driver split off at each flush (MgGpu_TakeCommandList),
         // then the frame's own. Empty when the frame rendered nothing.
         std::vector<ID3D11CommandList*> lists;
-        PresentedFrame                  views;   // what it drew: each srv holds a reference, `ul` stays empty
+        PresentedFrame                  views;   // what it drew: each srv holds a reference (async: null), `ul` stays empty
         // pageGpu async: the last frame recorded when this page frame ended. Its views name textures (textureId) that
         // are current once that frame has run on the game thread; there are no lists.
         std::uint64_t                   frameId = 0;
@@ -9706,8 +9713,9 @@ float4 ps_straight(VSOut i) : SV_Target {
     static std::atomic<std::uint64_t>       s_pageFrames{ 0 };         // page frames made (the game thread's cost line)
 
     // One page frame, on the page thread: FrameWork's page parts in their order, every drawn view collected with an
-    // SRV reference of its own, then the frame's lists. A frame that rendered nothing hands over no list, so the game
-    // thread does no Direct3D work while nothing is shown. Its own cost line every 2 s, timed as FrameWork's:
+    // SRV reference of its own, then the frame's lists (pageGpu async: its texture id, then the frame's id). A frame
+    // that rendered nothing hands over no list and no frame, so the game thread does no Direct3D work while nothing is
+    // shown. Its own cost line every 2 s, timed as FrameWork's:
     // ul.update from just before Update, the page work before it apart.
     static void PageThreadFrame()
     {
@@ -9737,12 +9745,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         auto packet = std::make_unique<PagePacket>();
         bool rendered = false;
         const bool async = s_pageAsync.load();
-        // pageGpu async: the frames recorded and not yet run. With that many waiting (a game thread held far behind its
-        // budget), this frame records nothing more and sends no packet: what changed stays dirty for the next Render
-        // and the last packet stays on screen. Never for a prepaint, whose view must be hidden again after its Render.
+        // pageGpu async: with kAsyncBacklogFrames recorded frames waiting (a game thread held far behind), this frame
+        // records nothing more and sends no packet: what changed stays dirty for the next Render and the last packet
+        // stays on screen. Never for a prepaint, whose view must be hidden again after its Render.
         MgGpuAsyncState recorder{};
         recorder.size = sizeof(recorder);
-        const bool backlog = async && !pre && s_gpuAsyncState(s_gpu, &recorder) && recorder.framesInFlight >= 8;
+        const bool backlog = async && !pre && s_gpuAsyncState(s_gpu, &recorder) && recorder.framesInFlight >= kAsyncBacklogFrames;
         s_pageStage.store("Renderer::Render");
         if (backlog) {
             packet.reset();
@@ -9768,8 +9776,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                 if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
             }
         }
-        // Only Render, the driver's draws and the views' uploads record into the deferred context: a frame without
-        // them recorded nothing.
+        // pageGpu async: the packet names the last frame the recorder queued. Otherwise only Render, the driver's draws
+        // and the views' uploads record into the deferred context: a frame without them recorded nothing.
         if (rendered && async) {
             recorder.size = sizeof(recorder);
             if (s_gpuAsyncState(s_gpu, &recorder)) packet->frameId = recorder.lastQueued;
@@ -9942,11 +9950,13 @@ float4 ps_straight(VSOut i) : SV_Target {
     static bool StartPageThread()
     {
         // pageGpu async: the driver is made here, on the game thread that replays on it. The page thread then makes no
-        // Direct3D call, so it needs no deferred context and none of the device refusals below apply.
+        // device or context call, so it needs no deferred context, and of the device refusals below only the
+        // single-threaded one applies (that thread still takes and drops references on a mod's image SRVs).
         bool async = false;
         if (s_pageAsyncWanted) {
             if (s_forceCpu.load()) SKSE::log::warn("Magelight: pageGpu async needs the GPU driver (forceCpu is set) - using a deferred context");
-            else if (!s_gpuCreateAsync || !s_context) SKSE::log::warn("Magelight: pageGpu async needs MagelightGPU.dll - using a deferred context");
+            else if (!s_gpuCreate || !s_gpuCreateAsync || !s_gpuAsyncDrain || !s_gpuAsyncState || !s_context)
+                SKSE::log::warn("Magelight: pageGpu async needs MagelightGPU.dll - using a deferred context");
             else if ((s_gpu = s_gpuCreateAsync(s_device, s_context, s_msaa, &GpuLogBridge)) == nullptr)
                 SKSE::log::warn("Magelight: the async GPU driver could not be made - using a deferred context");
             else async = true;
@@ -9960,7 +9970,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!replaced.empty())
             SKSE::log::info("Magelight: not Windows' own graphics DLLs: {}; the device in use {} the engine's own object",
                             replaced, engineObject ? "is" : "is not");
-        const char* refused = async ? nullptr
+        const char* refused = async ? PageThread::Decide(s_device->GetCreationFlags(), true, false)
                                     : PageThread::Decide(s_device->GetCreationFlags(), deferredOk, !replaced.empty() && engineObject);
         const int stackMb = s_ulFiberMb > 0 ? s_ulFiberMb : kMinFiberMb;
         HANDLE thread = nullptr;
@@ -9991,8 +10001,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         CloseHandle(thread);   // the thread runs on; the host never joins it
         if (async) {
             SKSE::log::info("Magelight: pages run on a thread of their own ({}, {} MB stack); it records their GPU work "
-                            "and the game thread replays it (pageGpu async, at most {:.2f} ms and {:.1f} MB a frame; 0 = no "
-                            "limit)", s_ulThreadId, stackMb, s_asyncBudgetMs,
+                            "and the game thread replays it (pageGpu async; a frame starts no further operation once "
+                            "{:.2f} ms or {:.1f} MB are spent, 0 = no limit)", s_ulThreadId, stackMb, s_asyncBudgetMs,
                             static_cast<double>(s_asyncBudgetBytes) / 1048576.0);
             return true;
         }
@@ -10027,7 +10037,8 @@ float4 ps_straight(VSOut i) : SV_Target {
     // The frame at Present with the page thread: the game thread's bookkeeping, every page frame finished since the
     // last Present taken and the next one let go at once (it records while this frame runs the taken frames' lists in
     // order and draws the newest one's views). Never waits on the page thread: until it has finished a frame there is
-    // simply nothing new to draw.
+    // simply nothing new to draw. pageGpu async: it replays the recorded frames within the budget instead, and draws
+    // the newest page frame whose recorded frame has run.
     static void ThreadModeFrame(IDXGISwapChain* sc, float bw, float bh)
     {
         using ClockT = std::chrono::steady_clock;
@@ -10062,12 +10073,23 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool async = s_pageAsync.load() && s_gpu;
         MgGpuAsyncState recorder{};
         recorder.size = sizeof(recorder);
+        // The newest waiting packet whose frame has run (`ran`) is the one on screen from here; older ones are done with.
+        const auto adopt = [](std::uint64_t ran) {
+            std::size_t done = 0;
+            while (done < s_asyncWaiting.size() && s_asyncWaiting[done]->frameId <= ran) ++done;
+            if (!done) return;
+            delete s_held;
+            s_held = s_asyncWaiting[done - 1].release();
+            s_asyncWaiting.erase(s_asyncWaiting.begin(), s_asyncWaiting.begin() + static_cast<std::ptrdiff_t>(done));
+        };
         if (async) {
             for (auto& p : packets) s_asyncWaiting.push_back(std::move(p));
             packets.clear();
             s_gpuAsyncState(s_gpu, &recorder);
+            adopt(recorder.lastExecuted);   // a page frame that recorded nothing waits for no Direct3D work
         }
-        const bool replay = async && (recorder.framesInFlight > 0 || !s_asyncWaiting.empty());
+        // Recorded work to run: frames, or a mod's image waiting for the frames recorded before it.
+        const bool replay = async && (recorder.framesInFlight > 0 || recorder.externalPending > 0);
         const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
         const bool anyVisible = s_anyVisible, interactiveVisible = s_interactiveVisible;
         const CompositeTarget target = ChooseCompositeTarget(interactiveVisible);
@@ -10082,17 +10104,9 @@ float4 ps_straight(VSOut i) : SV_Target {
             StateBackup backup;
             backup.Capture(s_context);
             if (replay) {
-                // The recorded frames in order, within the budget: a frame cut short goes on at the next Present. The
-                // newest packet whose frame has run is the one on screen from here; older ones are done with.
-                const std::uint64_t ran = s_gpuAsyncDrain(s_gpu, s_asyncBudgetMs, s_asyncBudgetBytes);
-                std::size_t done = 0;
-                while (done < s_asyncWaiting.size() && s_asyncWaiting[done]->frameId <= ran) ++done;
-                if (done) {
-                    delete s_held;
-                    s_held = s_asyncWaiting[done - 1].release();
-                    s_asyncWaiting.erase(s_asyncWaiting.begin(), s_asyncWaiting.begin() + static_cast<std::ptrdiff_t>(done));
-                    newest = s_held;
-                }
+                // The recorded frames in order, within the budget: a frame cut short goes on at the next Present.
+                adopt(s_gpuAsyncDrain(s_gpu, s_asyncBudgetMs, s_asyncBudgetBytes));
+                newest = s_held;
             }
             // Each list with the game's whole state saved and put back around it (PageThread::RunRecordedList), and the
             // immediate context flushed after each part a flush split off, where the in-frame driver flushes, and

@@ -70,10 +70,14 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   may hand over more than one before a draw), takes immutable storage from the flag alone and uploads whole blocks
   of a block-compressed texture.
 - **`"pageGpu": "async"`** (`Magelight.json`, with the page thread): the page thread records its graphics work as
-  frames through Ultralight's async driver and makes no Direct3D call; the game thread replays them at Present, at
-  most `asyncBudgetMs` (1.5) and `asyncBudgetMB` (8) a frame. No deferred context is involved, so a replaced
-  `d3d11.dll` or a single-threaded device does not turn the page thread off. `MagelightGPU.dll` contract 4.
-  Checked offline only (`tools/deferred-test --mode async`); not yet run in game.
+  frames through Ultralight's async driver and makes no device or context call; the game thread replays them at
+  Present and starts no further operation once `asyncBudgetMs` (1.5) or `asyncBudgetMB` (8) are spent in a frame. No
+  deferred context is involved, so a replaced `d3d11.dll` does not turn the page thread off (a single-threaded device
+  still does). `MagelightGPU.dll` contract 4. Checked offline (`tools/deferred-test --mode async`, byte for byte
+  against the in-frame path) and in one short in-game session on flat; not on ENB, not on VR.
+- Offline gates run on beta.3: deferred-test, fiber-gc-test (GATE PASS), pagethread-test, bridge-test, editor-test,
+  font-test, input-test, visibility-test, ime-test, ime-box-test, gamepad-page-test, tooltip-test, hosttheme-test,
+  gamepad-test, lowmemory-test, memreport-test, pathtext-test, polledkeys-test, and the stage lint.
 - `tools/bench-test`: the per-frame cost of a page through `MagelightGPU.dll`, for comparing two SDK builds.
 
 ## 1.8.0 - Unreleased

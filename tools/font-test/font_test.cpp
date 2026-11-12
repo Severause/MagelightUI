@@ -226,7 +226,7 @@ namespace
 
     bool Near(double a, double b) { return std::fabs(a - b) < 0.5; }
 
-    // The stock loader's end with no usable font on the pinned SDK build (2.0.0-beta.2): lastResortFallbackFont
+    // The stock loader's end with no usable font on the pinned SDK build: lastResortFallbackFont
     // fails a check and stops at a breakpoint. The offset moves with the SDK build.
     bool LastResortCrash(const Result& r)
     {

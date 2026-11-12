@@ -205,7 +205,6 @@ foreach(_mgl_async ${ULTRALIGHT_ASYNC_SOURCES})
     endif()
 endforeach()
 add_library(MagelightGPU SHARED gpu/MagelightGpuDriver.cpp ${ULTRALIGHT_ASYNC_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/version_gpu.rc)
-set_source_files_properties(${ULTRALIGHT_ASYNC_SOURCES} PROPERTIES COMPILE_OPTIONS "/w")
 target_include_directories(MagelightGPU PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
 target_include_directories(MagelightGPU SYSTEM PRIVATE ${ULTRALIGHT_DIR}/include ${ULTRALIGHT_SHADER_HEADERS}
                            ${ULTRALIGHT_DIR}/platform/include)
@@ -213,7 +212,9 @@ target_link_directories(MagelightGPU PRIVATE ${ULTRALIGHT_DIR}/lib)
 target_link_libraries(MagelightGPU PRIVATE Ultralight UltralightCore d3d11)
 target_compile_definitions(MagelightGPU PRIVATE MGGPU_BUILD NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
-    target_compile_options(MagelightGPU PRIVATE /W4 /permissive- /utf-8)
+    target_compile_options(MagelightGPU PRIVATE /permissive- /utf-8)
+    # /W4 for our own file alone: the SDK's sources are not written for it.
+    set_source_files_properties(gpu/MagelightGpuDriver.cpp PROPERTIES COMPILE_OPTIONS "/W4")
 endif()
 set_target_properties(MagelightGPU PROPERTIES
     OUTPUT_NAME "MagelightGPU"

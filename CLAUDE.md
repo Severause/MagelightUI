@@ -53,6 +53,7 @@ tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus
 tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it; --thread: pages on the page thread, which must pass without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1) or the page thread (MG_PAGE_THREAD=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held; then the async path (`--mode async`, contract 4) against the immediate context, with and without a budget (build.bat)
+tools/bench-test/            what a page costs per frame through MagelightGPU.dll, for comparing two SDK builds: bench.cpp, run.ps1 (both builds, alternating passes), compare.py
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
 tools/lowmemory-test/       src/LowMemoryCore.h's floor, hysteresis and setting clamp (build.bat)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
@@ -117,12 +118,13 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    default constructor. `tools\check_stage.ps1` loads the staged host with the runtime out of reach and fails if
    it does not load, if a process that loaded it does not exit cleanly, or if `CreateView` there fails.
 4. **Ultralight's platform code stays where the SDK puts it.** The SDK's Zlib reference sources
-   (`extern/ultralight/platform`, never committed) reach the build two ways only: the D3D11 driver,
+   (`extern/ultralight/platform`, never committed) reach the build three ways only: the D3D11 driver,
    adapted in `gpu/` (its own DLL, `MagelightGPU.dll`, reached only through the C ABI in
    `gpu/MagelightGpuApi.h`; never include driver internals in the host or copy driver code into
    `src/`; the Zlib notice stays and changes carry `// MG:` markers), and `fonts/FontLoaderWin.cpp` +
    `fonts/TextAnalysisSource.cpp`, compiled unmodified into `Magelight.dll` from the SDK folder
-   (CMakeLists.txt). Nothing else of `platform/` is copied or built: `shaders/generated` is
+   (CMakeLists.txt), and `gpu/async/GPUDriverAsync.cpp` + `GPUAllocator.cpp`, the async path's recorder, compiled
+   unmodified into `MagelightGPU.dll` the same way. Nothing else of `platform/` is copied or built: `shaders/generated` is
    proprietary to Ultralight (use with Ultralight only; the driver reads it through an include path),
    `filesystem/FileSystemWin.cpp` is BSD and `fonts/FallbackFont.h` Apache-2.0. No `src/` file
    includes `<AppCore/...>` and AppCore.dll is not shipped: 2.0's imports CoreMessaging.dll and the
@@ -198,7 +200,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `ulFiberMB`, `pageThread`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `ulFiberMB`, `pageThread`, `pageGpu` / `asyncBudgetMs` / `asyncBudgetMB`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).
@@ -426,7 +428,7 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     (`PageThreadMain`) owns Ultralight from `Renderer::Create` on and is the render thread of invariants 2, 13, 16 and 22-26: every page
     part of the frame (`PageWorkBegin`, `MaterializeImages`, Update, the second sync, the prepaint, Render,
     `CollectView`, `TickMemoryReport`) runs there (`PageThreadFrame`) and nowhere else. `MagelightGPU.dll` gets a
-    deferred context of the game's device (contract 3) and only the page thread calls it (with `"pageGpu": "async"` it gets the async path's recorder instead, contract 4: the page thread makes no Direct3D call, none of the device refusals below apply, the game thread replays its recorded frames at Present within `asyncBudgetMs` / `asyncBudgetMB`, and a page frame's views are shown once the frame it recorded has run, their SRVs looked up on the game thread every frame); the game's immediate
+    deferred context of the game's device (contract 3) and only the page thread calls it (with `"pageGpu": "async"` it gets the async path's recorder instead, contract 4: the page thread makes no device or context call, of the device refusals below only the single-threaded one applies, the game thread replays its recorded frames at Present within `asyncBudgetMs` / `asyncBudgetMB`, and a page frame's views are shown once the frame it recorded has run, their SRVs looked up on the game thread every frame); the game's immediate
     context is used on the game thread alone. At Present (`ThreadModeFrame`) it takes every page frame finished
     since the last Present and at once lets the next one start (`PageThread::Handoff`), so that frame records while
     the game thread runs the taken frames' command lists in order (none is ever dropped: each carries uploads later
@@ -454,7 +456,7 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     next lock hangs; a new lock held across such calls on the page side must be one too. A callback into a mod on the
     frame, bridge or v4 delivery paths goes through `CallMod` (`CxxThrowCore.h`): a C++ exception ends that call, not the
     overlay or the sink, and is logged from a filter while the stack that threw it is there; a new callback needs it too. A packet's
-    `PresentedView`s hold SRV references of their own and never `ul` (a View's
+    `PresentedView`s hold SRV references of their own (with `pageGpu` async a texture id instead) and never `ul` (a View's
     reference count is Ultralight's); a recorded list keeps every resource it uses alive until it is released, so
     a View Ultralight frees meanwhile needs no retire queue (`tools/deferred-test`). Engine work at Present
     (`GameBookkeeping`, the overlay menu, the UI pass, the cursor quad) stays on the game thread. The mode is decided

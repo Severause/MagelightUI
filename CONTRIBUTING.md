@@ -61,8 +61,8 @@ the example against them). Scaffold a throwaway mod against your clone with
   mode. Read them before touching `src/`.
 - **Ultralight's platform code stays in the SDK** (invariant 4). The D3D11 driver adapted
   from it lives in `gpu/` only, reached from the host only through `gpu/MagelightGpuApi.h`
-  (C ABI), with the zlib notice kept and modifications marked `// MG:`; the font loader is
-  compiled from the SDK folder unmodified. Never copy SDK files into the repository (the
+  (C ABI), with the zlib notice kept and modifications marked `// MG:`; the font loader and the
+  async path's recorder are compiled from the SDK folder unmodified. Never copy SDK files into the repository (the
   compiled shaders are Ultralight's, licensed only for use with Ultralight), and never
   include `<AppCore/...>` in `src/`: AppCore.dll is not shipped.
 - **Bump the version** (`CMakeLists.txt` `project(... VERSION x.y.z)`) and add a
