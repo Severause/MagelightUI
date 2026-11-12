@@ -40,7 +40,7 @@ export function installMock(opts: MockOptions = {}): PageCore {
                     loadStagger: 0, loadOnShow: 0, cursor: 0, cursorTint: 0, rebuildScale: 0, keyboardTheme: 0, prepaint: 0,
                     uiModeCancel: 0, hostThemeReply: 0, tooltips: 0, scriptErrors: 0, pageVisibility: 0, keyboardCode: 0,
                     auxButtons: 0, imeCandidates: 0, gamepad: 0, pageThread: 0, vrGaze: 0, mainMenu: 0,
-                    polledKeys: 0, mock: 1 },
+                    polledKeys: 0, focusShare: 0, mock: 1 },
     dev: true,
     runtimeUrl: '',
     ...opts.info,

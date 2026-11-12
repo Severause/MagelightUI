@@ -57,7 +57,8 @@ Ultralight runtime cannot load and no Magelight page appears (the log says
 
 For a page that takes input, use `"layer": "panel"` without `clickThrough`; its hotkey then
 opens it in **UI mode** (cursor up, game controls suspended, keyboard to the page; the same key
-closes it, and so does Escape unless the page takes Escape itself). One view holds UI mode at a
+closes it, and so does Escape unless the page takes Escape itself). With `shareFocus` and
+`acceptFocus` (1.9.0) a click can lend the keyboard to another view while UI mode stays. One view holds UI mode at a
 time, across all mods. Pick a hotkey the game does not use (not F5 Quicksave or F9 Quickload)
 and that no other mod binds: one binding per key, and the first binder keeps it.
 

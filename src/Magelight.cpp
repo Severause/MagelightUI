@@ -16,6 +16,7 @@
 #include "ImeCore.h"
 #include "MemoryReportCore.h"
 #include "LowMemoryCore.h"
+#include "FocusShareCore.h"
 #include "PageStackCore.h"
 
 #include <RE/Skyrim.h>
@@ -961,6 +962,7 @@ namespace Magelight {
         int layer = 1;
         std::uint64_t order = 0;
         bool escapeCapture = false;   // 0.28.0: the page owns Escape (delivered as a key, no UI-mode exit)
+        std::uint32_t focusShare = 0; // 1.9.0: FocusShare::kGive / kTake (SetViewFocusSharing, invariant 30)
         bool freezeWorld = false;     // 0.31.0: freeze the world behind this view while it holds UI mode paused
         NetLevel netLevel = NetLevel::File;   // the owning mod's NetworkPolicy; File when no mod owns the view
         int  scrollStep = 40;         // 0.28.0: px per wheel notch
@@ -1003,6 +1005,15 @@ namespace Magelight {
     static std::vector<std::unique_ptr<MlView>> s_views;  // z-order = (layer, order), see SortViewsLocked
     static std::atomic<std::uint64_t> s_nextViewId{ 1 };
     static std::atomic<std::uint64_t> s_uiModeView{ 0 };  // UI mode's show/focus target
+    // 1.9.0 (invariant 30): the view a click shared the keyboard with while UI mode is on; 0 = the UI-mode view has it.
+    // Written by the render thread only (DrainInputQueue).
+    static std::atomic<std::uint64_t> s_keyView{ 0 };
+    // The view keys, typed text, the IME and View focus go to. Any thread.
+    static ViewId KeyViewNow()
+    {
+        const std::uint64_t k = s_keyView.load();
+        return static_cast<ViewId>(k ? k : s_uiModeView.load());
+    }
     // The view that entered UI mode last (Api4::ViewLabel), kept in a plain buffer so the exception handler can name
     // it without a lock or an allocation. Game thread writes; a torn read only garbles a log line.
     static char s_uiModeLabel[160] = "none yet";
@@ -1072,7 +1083,7 @@ namespace Magelight {
     static EditState::DocLoads s_docLoads;
     static bool s_hostFocusCall = false;   // render thread: inside the focus marker's Focus / Unfocus
     static std::vector<ViewId> s_editResets;   // render thread: the views whose state was reset since the last drain
-    static std::vector<EditState::Click> s_uiClicks;   // render thread: this frame's left presses on the UI-mode view
+    static std::vector<EditState::Click> s_uiClicks;   // render thread: this frame's left presses on the view that has the keyboard
 
     // s_viewsMutex held, render thread. The view's page is gone or going (a load, reload, navigation, release or
     // destroy): no report says so, so its waiting reports and its state are dropped here. released: the View itself
@@ -1241,6 +1252,9 @@ namespace Magelight {
     // keys: the Input::KeyBits a key message is read with; < 0 = capture them now (CaptureKeyBits(false)).
     // source: the Input::PointerSource a pointer message comes from.
     static void QueueInput(UINT msg, WPARAM w, LPARAM l, int keys = -1, std::uint8_t source = Input::kPointerMouse);
+    // A key message's source when the gamepad's keys style made it: it goes to the UI-mode view's page, never to a view
+    // the keyboard was shared with, as the pad stays the holder's (invariant 30). Key messages carry no pointer source.
+    static constexpr std::uint8_t kKeySourcePad = 0x80;
     static std::uint16_t CaptureKeyBits(bool windowProc);
 
     static void EnsureKeyboardView()
@@ -1285,7 +1299,7 @@ namespace Magelight {
     {
         MlView* kb = FindViewLocked(static_cast<ViewId>(s_kbViewId.load()));
         if (!kb || kb->destroyPending) return;
-        const MlView* ui = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+        const MlView* ui = FindViewLocked(KeyViewNow());
         std::string msg = std::string("{\"shown\":") + (kb->visible ? "true" : "false") + ",\"theme\":" +
                           ((ui && ui->kbTheme) ? HostTheme::KeyboardJson(*ui->kbTheme) : "null") + ",\"field\":" +
                           ((ui && ui != kb) ? EditState::FieldJson(ui->edit, ui->editNumber) : std::string("null")) + "}";
@@ -1310,14 +1324,14 @@ namespace Magelight {
 
     // A key the host makes up from a bare virtual key (the VR keyboards, Magelight_DeliverVKey): down, the character
     // Enter and Tab also type (a form's implicit submit and a textarea's newline come from it), up. Any thread.
-    static void QueueVirtualKey(int vk)
+    static void QueueVirtualKey(int vk, std::uint8_t source = Input::kPointerMouse)
     {
         if (vk <= 0 || vk > 0xFF) return;
         const LPARAM down = Input::SyntheticKeyLParam(static_cast<UINT>(vk), false);
-        QueueInput(WM_KEYDOWN, static_cast<WPARAM>(vk), down);
+        QueueInput(WM_KEYDOWN, static_cast<WPARAM>(vk), down, -1, source);
         if (vk == VK_RETURN || vk == VK_TAB)
-            QueueInput(WM_CHAR, static_cast<WPARAM>(vk == VK_RETURN ? L'\r' : L'\t'), down);
-        QueueInput(WM_KEYUP, static_cast<WPARAM>(vk), Input::SyntheticKeyLParam(static_cast<UINT>(vk), true));
+            QueueInput(WM_CHAR, static_cast<WPARAM>(vk == VK_RETURN ? L'\r' : L'\t'), down, -1, source);
+        QueueInput(WM_KEYUP, static_cast<WPARAM>(vk), Input::SyntheticKeyLParam(static_cast<UINT>(vk), true), -1, source);
     }
     static void QueueEditCommand(ultralight::EditorCommand cmd);   // after the edit-op queue it uses
 
@@ -1615,7 +1629,7 @@ namespace Magelight {
                 const std::optional<HostTheme::KbTheme> next = kbPart == Part::Set ? std::optional(kb) : std::nullopt;
                 kbChanged = v->kbTheme != next;
                 v->kbTheme = next;
-                if (kbChanged && id == static_cast<ViewId>(s_uiModeView.load())) QueueKeyboardThemeLocked();
+                if (kbChanged && id == KeyViewNow()) QueueKeyboardThemeLocked();
             }
             if (cursorPart != Part::Keep) {
                 cursorChanged = !(v->cursorTint == tint);
@@ -2721,6 +2735,7 @@ namespace Magelight {
     // and UI mode runs exactly as before (no engine menu).
     static void SetUIMode(bool on, bool hideView = true, bool pauseGame = false, bool noTextEntry = false);   // fwd (below)
     static bool EscapeCapturedByUiView();                                               // fwd (below)
+    static bool EscapeCapturedByHolder();                                               // fwd (below)
     static bool UiModeViewHoldsPad();                                                   // fwd (below)
     static std::filesystem::path GameRoot();                                          // fwd (below)
     static bool PathIsUnder(const std::filesystem::path& p, const std::filesystem::path& base);   // fwd (below)
@@ -2814,7 +2829,9 @@ namespace Magelight {
                         // A view holding the pad gets B from the gamepad router, which closes it itself. On flat
                         // the keyboard device is muted while UI mode is on, so this Cancel is the pad's.
                         if (UiModeViewHoldsPad()) return RE::UI_MESSAGE_RESULTS::kHandled;
-                        if (!EscapeCapturedByUiView()) {
+                        // On VR it can be the physical Escape, which follows the keyboard; on flat it is the pad's,
+                        // which stays the holder's (invariant 30).
+                        if (!(VR::IsVRRuntime() ? EscapeCapturedByUiView() : EscapeCapturedByHolder())) {
                             SKSE::log::info("Magelight: Cancel through the focus menu - leaving UI mode");
                             GameTask::Post([]() { SetUIMode(false); });
                         }
@@ -4573,10 +4590,18 @@ namespace Magelight {
     };
     static constinit NeverDestroyed<MlEditorListener> s_editorListener;
 
-    // 0.28.0: does the UI-mode page own Escape right now? (SetEscapeCapture /
-    // the '__escapecapture' channel — a modal or an editing control closes
-    // itself instead of the whole UI.)
+    // 0.28.0: does the page that has the keyboard (the UI-mode page, or one it shared it with: invariant 30) own Escape
+    // right now? (SetEscapeCapture / the '__escapecapture' channel — a modal or an editing control closes itself
+    // instead of the whole UI.)
     static bool EscapeCapturedByUiView()
+    {
+        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+        const MlView* v = FindViewLocked(KeyViewNow());
+        return v && v->escapeCapture;
+    }
+
+    // The same for the UI-mode view itself, whoever has the keyboard: the pad's Escape (invariant 30).
+    static bool EscapeCapturedByHolder()
     {
         std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         const MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
@@ -4696,8 +4721,7 @@ namespace Magelight {
             static std::atomic<int> s_ocLog{ 0 };
             if (s_ocLog.fetch_add(1) < 6)
                 SKSE::log::info("Magelight: OpenComposite keyboard char 0x{:04X} (mode {}) delivered to view {}",
-                    static_cast<unsigned>(wch), static_cast<int>(lparam),
-                    static_cast<std::uint64_t>(s_uiModeView.load()));
+                    static_cast<unsigned>(wch), static_cast<int>(lparam), KeyViewNow());
             return true;   // ours now: don't let Scaleform also eat it
         }
         case WM_SYSKEYDOWN: case WM_SYSKEYUP:
@@ -6439,7 +6463,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (!v || v->destroyPending) return false;
             if (v->kbTheme == next) return true;   // unchanged: no message, no line
             v->kbTheme = next;
-            if (view == static_cast<ViewId>(s_uiModeView.load())) QueueKeyboardThemeLocked();
+            if (view == KeyViewNow()) QueueKeyboardThemeLocked();
             desc = v->kbTheme ? HostTheme::KeyboardJson(*v->kbTheme) : "none (the host's look)";
         }
         SKSE::log::info("Magelight: view {} keyboard theme (API): {}", view, desc);
@@ -7079,8 +7103,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         else if (waking) SKSE::log::info("Magelight: view {} woke from hibernation", v.id);
         v.rebuilt = false;
         // The UI-mode target loading late (a wake, or an entry while it waited in the queue): the focus marker ran
-        // against a null View, so re-run it for keys to reach the new page.
-        if (s_focused.load() && v.id == static_cast<ViewId>(s_uiModeView.load())) QueueInput(0, 1, 0);
+        // against a null View, so re-run it for keys to reach the new page. While the keyboard is shared it is the
+        // view that has it that needs this (invariant 30): its new View has no focus, and the marker gives the keyboard
+        // back to the UI-mode view; the UI-mode view's own new View is focused by the move that gives it back.
+        const ViewId sharedTo = static_cast<ViewId>(s_keyView.load());   // render thread, as its only writer
+        if (s_focused.load() && v.id == (sharedTo ? sharedTo : static_cast<ViewId>(s_uiModeView.load())))
+            QueueInput(0, 1, 0);
         SpendLoad(v);
         return true;
     }
@@ -7593,6 +7621,7 @@ float4 ps_straight(VSOut i) : SV_Target {
     static Input::PointerRoutes s_pointer;
     static ViewId        s_focusedView = 0;   // the view the focus marker last gave View focus (0 = none)
     static ViewId        s_sentKeyView = 0;   // the view the last key event went to
+    static ViewId        s_keyHolder = 0;     // the UI-mode view the keyboard was last shared under (invariant 30)
     static std::uint16_t s_sentKeys = 0;      // the Input::KeyBits it went with: the modifiers that page holds down
 
     // Where the IME's window opens, in the view's CSS px: the composition character Ime::AnchorChar names (it does
@@ -7605,7 +7634,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         return r.IsEmpty() ? ed->GetCompositionCharacterBounds(0) : r;
     }
 
-    // A view about to lose View focus (UI mode ending or moving) keeps its reading as typed, as a browser's blur does:
+    // A view about to lose View focus (UI mode ending or moving, or the keyboard moving to another view: invariant 30)
+    // keeps its reading as typed, as a browser's blur does:
     // Ultralight 2.0's Unfocus leaves a composition open (no compositionend, no OnDiscardComposition), so the next IME
     // change would replace it, in that view or in the next one. The IME drops its copy (kImeCtlMsg 3), which ends the
     // page's list too. Render thread, outside s_viewsMutex (compositionend runs page script).
@@ -7617,9 +7647,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (s_hwnd) PostMessageW(s_hwnd, kImeCtlMsg, 3, 0);
     }
 
-    // s_imeEditorComposing, once a frame after the input and the focus reports: whether the UI-mode view's Editor holds
-    // a composition (false outside UI mode). Render thread, on the fiber; the view is looked up under s_viewsMutex and
-    // asked outside it.
+    // s_imeEditorComposing, once a frame after the input and the focus reports: whether the Editor of the view that has
+    // the keyboard holds a composition (false outside UI mode). Render thread, on the fiber; the view is looked up under
+    // s_viewsMutex and asked outside it.
     static void NoteEditorComposition()
     {
         if (!s_focused.load()) {
@@ -7629,7 +7659,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         ultralight::RefPtr<ultralight::View> ul;
         {
             std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-            if (MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()))) ul = v->ul;
+            if (MlView* v = FindViewLocked(KeyViewNow())) ul = v->ul;
         }
         s_imeEditorComposing.store(ul && ul->editor()->HasComposition());
     }
@@ -7691,7 +7721,9 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // Translate queued Windows messages into Ultralight events. Render thread only (the sole thread that touches
     // views); no Ultralight call is made under s_viewsMutex.
-    // Routing: keys and text -> the UI-mode view. A pointer event -> the view a button its source holds was pressed
+    // Routing: keys and text -> the view that has the keyboard (KeyViewNow: the UI-mode view, or one it shared the
+    // keyboard with, invariant 30), but the gamepad's keys -> the UI-mode view. A pointer event -> the view a button its
+    // source holds was pressed
     // on, else the topmost visible interactive view under the point, else the UI-mode view (a point outside every
     // view reaches it as a move outside its page). The wheel always goes where it points.
     static void DrainInputQueue(float bw, float bh)
@@ -7703,23 +7735,53 @@ float4 ps_straight(VSOut i) : SV_Target {
             msgs.swap(s_inputQueue);
             editOps.swap(s_editOps);
         }
-        if (msgs.empty()) return;
+        // A shared keyboard is checked every frame, input or not, so a view hidden or destroyed while it has it gives
+        // it back at once (FocusShare::Settle, below).
+        if (msgs.empty() && !s_keyView.load()) return;
 
+        // The page the keyboard goes to (keys, typed text, the IME, View focus): the UI-mode view's, or a view it was
+        // shared with (invariant 30). The pointer's fallback outside every view stays the UI-mode view (hitTest).
         ultralight::RefPtr<ultralight::View> uiUl;
         ViewId uiId = 0;
         int uiX = 0, uiY = 0;
         float uiDs = 1.f;
+        auto setKeyPage = [&](const MlView* v) {   // s_viewsMutex held
+            uiUl = v ? v->ul : nullptr;
+            uiId = v ? v->id : 0;
+            uiX = uiY = 0;
+            uiDs = 1.f;
+            if (!v) return;
+            float ex = 0, ey = 0;
+            EffectivePos(*v, bw, bh, ex, ey);
+            uiX = static_cast<int>(ex);
+            uiY = static_cast<int>(ey);
+            uiDs = v->deviceScale > 0.f ? v->deviceScale : 1.f;
+        };
+        auto shareFacts = [](const MlView* v) {   // s_viewsMutex held
+            FocusShare::Facts f;
+            f.exists = v && v->ul && !v->destroyPending;
+            f.interactive = v && v->visible && !v->clickThrough && ViewShows(*v);
+            f.flags = v ? v->focusShare : 0;
+            return f;
+        };
+        // KeyFocusGained / KeyFocusLost to the views' mods, emitted after the loop, outside every lock. other = the view
+        // on the other side of the move (0 when UI mode ending or moving took the keyboard back).
+        struct FocusNote { HostEvent type; ViewId view, other; };
+        std::vector<FocusNote> focusNotes;
+        ViewId settleTo = 0;
         {
             std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-            if (MlView* v = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()))) {
-                uiUl = v->ul;
-                uiId = v->id;
-                float ex = 0, ey = 0;
-                EffectivePos(*v, bw, bh, ex, ey);
-                uiX = static_cast<int>(ex);
-                uiY = static_cast<int>(ey);
-                uiDs = v->deviceScale > 0.f ? v->deviceScale : 1.f;
+            const ViewId taker = static_cast<ViewId>(s_keyView.load());
+            // Outside UI mode the exit's focus marker takes the keyboard back.
+            const ViewId holder = s_focused.load() ? static_cast<ViewId>(s_uiModeView.load()) : 0;
+            // A share made under another UI-mode view is the focus marker's to end: UI mode moved, and its marker
+            // is in this batch or the next.
+            if (taker && holder && holder == s_keyHolder) {
+                const MlView* h = FindViewLocked(holder);
+                if (FocusShare::Settle(holder, taker, shareFacts(h), shareFacts(FindViewLocked(taker))) == holder)
+                    settleTo = holder;
             }
+            setKeyPage(FindViewLocked(KeyViewNow()));
         }
 
         // Ultralight takes mouse coordinates in LOGICAL (CSS) pixels: AppCore
@@ -7828,12 +7890,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             return evt;
         };
-        // A character as a Char key event to the UI-mode view: one UTF-16 unit, or a surrogate pair, which is built by
-        // hand (the constructor takes one unit; the public modifiers of a hand-built event count). The Windows keys are
-        // left out: no event the constructor makes reports metaKey (invariant 24).
-        auto fireChar = [&](const ultralight::Char16* units, unsigned n, LPARAM l, std::uint16_t keys) {
+        // A character as a Char key event to `to`: one UTF-16 unit, or a surrogate pair, which is built by hand (the
+        // constructor takes one unit; the public modifiers of a hand-built event count). The Windows keys are left out:
+        // no event the constructor makes reports metaKey (invariant 24).
+        auto fireChar = [&](ultralight::View* to, const ultralight::Char16* units, unsigned n, LPARAM l,
+                            std::uint16_t keys) {
             if (n == 1) {
-                uiUl->FireKeyEvent(keyEvent(ultralight::KeyEvent::kType_Char, units[0], l, false, keys));
+                to->FireKeyEvent(keyEvent(ultralight::KeyEvent::kType_Char, units[0], l, false, keys));
                 return;
             }
             ultralight::KeyEvent evt;
@@ -7841,7 +7904,15 @@ float4 ps_straight(VSOut i) : SV_Target {
             evt.modifiers = Input::ModsFromKeyBits(static_cast<std::uint16_t>(keys & ~(Input::kKbLWin | Input::kKbRWin)));
             evt.text = ultralight::String(ultralight::String16(units, n));
             evt.unmodified_text = evt.text;
-            uiUl->FireKeyEvent(evt);
+            to->FireKeyEvent(evt);
+        };
+        // The page a key message goes to: the key page, but the gamepad's keys go to the UI-mode view's page.
+        struct KeyPage { ultralight::RefPtr<ultralight::View> ul; ViewId id = 0; };
+        auto keyPageOf = [&](const InputMsg& e) {
+            if (e.source != kKeySourcePad || !s_keyView.load()) return KeyPage{ uiUl, uiId };
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            const MlView* h = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+            return (h && h->ul && !h->destroyPending) ? KeyPage{ h->ul, h->id } : KeyPage{};
         };
         // Releases no message will bring (focus lost, UI mode left or moved): a key-up for each modifier the page
         // that last got a key holds down, so a later click reports none (mouse events take their modifiers from the
@@ -7880,9 +7951,40 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
         };
 
+        // Moves the keyboard to view `to`, a share's move (a press, or Settle giving it back): the page that had it lets
+        // go of its held modifiers and its composition and loses View focus, `to` gains it (the host's own calls, so
+        // never a keyboard raise: s_hostFocusCall), and both mods hear of it. Render thread, outside s_viewsMutex.
+        auto moveKeyboard = [&](ViewId to, ViewId holder) {
+            const ViewId from = uiId;
+            if (to == from) return;
+            releaseKeys();
+            ultralight::RefPtr<ultralight::View> before;
+            {
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+                if (MlView* v = s_focusedView ? FindViewLocked(s_focusedView) : nullptr) before = v->ul;
+                const MlView* t = FindViewLocked(to);
+                setKeyPage(t && t->ul && !t->destroyPending ? t : nullptr);
+            }
+            s_hostFocusCall = true;
+            if (before && before != uiUl) {
+                ImeFinishComposition(before.get());
+                before->Unfocus();
+            }
+            if (uiUl) uiUl->Focus();
+            s_hostFocusCall = false;
+            s_focusedView = uiUl ? to : 0;
+            s_keyView.store(to == holder ? 0 : to);
+            s_keyHolder = holder;
+            if (from && from != to) focusNotes.push_back({ HostEvent::KeyFocusLost, from, to });
+            focusNotes.push_back({ HostEvent::KeyFocusGained, to, from });
+            SKSE::log::info("Magelight: keyboard moved from view {} to view {}{}{}", from, to,
+                            to == holder ? " (the UI-mode view)" : "", uiUl ? "" : " (it has no page)");
+        };
+        if (settleTo) moveKeyboard(settleTo, settleTo);   // the share no longer holds: back to the UI-mode view
+
         for (const auto& e : msgs) {
             switch (e.msg) {
-            case kEditOpMsg: {   // the UI-mode page's own editor
+            case kEditOpMsg: {   // the editor of the page that has the keyboard
                 if (e.wparam >= editOps.size()) break;
                 const EditOp& op = editOps[e.wparam];
                 if (!uiUl || op.kind == EditOp::Notify) {   // nothing to edit: the page only hears of it
@@ -7910,7 +8012,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                         unsigned n = 1;
                         if (u[0] >= 0xD800 && u[0] <= 0xDBFF && i + 1 < op.text.size())   // SplitTyped keeps pairs whole
                             u[n++] = static_cast<ultralight::Char16>(op.text[++i]);
-                        fireChar(u, n, 0, 0);
+                        fireChar(uiUl.get(), u, n, 0, 0);
                     }
                     static std::atomic<int> s_n{ 0 };
                     if (s_n.fetch_add(1) < 4)
@@ -7937,7 +8039,21 @@ float4 ps_straight(VSOut i) : SV_Target {
                 if (*op.imeState) ImeTellPage(op, uiId, r);
                 break;
             }
-            case 0: {   // focus marker (SetUIMode, SwitchUIModeView, the UI-mode view's late load): the UI-mode view
+            case 0: {   // focus marker (SetUIMode, SwitchUIModeView, the late load of the UI-mode view or of a view
+                        // that has the keyboard): the UI-mode view
+                // UI mode starting, moving or ending takes the keyboard back from a view it was shared with (invariant 30),
+                // and the view that holds UI mode, if it does still, takes it.
+                if (const ViewId taker = static_cast<ViewId>(s_keyView.exchange(0))) {
+                    const ViewId holder = e.wparam ? static_cast<ViewId>(s_uiModeView.load()) : 0;
+                    if (holder != taker) {   // a switch to the view that has it keeps it there
+                        focusNotes.push_back({ HostEvent::KeyFocusLost, taker, holder });
+                        if (holder) focusNotes.push_back({ HostEvent::KeyFocusGained, holder, taker });
+                    }
+                }
+                {
+                    std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+                    setKeyPage(FindViewLocked(static_cast<ViewId>(s_uiModeView.load())));
+                }
                 if (!e.wparam) {   // while the page still has key focus
                     releaseKeys();
                     releaseButtons();
@@ -7989,6 +8105,18 @@ float4 ps_straight(VSOut i) : SV_Target {
                 const PointerTarget t = pointerTarget(e.source, mx, my);
                 noteHover(e.source, t.id);
                 if (!t.ul) break;
+                // A left press moves the keyboard when the holder shares it (invariant 30), before the press, so the
+                // field it lands on takes the caret as in a browser.
+                if (btn == UL::kButton_Left && t.inside && t.id != uiId) {
+                    const ViewId holder = s_focused.load() ? static_cast<ViewId>(s_uiModeView.load()) : 0;
+                    ViewId to = 0;
+                    {
+                        std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+                        to = static_cast<ViewId>(FocusShare::OnPress(holder, uiId, t.id, shareFacts(FindViewLocked(holder)),
+                                                                     shareFacts(FindViewLocked(t.id))));
+                    }
+                    if (to) moveKeyboard(to, holder);
+                }
                 UL evt{ UL::kType_MouseDown, t.X(mx), t.Y(my), btn };
                 t.ul->FireMouseEvent(evt);
                 // A press on the field that already has the focus reports nothing: DrainEditableStates looks for it.
@@ -8039,27 +8167,29 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             case WM_KEYDOWN: case WM_SYSKEYDOWN:
             case WM_KEYUP: case WM_SYSKEYUP: {
-                if (!uiUl) break;
-                if (s_sentKeyView != uiId) releaseKeys();   // UI mode moved: the page it left holds no modifier
+                const KeyPage k = keyPageOf(e);
+                if (!k.ul) break;
+                if (s_sentKeyView != k.id) releaseKeys();   // the keys went elsewhere: the page they left holds no modifier
                 const bool down = e.msg == WM_KEYDOWN || e.msg == WM_SYSKEYDOWN;
                 const bool sys = e.msg == WM_SYSKEYDOWN || e.msg == WM_SYSKEYUP;
                 const ultralight::KeyEvent evt = keyEvent(
                     down ? ultralight::KeyEvent::kType_RawKeyDown : ultralight::KeyEvent::kType_KeyUp,
                     e.wparam, e.lparam, sys, e.keys);
-                if (Input::ArmsMenuGuard(e.msg, e.wparam)) ArmMenuGuard(uiUl.get());
-                uiUl->FireKeyEvent(evt);
-                s_sentKeyView = uiId;
+                if (Input::ArmsMenuGuard(e.msg, e.wparam)) ArmMenuGuard(k.ul.get());
+                k.ul->FireKeyEvent(evt);
+                s_sentKeyView = k.id;
                 s_sentKeys = e.keys;
                 if (down && (e.wparam == VK_BACK || e.wparam == VK_DELETE) && !(e.lparam & (1 << 30))) {
                     static std::atomic<int> s_n{ 0 };
                     if (s_n.fetch_add(1) < 8)
                         SKSE::log::info("Magelight: RawKeyDown vk=0x{:02X} scan=0x{:03X} fired at view {}",
-                            e.wparam, (e.lparam >> 16) & 0x1FF, uiId);
+                            e.wparam, (e.lparam >> 16) & 0x1FF, k.id);
                 }
                 break;
             }
             case WM_CHAR: {
-                if (!uiUl) break;
+                const KeyPage k = keyPageOf(e);
+                if (!k.ul) break;
                 const ultralight::Char16 wch = static_cast<ultralight::Char16>(e.wparam);
                 // Control characters (Ctrl+C = 0x03, Ctrl+V = 0x16, ...) are
                 // editing commands already delivered by the RawKeyDown with
@@ -8074,9 +8204,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                 if (wch >= 0xD800 && wch <= 0xDBFF) { s_pendingHigh = wch; break; }
                 if (wch >= 0xDC00 && wch <= 0xDFFF) { if (!s_pendingHigh) break; units[n++] = s_pendingHigh; s_pendingHigh = 0; }
                 units[n++] = wch;
-                if (s_sentKeyView != uiId) releaseKeys();
-                fireChar(units, n, e.lparam, e.keys);
-                s_sentKeyView = uiId;
+                if (s_sentKeyView != k.id) releaseKeys();
+                fireChar(k.ul.get(), units, n, e.lparam, e.keys);
+                s_sentKeyView = k.id;
                 s_sentKeys = e.keys;
                 break;
             }
@@ -8084,6 +8214,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                 break;
             }
         }
+        for (const FocusNote& n : focusNotes)
+            Emit(n.type, n.view, static_cast<int>(n.other), 0, std::to_string(n.other).c_str());
     }
 
     // ── Text focus: the VR keyboards and the IME (render thread) ──
@@ -8105,7 +8237,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         std::vector<ViewId> resets;
         resets.swap(s_editResets);
         const bool resync = !resets.empty();
-        ViewId ui = IsUIModeActive() ? static_cast<ViewId>(s_uiModeView.load()) : 0;
+        ViewId ui = IsUIModeActive() ? KeyViewNow() : 0;   // the page that has the keyboard (invariant 30)
         if (ui == static_cast<ViewId>(s_kbViewId.load())) ui = 0;
         static EditState::Tracker s_tracker;
         if (s_tracker.Idle(ui, !raw.empty(), !clicks.empty(), resync)) return;
@@ -11417,7 +11549,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_gamepadCursorDown = down;
             s_mouseDown.store(down);
         }
-        for (const int vk : out.keys) QueueVirtualKey(vk);
+        for (const int vk : out.keys) QueueVirtualKey(vk, kKeySourcePad);
         // Keys style: the right stick scrolls under the pointer; the fraction of a pixel carries to the next batch.
         static float s_padScrollRest = 0.0f;   // GamepadSink only
         if (out.pointer.scrollY == 0.0f) {
@@ -12242,7 +12374,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 // pin above covers it from the memory check to here).
                 if (!refusal && old != view) {
                     s_uiModeView.store(view);
-                    QueueKeyboardThemeLocked();   // the keyboard page, up or not, follows the new view's theme (0.31.9)
+                    QueueKeyboardThemeLocked();   // the keyboard page, up or not, follows the theme of the view it types into (0.31.9)
                 }
             }
             if (refusal) {
@@ -12616,6 +12748,26 @@ float4 ps_straight(VSOut i) : SV_Target {
         SKSE::log::info("Magelight: view {} main-menu page {}{}", view, on ? "on" : "off",
                         MainMenuPagesAvailable() ? "" : " (needs the page thread: it stays off this session)");
         return true;
+    }
+
+    bool SetViewFocusSharing(ViewId view, std::uint32_t flags)
+    {
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending || v->isInspector) return false;
+            if (v->focusShare == flags) return true;
+            v->focusShare = flags;
+        }
+        SKSE::log::info("Magelight: view {} focus sharing: {}{}", view, (flags & FocusShare::kGive) ? "gives" : "",
+                        (flags & FocusShare::kTake) ? ((flags & FocusShare::kGive) ? " and takes" : "takes")
+                                                    : (flags ? "" : "off"));
+        return true;
+    }
+
+    ViewId GetSharedKeyView()
+    {
+        return static_cast<ViewId>(s_keyView.load());
     }
 
     bool ViewOpensAtMainMenu(ViewId view)

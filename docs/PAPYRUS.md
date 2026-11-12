@@ -170,9 +170,11 @@ Before 0.30.0 every page could reach loopback without asking.
 
 ## Rules that carry over from the C++ tier
 
-- Only the UI-mode holder gets keyboard input; HUD/click-through views never take UI mode.
+- Only the UI-mode holder gets keyboard input, unless it shares the keyboard (manifest
+  `shareFocus` / `acceptFocus`, host 1.9.0): a click on a view that accepts it gives that view the keys while
+  UI mode stays the holder's. HUD/click-through views never take UI mode.
 - Hotkeys never open over an engine menu, the console or game text entry; while a page has key
-  focus only its own key fires (to close).
+  focus only its own key fires (to close), and not even that while it has shared the keyboard.
 - Pages are file-only unless the mod opts into loopback (see [Network](#network)).
 - `Magelight_ViewDomReady` fires again after every reload; re-send state from there.
 - A hidden view's page can take up to about a second longer after a load to reach DOM ready

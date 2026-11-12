@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.9.0 | 10900 | The keyboard shared on a click while one view holds UI mode: `SetViewFocusSharing` with `kFocusShareGive` / `kFocusShareTake`, the `KeyFocusGained` / `KeyFocusLost` events, manifest `"shareFocus"` / `"acceptFocus"`, `QueryCapability("focusShare")` |
 | 1.8.1 | — | Low memory: `UIModeRefused` `low memory` only when one reading is short of what that view's page needs (to show a built page, else to load it), no longer for as long as the guard is up; a view shown without UI mode loads when its load fits, guard up or not; hidden loads also wait while they would bring free commit under the guard's floor; the view that last held UI mode is not released; `lowMemoryFloorMB` is what a 1920x1080 page needs to load, default 320 |
 | 1.8.0 | 10800 | Other plugins' key reads a page lets through while it holds UI mode: `kUIModeFlagPassPolledKeys` on `RequestUIMode`, `SetViewPolledKeys` (named DLLs, named keys, or both), manifest `"polledKeys"`, `QueryCapability("polledKeys")` |
 | 1.8.0 | — | The low-memory guard: while Windows is nearly out of memory, `UIModeRefused` with the detail `low memory` for a view not already on screen, first loads and wakes wait, hidden views are released whether or not they hibernate (`ViewReloaded` on the next load of one that never does); `Magelight.json` `lowMemoryFloorMB` |
@@ -64,6 +65,21 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.9.0 - Unreleased
+
+### What players notice
+
+- **Two mods' pages on screen can share the keyboard.** When both mods opt in, a click on the other mod's page moves
+  the typing there (a chat box beside a scene menu, say), and a click back returns it, without closing either page.
+
+### For mod authors
+
+- **`SetViewFocusSharing`** (and manifest `"shareFocus"` / `"acceptFocus"`): while a view that gives holds UI mode,
+  a left click on a view that takes moves the keyboard, the IME and the page's focus there. UI mode itself (the
+  cursor, the pause, the gamepad, the close) stays the holder's. `KeyFocusGained` and `KeyFocusLost` tell both mods;
+  no UI-mode hotkey fires while the keyboard is shared (show/hide bindings still do). See "Sharing the keyboard with
+  another mod's view" in `docs/CPP.md`.
 
 ## 1.8.1 - Unreleased
 

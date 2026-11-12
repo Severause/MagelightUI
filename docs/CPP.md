@@ -317,6 +317,8 @@ change only, so a page that opts out that way cancels every event.
   from the page: `magelight.send('__escapecapture','1')`); Escape then
   arrives as an ordinary keydown/keyup and UI mode stays. Clear it when the
   control closes. Feature-detect with `QueryCapability("escapecapture")`.
+  From 1.9.0 the keyboard's Escape asks the view that has the keyboard (see
+  "Sharing the keyboard"), and the gamepad's B the view holding UI mode.
   The host's toggle key (PageUp unless `Magelight.json` sets `toggleKey`)
   always leaves UI mode, captured or not.
 - **Local servers.** Once the mod has called
@@ -819,6 +821,60 @@ if (api->hostVersionNumber >= 10800 && api->QueryCapability("polledKeys") == 1) 
 api->RequestUIMode(barterView, MAGELIGHT_API::kUIModeFlagPause);
 ```
 
+## Sharing the keyboard with another mod's view (1.9.0)
+
+Only one view holds UI mode, and the keyboard goes to it. A page another mod shows beside yours (a chat box over
+your dashboard, a scene menu beside your panel) gets the mouse while yours holds UI mode, but no keys. When both
+mods opt in, each on its own view, a click moves the keyboard instead:
+
+- `SetViewFocusSharing(view, kFocusShareGive)` on the view that will hold UI mode: while it holds it, a left click
+  (or the VR trigger) on a view that takes moves the keyboard there.
+- `SetViewFocusSharing(view, kFocusShareTake)` on a view that should take it (any mod's, yours included). A view may
+  do both. The setting is kept across reloads, hibernation and rebuilds, until the view is destroyed.
+- The manifest's `"shareFocus": true` and `"acceptFocus": true` do the same for a manifest view
+  (see [MANIFEST.md](MANIFEST.md)).
+
+What moves to the clicked view:
+- keys and typed text, the VR keyboard included;
+- the IME;
+- the keyboard's Escape: if that page captured it (`SetEscapeCapture`), it gets the key, otherwise Escape closes UI
+  mode as before;
+- the page's focus: `window` gets `focus`, `document.hasFocus()` turns true, and the view the keyboard left gets
+  `blur`.
+
+What stays with the holder, who still owns the UI mode:
+- the cursor and the pause;
+- the gamepad, its keys (A, B, the d-pad) and B's Escape capture;
+- which plugins may read keys (`SetViewPolledKeys`);
+- `ReleaseUIMode` and the close.
+
+Moving it again, and back:
+- a click on the holder's view, or on another view that takes, moves the keyboard there;
+- it goes back to the holder's view when the holder stops giving, or the view that has it stops taking, is hidden,
+  is destroyed or is rebuilt (`RebuildViewAtScale`);
+- the share ends whenever UI mode starts, moves to another view or ends.
+
+While the keyboard is shared, no UI-mode hotkey fires, the holder's own close key included, since the key may be
+going into the other mod's text field (a VR controller binding still closes). A show/hide binding
+(`kHotkeyActionToggleVisible`, a manifest hud view's key) fires either way, as it does while a page has the keyboard.
+
+Each move sends `KeyFocusGained` to the mod of the view that has the keyboard now and `KeyFocusLost` to the mod of
+the view that had it. `x` is the view on the other side and `detail` its modId (empty for a view no mod owns, and
+`x` is 0 in a `KeyFocusLost` when UI mode ended). When UI mode moves while the keyboard is shared, the view it moved
+to gets a `KeyFocusGained` as well as its `UIModeEntered`. Gate on `hostVersionNumber >= 10900` and
+`QueryCapability("focusShare") == 1`; an older host has no `SetViewFocusSharing` and keeps the keyboard on the
+holder.
+
+```cpp
+// The dashboard's mod, on its own view:
+if (api->hostVersionNumber >= 10900 && api->QueryCapability("focusShare") == 1)
+    api->SetViewFocusSharing(dashboard, MAGELIGHT_API::kFocusShareGive);
+
+// The chat box's mod, on its own view:
+if (api->hostVersionNumber >= 10900 && api->QueryCapability("focusShare") == 1)
+    api->SetViewFocusSharing(chatBox, MAGELIGHT_API::kFocusShareTake);
+```
+
 ## When the game runs low on memory (1.8.0)
 
 Free commit is the room left under Windows' commit limit, which the game shares with every other program, plus (from
@@ -1062,8 +1118,9 @@ Contrast is WCAG 2's ratio. Labels are held to 3:1 on both `key` and
 - Without a theme, the keyboard is drawn exactly as before 0.31.9, including
   a held special key, which keeps its own colour there.
 - Per view: kept until you change it or destroy the view; hibernation and
-  `RebuildViewAtScale` keep it. It shows only while your view holds UI mode
-  with the keyboard up. From 1.5.0 the keyboard goes down when another view
+  `RebuildViewAtScale` keep it. It shows only while your view has the
+  keyboard (it holds UI mode, or from 1.9.0 the keyboard was shared with it)
+  and the keyboard is up. From 1.5.0 the keyboard goes down when another view
   takes UI mode (including your own other views), and shows that view's theme
   the next time a field there raises it. Any thread.
 - The font is the keyboard's own; there is no font token.
@@ -1075,7 +1132,7 @@ Contrast is WCAG 2's ratio. Labels are held to 3:1 on both `key` and
   1.1.0 a part with a bad value is refused alone: the other part of the
   message still applies, and a page that asks gets a reply saying which part
   was refused and why.
-- The keyboard page is privileged (its keys go to the UI-mode view), so it
+- The keyboard page is privileged (its keys go to the view that has the keyboard), so it
   never sees what you or a page passed: the host checks the colours, builds a
   fresh message from the numbers, and the page checks each value again.
 - The keyboard page is kept current while it is down, and after a hide it
