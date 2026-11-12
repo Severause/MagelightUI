@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:#1b1712;color:#e8dcc0;font:16px Georgia,serif;overflow:hidden}
+.card{float:left;width:420px;height:300px;margin:60px 40px;padding:24px;border-radius:14px;background:#2a231a;box-shadow:0 12px 28px rgba(0,0,0,.7),0 0 18px rgba(201,168,106,.35)}
+</style></head><body>
+<!-- Three cards with blurred shadows whose colour changes every frame, so each card is repainted. -->
+<div class="card">Three cards with blurred shadows, each repainted every frame.</div><div class="card">The shadow colour changes with the frame number.</div><div class="card">Hover styles on shadowed cards cost the same.</div>
+<script>var cs=document.querySelectorAll('.card');window.__bench=function(n){var a=(.3+.3*Math.abs(Math.sin(n/20))).toFixed(3);for(var i=0;i<cs.length;i++)cs[i].style.boxShadow='0 12px 28px rgba(0,0,0,.7),0 0 18px rgba(201,168,106,'+a+')'};</script>
+</body></html>
