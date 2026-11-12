@@ -82,7 +82,8 @@ Magelight, current SKSE):
 
 - The game launches; `Magelight.log` line one names the new version, then `pages run on a stack of
   their own` and, once a page loads, `WebKit's VM is up ...`, with no `does not export` line.
-- F6 shows and hides the `Magelight.Badge` badge, F7 opens its panel.
+- F6 shows and hides the `Magelight.Badge` badge, F7 opens its panel. F11 shows its note: with the panel open, a
+  click on the note moves typing there and a click on the panel moves it back (focus sharing, 1.9.0).
 - `Magelight.ReactConfig` opens with F8: UI mode takes the cursor, typing lands in the
   page, Escape closes, game controls resume.
 - A `Magelight.json` override (`toggleKey`) applies.

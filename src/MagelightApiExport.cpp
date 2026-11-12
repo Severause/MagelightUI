@@ -157,6 +157,8 @@ namespace {
         &Magelight::Api4::SetViewMainMenu,
         // 1.8.0 appendix
         &Magelight::Api4::SetViewPolledKeys,
+        // 1.9.0 appendix
+        &Magelight::Api4::SetViewFocusSharing,
     };
 
 }  // namespace

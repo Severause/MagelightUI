@@ -104,11 +104,13 @@ v1-v3 C++ `CreateView` belong to no mod: they are file-only and cannot opt in.
   `Magelight.json` says otherwise). A manifest adds its file and view name to the line.
 - A hotkey never *opens* a page while an engine menu, the console, or a game text field is
   active (`hotkey ignored — an engine menu, the console or text entry is open`), and while a
-  page has key focus only that page's own key fires (to close it).
+  page has key focus only that page's own key fires (to close it), and not even that while it has
+  shared the keyboard with another view (1.9.0).
 - The user may have rebound or disabled it in `Magelight.json` (`"hotkeys"`); the log says
   `hotkey for 'Mod/view' rebound ...` or `disabled by Magelight.json`.
-- While Windows is low on memory (1.8.0) a page does not open: `UI mode refused for view N - low
-  memory`. See "Pages stop opening: the game is low on memory".
+- When Windows cannot give the memory a page needs (1.8.0), the page does not open: `UI mode refused for
+  view N - not enough free memory to load its page` (or `to show its page`). See "Pages stop opening: the game is
+  low on memory".
 
 ## A gamepad does nothing in a page
 
@@ -458,7 +460,7 @@ it read, or says that defaults are in effect.
 | `freezeWorldSkipCapture` | `true` | In UI-pass composite (`composite` `ui`, or `auto` behind an upscaler or a swapchain wrapper), keeps pages out of the frame the game freezes as the background. `false` if a page flickers when the freeze starts. No effect with composite `present` or `engine`, or with `freezeWorld` `false` |
 | `msaa` | `4` | 0.31.0: MSAA samples for the page targets Ultralight asks to antialias on the GPU path. `1` turns it off, `2`, `4` or `8`; a count the graphics card cannot do steps down, any other number rounds down to one of these. On Ultralight 2.0 (1.5.0) pages draw their shapes analytically and no page target measured has asked for it, so it costs nothing unless one does; the memory line says (see "Memory"). A target that takes it holds that many more copies of itself in video memory (about 15 MB each at 2560x1440) |
 | `memoryLogMinutes` | `10` | 1.5.0: minutes between the periodic memory lines (0-1440; `0` = none). The lines after UI mode and on request stay. See "Memory" |
-| `lowMemoryFloorMB` | `768` | 1.8.0: while less than this much commit is free, no new page opens or loads and hidden pages are released (0-16384; `0` = off). See "Pages stop opening: the game is low on memory" |
+| `lowMemoryFloorMB` | `320` | 1.8.0. From 1.8.1: the free commit a page on a 1920x1080 screen needs before it loads (in 1.8.0 the default was 768 and no page opened below it). A page already loaded needs two fifths of it, a larger screen more; below what the largest page needs, hidden pages are released (0-16384; `0` = off). See "Pages stop opening: the game is low on memory" |
 | `ulFiberMB` | `8` | 1.3.0: the stack pages run on, in MB (8-64; since 1.5.0 a smaller number is raised to 8, with a line in the log, because on Ultralight 2.0 a page's first uncaught error overflows a page stack under about 6 MB): a fiber on the game's main thread, so a page that recurses or nests deeply, or leaves an error uncaught, cannot run out the game's own stack. `0` runs pages on the game's stack, as Magelight 1.2 did; since 1.5.0 the engine's stack reserve is then set past the main thread's stack guarantee. See "A page error ends the UI or the game". With `pageThread` it sizes the page thread's stack instead (`0` = 8) |
 | `keyFallback` | `true` | 1.7.0, flat only: while UI mode is on the game's keyboard is muted and pages get keys from the window. If a key reaches DirectInput and no key press has reached the window this session, the key is passed to the page anyway (`key scan 0x.. reached DirectInput but not the window - passed on`), without auto-repeat. Set it to `false` if a page gets a key twice, and report it with the log |
 | `pageThread` | `true` | 1.7.0, flat only (main-menu pages need it, 1.7.1): pages run on a thread of their own, so their scripts, layout and painting take no time out of the game's frame (the game thread only runs the GPU work they recorded and draws them). A page stuck in a script freezes every page (they share the one page thread) but not the game, and the log names it. Pages show one frame later. Turned off for the session, with a line in the log saying why, on VR, on a graphics device that cannot be used from a second thread, when the device (or a wrapper of it) refuses a deferred context, when the device in use is the engine's own object behind a replaced `d3d11.dll` or `dxgi.dll` (1.7.2: ENB with `composite` `engine`, say; the first page draw faults on that device, and the log lists the DLLs after `not Windows' own graphics DLLs:` and says which device is in use), or when the thread cannot be created: `the page thread is off - <why>; pages run in the game's frame` (on VR, `pageThread is ignored on Skyrim VR`, when the file asks for it). A thread that starts but gets no renderer from Ultralight logs `the page thread could not start Ultralight; pages run in the game's frame`. `false` puts pages back in the game's frame, for a mod whose page callbacks touch game state (the threading rules in `CPP.md`) or a graphics problem only the thread shows. In the game's frame, behind Community Shaders' frame generation, rounded page rows that only have a hover background can paint black. When it runs: `pages run on a thread of their own (<thread>, N MB stack); the graphics driver's command lists are native` (or `emulated by Direct3D`). Set it back to `false` if pages misbehave with it on, and report it with the log |
@@ -510,7 +512,7 @@ fault, so set `pageThread` to `false` for that session and report it with the lo
 
 `0xE06D7363` is a C++ exception nobody caught. Since 1.7.2 the next line names it,
 `the exception: C++ exception std::bad_alloc: bad allocation`, with the stack that threw it under that line.
-`std::bad_alloc` means the process ran out of memory: read `commit N GB free` in the last `memory (periodic)` line, and
+`std::bad_alloc` means the process ran out of memory: read `commit N of M GB free` in the last `memory (periodic)` line, and
 give Windows a bigger page file before blaming a mod. A C++ exception that came out of a mod's page callback no longer
 turns the overlay off: the log says `<listener> on view N threw - that call is lost, the overlay stays on`, with the
 same lines under `mod call:`, and that page may look stuck until it is reopened. Report that one to the mod's author.
@@ -518,41 +520,83 @@ Since 1.8.0 Magelight stops opening and loading pages before memory runs out (se
 
 ## Pages stop opening: the game is low on memory
 
-Since 1.8.0, when Windows has nearly run out of memory to give programs (commit, which the game shares with every
-other program open), Magelight opens no new page and loads none until memory recovers. When a page is asked to
-open, the HUD says `Magelight UI: Windows is nearly out of memory - the page was not opened` (at most every 30 s),
-and the log has lines like these:
+When a page is asked to open and Windows cannot give the memory it needs, the HUD says `Magelight UI: the page was
+not opened - Windows' memory limit (RAM + page file) is reached` (at most every 30 s) and the page stays closed.
+
+**The limit is not the memory percentage in Task Manager.** That percentage is RAM in use. The limit here is commit:
+the memory Windows has promised to every program, which can never be more than the RAM plus the page file. Task
+Manager shows it under Performance > Memory as "Committed" (used / limit). A modded game commits far more than the
+RAM it touches, so a PC can sit at 40% memory and still be at its commit limit. When commit runs out, the next
+program to ask for memory is refused, the game included.
+
+What helps, most first:
+
+- **A larger page file.** It raises the limit. Windows Settings > System > About > Advanced system settings >
+  Performance > Advanced > Virtual memory. A page file Windows manages, or a custom one with a high maximum, grows
+  when it is needed as long as its disk has room; from 1.8.1 that growth counts as free.
+- Fewer programs open beside the game.
+- Saving and restarting the game: a private memory that grows minute after minute (see the log line below) is a
+  leak in the game or another mod, and a restart gives it back.
+
+**What Magelight does (1.8.1).** A page that is asked for opens whenever its own need fits: about 128 MB of free
+commit when the page is already loaded and 320 MB when it has to load first, on a 1920x1080 screen, and more on a
+larger one. It is checked once, when it is asked for, so the page opens the moment the memory is there. Separately,
+when free commit falls below what the largest page needs to load, Magelight lets go of its hidden pages and stops
+loading in the background, which gives memory back before a page has to be refused. The page you last had open stays
+loaded, so opening it again stays cheap. Pages already on screen stay up and still take the mouse and keys. Pages
+that were let go load again when they are next opened, and most come back on their own a minute or more after
+memory recovers. (1.8.0 used one 768 MB floor for everything and kept every page closed until 1,152 MB were free
+again.)
+
+The log has lines like these:
 
 ```
-Magelight: low memory - 0.71 GB of commit free, the game's private memory 15.6 GB (the floor is 768 MB). Until it
-recovers no page opens, loads or prepaints, and hidden views are released; pages already shown stay up
+Magelight: page files - C: 8.0 GB, at most 8.0 GB (they can still grow by 0.00 GB, counted as free commit)
+Magelight: low memory - 0.28 GB of commit free of a 23.9 GB limit, the game's private memory 15.6 GB, Windows'
+commit reading: at the maximum (the page files cannot grow) (under the 320 MB the largest page needs to load). Until
+it recovers hidden views are released and nothing loads or prepaints in the background; a page that is asked for
+still opens while its own need fits, and pages already shown stay up
 Magelight: low memory - hidden views released: 4, 5, 9 (each loads its page again when shown, or once memory has
 been back a while when it never hibernates)
-Magelight: UI mode refused for view 7 - low memory (0.70 GB of commit free, the game's private memory 15.6 GB; the
-floor is 768 MB)
+Magelight: UI mode refused for view 7 - not enough free memory to load its page (0.21 GB of commit free of a 23.9 GB
+limit, the game's private memory 15.6 GB, Windows' commit reading: at the maximum (the page files cannot grow); it
+needs 320 MB). Windows' limit is the RAM plus the page file: a larger page file raises it
 Magelight: low memory - view 12's first load waits until memory recovers
-Magelight: memory recovered - 1.40 GB of commit free, the game's private memory 14.9 GB; pages open and load again
-(1 views waited)
+Magelight: memory recovered - 0.62 GB of commit free of a 23.9 GB limit, the game's private memory 15.2 GB,
+Windows' commit reading: at the maximum (the page files cannot grow); background loads go on (1 views waited)
 Magelight: views released for low memory load again, hidden: 4, 5
 ```
 
-Pages already on screen stay up, and a page already on screen can still take the mouse and keys. Pages that were
-hidden load again when they are next opened, and most come back on their own a minute or more after memory recovers.
-Before 1.8.0 the next page to open could fail to allocate inside Ultralight, and the overlay then turned itself off
-until the game restarted (the `std::bad_alloc` case above): nothing can say what a failure there left half done, so
-Magelight does not try to carry on after one. A page already on screen can still hit that failure if memory runs out completely.
+Reading them:
 
-`the game's private memory` tells whether the game is the one using the memory: it is the whole Skyrim process.
-Magelight's own share is the figures at the start of a `memory` line (see "Memory"). A private memory that grows
-minute after minute is a leak in the game or another mod. What helps:
+- `of commit free of a ... limit`: the room left, and the limit (the RAM plus the page files' sizes now). With `(...
+  of it the page files can still grow by)`, part of the room is growth Windows has not made yet.
+- `the game's private memory`: the whole Skyrim process, which tells whether the game is the one using the memory.
+  Magelight's own share is the figures at the start of a `memory` line (see "Memory").
+- `Windows' commit reading`: what Windows itself says, for whoever reads the log: `low use` or `normal` (plenty
+  left), `high` (near the limit, the page files may still grow), `at the maximum` (near the limit, and they cannot)
+  or `unread` (Windows did not let Magelight ask). Magelight decides nothing on it.
+- `page files - ...` comes the first time the room under the limit runs short, and again when a page file's size
+  changes: each file's size now and the most Windows may grow it to, and what that leaves (no more than the disk's
+  free space, less 1 GB). A file whose size and maximum are equal is fixed and never grows.
 
-- A bigger page file, or one Windows manages (Windows can grow it, and the guard lifts once it has).
-- Fewer programs open beside the game.
-- Saving and restarting the game when the line appears.
+On a PC whose page file can still grow, the line reads like this, and the growth is part of the free commit the
+other lines give. For a file Windows manages, Magelight uses the maximum Microsoft documents when Windows reports
+less, and the line says so:
 
-`lowMemoryFloorMB` in `Magelight.json` sets the floor (768 MB). The guard lifts once free commit is back above it by
-half the floor (at least 256 MB) and it has been up 10 s. `0` turns it off, which brings back the risk it guards
-against.
+```
+Magelight: page files - C: 4.0 GB, at most 48.0 GB (Windows manages its size; it reported 4.0 GB) (they can still
+grow by 44.00 GB, counted as free commit)
+```
+
+Before 1.8.0 a page that opened with too little memory could fail to allocate inside Ultralight, and the overlay then
+turned itself off until the game restarted (the `std::bad_alloc` case above): nothing can say what a failure there
+left half done, so Magelight does not try to carry on after one. A page already on screen can still hit that failure
+if memory runs out completely.
+
+`lowMemoryFloorMB` in `Magelight.json` is what a 1920x1080 page needs before it loads (320 MB). `0` turns the guard
+off, which brings back the risk it guards against: when memory does run out, a page that opens can fail inside
+Ultralight and the overlay turns itself off until the game restarts.
 
 ## A page error ends the UI or the game (stack overflow, 0xC00000FD)
 

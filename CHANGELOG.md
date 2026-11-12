@@ -13,6 +13,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.9.0 | 10900 | The keyboard shared on a click while one view holds UI mode: `SetViewFocusSharing` with `kFocusShareGive` / `kFocusShareTake`, the `KeyFocusGained` / `KeyFocusLost` events, manifest `"shareFocus"` / `"acceptFocus"`, `QueryCapability("focusShare")` |
+| 1.8.1 | — | Low memory: `UIModeRefused` `low memory` only when one reading is short of what that view's page needs (to show a built page, else to load it), no longer for as long as the guard is up; a view shown without UI mode loads when its load fits, guard up or not; hidden loads also wait while they would bring free commit under the guard's floor; the view that last held UI mode is not released; `lowMemoryFloorMB` is what a 1920x1080 page needs to load, default 320 |
 | 1.8.0 | 10800 | Other plugins' key reads a page lets through while it holds UI mode: `kUIModeFlagPassPolledKeys` on `RequestUIMode`, `SetViewPolledKeys` (named DLLs, named keys, or both), manifest `"polledKeys"`, `QueryCapability("polledKeys")` |
 | 1.8.0 | — | The low-memory guard: while Windows is nearly out of memory, `UIModeRefused` with the detail `low memory` for a view not already on screen, first loads and wakes wait, hidden views are released whether or not they hibernate (`ViewReloaded` on the next load of one that never does); `Magelight.json` `lowMemoryFloorMB` |
 | 1.7.1 | 10701 | UI mode asked at the main menu opens the page there; `SetViewMainMenu`, manifest `"mainMenu"`, `QueryCapability("mainMenu")` (flat, page thread); `UIModeRefused` detail `view does not show here` |
@@ -64,9 +66,24 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
-## Scout: Ultralight 2.0.0-beta.3 and `pageGpu` async (not a release)
+## 1.9.0 - Unreleased
 
-- **Ultralight 2.0.0-beta.3** is the SDK build of record on this branch. The GPU driver appends command lists (beta.3
+### What players notice
+
+- **Two mods' pages on screen can share the keyboard.** When both mods opt in, a click on the other mod's page moves
+  the typing there (a chat box beside a scene menu, say), and a click back returns it, without closing either page.
+
+### For mod authors
+
+- **`SetViewFocusSharing`** (and manifest `"shareFocus"` / `"acceptFocus"`): while a view that gives holds UI mode,
+  a left click on a view that takes moves the keyboard, the IME and the page's focus there. UI mode itself (the
+  cursor, the pause, the gamepad, the close) stays the holder's. `KeyFocusGained` and `KeyFocusLost` tell both mods;
+  no UI-mode hotkey fires while the keyboard is shared (show/hide bindings still do). See "Sharing the keyboard with
+  another mod's view" in `docs/CPP.md`.
+
+### Ultralight 2.0.0-beta.3 and `pageGpu` async
+
+- **Ultralight 2.0.0-beta.3** is the SDK build of record. The GPU driver appends command lists (beta.3
   may hand over more than one before a draw), takes immutable storage from the flag alone and uploads whole blocks
   of a block-compressed texture.
 - **`"pageGpu": "async"`** (`Magelight.json`, with the page thread): the page thread records its graphics work as
@@ -79,6 +96,50 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   font-test, input-test, visibility-test, ime-test, ime-box-test, gamepad-page-test, tooltip-test, hosttheme-test,
   gamepad-test, lowmemory-test, memreport-test, pathtext-test, polledkeys-test, and the stage lint.
 - `tools/bench-test`: the per-frame cost of a page through `MagelightGPU.dll`, for comparing two SDK builds.
+
+## 1.8.1 - Unreleased
+
+### What players notice
+
+- **Pages open again on a PC that runs close to its memory limit.** 1.8.0's low-memory guard stopped every page
+  opening while Windows had less than 768 MB left to give (free commit: what is left under the RAM plus the page
+  file), and kept them closed until 1,152 MB were free. That is several times what a page takes, so a PC that plays
+  within a few hundred MB of its limit got "Windows is nearly out of memory" for pages that opened without trouble
+  before. Now:
+  - A page you ask for is checked once, when you ask, against what that page needs: about 128 MB when it is already
+    loaded and 320 MB when it has to load first, on a 1920x1080 screen (more on a larger one). It opens the moment
+    that much is free. Nothing has to recover first.
+  - The guard itself now only lets go of hidden pages and holds back loading in the background. It comes up below
+    what the largest page needs to load, so when a page cannot open Magelight is already giving back what it held.
+    The page you last had open stays loaded, so opening it again stays cheap.
+  - `lowMemoryFloorMB` in `Magelight.json` now means what a 1920x1080 page needs before it loads. Its default is 320
+    (it was 768). `0` still turns the guard off.
+- **What the page file can still grow by counts as free.** The guard read only the room under Windows' current
+  commit limit (the RAM plus the page files' current sizes). A page file that can still grow (one Windows manages, or
+  one whose maximum is above its minimum) lets Windows give more than that, so the guard could refuse pages while
+  Windows still had plenty to give. It now counts what the page files can still grow by, up to their maximum and
+  their disk's free space. For a page file Windows manages it uses the maximum Microsoft documents (three times the
+  RAM or 4 GB, whichever is larger, and at most an eighth of the disk) when Windows reports less. A fixed page file
+  (the same minimum and maximum) is read as before.
+- **The message says what is short.** The HUD line is now `Magelight UI: the page was not opened - Windows' memory
+  limit (RAM + page file) is reached`. That limit is not the memory percentage Task Manager shows, which is RAM in
+  use: it is the second number of "Committed" under Performance > Memory in Task Manager, and a modded game can reach
+  it well before the RAM is full. A larger page file raises it. The log lines now name the limit, each page file and
+  its maximum (`page files - ...`), the game's own share and Windows' own reading of its commit. See "Pages stop
+  opening: the game is low on memory" in `docs/TROUBLESHOOTING.md`.
+
+### For mod authors
+
+- `UIModeRefused` with the detail `low memory` now comes only when one reading is short of what that view's page
+  needs (to show it when its page is built, else to load it too), not for as long as the guard is up. Asking again
+  works the moment the memory is there.
+- A view you show without UI mode loads when its load fits the guard's last reading (at most a second old), guard
+  up or not. Loads of hidden views wait while the guard is up, and after it for as long as they would bring free
+  commit back under its floor. Views that load together are counted together: a load's need counts as taken for two
+  seconds after it starts.
+- The guard lifts at twice its floor (it was the floor and a half).
+- While the guard is up, the view that last held UI mode is not released.
+- Nothing in the ABI changed. See "When the game runs low on memory" in `docs/CPP.md`.
 
 ## 1.8.0 - Unreleased
 

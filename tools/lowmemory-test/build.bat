@@ -1,5 +1,6 @@
 @echo off
-rem Builds and runs lowmemory_test.exe: src\LowMemoryCore.h's floor, hysteresis and setting clamp (std only, no game).
+rem Builds and runs lowmemory_test.exe: src\LowMemoryCore.h's needs, floor, hysteresis, growth room and setting clamp
+rem (std only, no game).
 rem %1 = output folder (default C:\b\mgl-lowmemorytest). Exit 0 when every check passes.
 setlocal
 set "OUT=%~1"

@@ -317,6 +317,8 @@ change only, so a page that opts out that way cancels every event.
   from the page: `magelight.send('__escapecapture','1')`); Escape then
   arrives as an ordinary keydown/keyup and UI mode stays. Clear it when the
   control closes. Feature-detect with `QueryCapability("escapecapture")`.
+  From 1.9.0 the keyboard's Escape asks the view that has the keyboard (see
+  "Sharing the keyboard"), and the gamepad's B the view holding UI mode.
   The host's toggle key (PageUp unless `Magelight.json` sets `toggleKey`)
   always leaves UI mode, captured or not.
 - **Local servers.** Once the mod has called
@@ -819,28 +821,98 @@ if (api->hostVersionNumber >= 10800 && api->QueryCapability("polledKeys") == 1) 
 api->RequestUIMode(barterView, MAGELIGHT_API::kUIModeFlagPause);
 ```
 
+## Sharing the keyboard with another mod's view (1.9.0)
+
+Only one view holds UI mode, and the keyboard goes to it. A page another mod shows beside yours (a chat box over
+your dashboard, a scene menu beside your panel) gets the mouse while yours holds UI mode, but no keys. When both
+mods opt in, each on its own view, a click moves the keyboard instead:
+
+- `SetViewFocusSharing(view, kFocusShareGive)` on the view that will hold UI mode: while it holds it, a left click
+  (or the VR trigger) on a view that takes moves the keyboard there.
+- `SetViewFocusSharing(view, kFocusShareTake)` on a view that should take it (any mod's, yours included). A view may
+  do both. The setting is kept across reloads, hibernation and rebuilds, until the view is destroyed.
+- The manifest's `"shareFocus": true` and `"acceptFocus": true` do the same for a manifest view
+  (see [MANIFEST.md](MANIFEST.md)).
+
+What moves to the clicked view:
+- keys and typed text, the VR keyboard included;
+- the IME;
+- the keyboard's Escape: if that page captured it (`SetEscapeCapture`), it gets the key, otherwise Escape closes UI
+  mode as before;
+- the page's focus: `window` gets `focus`, `document.hasFocus()` turns true, and the view the keyboard left gets
+  `blur`.
+
+What stays with the holder, who still owns the UI mode:
+- the cursor and the pause;
+- the gamepad, its keys (A, B, the d-pad) and B's Escape capture;
+- which plugins may read keys (`SetViewPolledKeys`);
+- `ReleaseUIMode` and the close.
+
+Moving it again, and back:
+- a click on the holder's view, or on another view that takes, moves the keyboard there;
+- it goes back to the holder's view when the holder stops giving, or the view that has it stops taking, is hidden,
+  is destroyed or is rebuilt (`RebuildViewAtScale`);
+- the share ends whenever UI mode starts, moves to another view or ends.
+
+While the keyboard is shared, no UI-mode hotkey fires, the holder's own close key included, since the key may be
+going into the other mod's text field (a VR controller binding still closes). A show/hide binding
+(`kHotkeyActionToggleVisible`, a manifest hud view's key) fires either way, as it does while a page has the keyboard.
+
+Each move sends `KeyFocusGained` to the mod of the view that has the keyboard now and `KeyFocusLost` to the mod of
+the view that had it. `x` is the view on the other side and `detail` its modId (empty for a view no mod owns, and
+`x` is 0 in a `KeyFocusLost` when UI mode ended). When UI mode moves while the keyboard is shared, the view it moved
+to gets a `KeyFocusGained` as well as its `UIModeEntered`. Gate on `hostVersionNumber >= 10900` and
+`QueryCapability("focusShare") == 1`; an older host has no `SetViewFocusSharing` and keeps the keyboard on the
+holder.
+
+```cpp
+// The dashboard's mod, on its own view:
+if (api->hostVersionNumber >= 10900 && api->QueryCapability("focusShare") == 1)
+    api->SetViewFocusSharing(dashboard, MAGELIGHT_API::kFocusShareGive);
+
+// The chat box's mod, on its own view:
+if (api->hostVersionNumber >= 10900 && api->QueryCapability("focusShare") == 1)
+    api->SetViewFocusSharing(chatBox, MAGELIGHT_API::kFocusShareTake);
+```
+
 ## When the game runs low on memory (1.8.0)
 
-Free commit is the room left under Windows' commit limit, which the game shares with every other program. When it
-falls below the player's `lowMemoryFloorMB` (768 MB unless they changed it), the host shows and loads nothing new for
-Ultralight until memory recovers. An allocation that fails inside Ultralight throws through code Magelight cannot
-see, and the overlay then turns itself off for the session (`RenderDead`); the guard keeps that throw from happening.
-While it is up:
+Free commit is the room left under Windows' commit limit, which the game shares with every other program, plus (from
+1.8.1) what the page files can still grow by, up to their maximum and their disk's free space less 1 GB. An
+allocation that fails inside Ultralight throws through code Magelight cannot see, and the overlay then turns itself
+off for the session (`RenderDead`). The host keeps that throw from happening, in two ways (1.8.1; in 1.8.0 one floor
+did both, and nothing opened while the guard was up).
 
-- A UI-mode entry is refused unless its view is already on screen (loaded and shown, as after `ReleaseUIMode` without
-  a hide): `RequestUIMode` returns `Ok` as before, then `UIModeRefused` arrives with the detail `low memory` (Papyrus:
-  `Magelight_UIModeRefused` with `modId|low memory`), and the player gets a HUD line, at most one every 30 s. Handle
-  it as any refusal; asking again works once memory is back. A `kUIModeFlagQueue` request whose turn comes then is
-  refused the same way, and the next one in the queue gets its turn. A switch to another of your views (a reclaim
-  included) is refused with `switch: low memory` unless that view is on screen. UI mode then stays where it was,
-  unless the view holding it is hidden (a reclaim whose release hid it): then it ends, with `UIModeExited`.
-- A view's first load and a hibernated view's wake wait until memory is back. Your calls to the view stay queued, as
-  during any load; no event says it waits, and `ViewDomReady` arrives when it lands. A view shown meanwhile draws
-  nothing until then. The view holding UI mode and the VR keyboard load as usual, and so does the new View of a
-  shown view you rebuild (`RebuildViewAtScale`). `Navigate` and `ReloadView` on a loaded page run as usual: they
-  replace the page in its own View.
+**A page that is asked for opens when its own need fits.** The player's `lowMemoryFloorMB` (320 MB unless they
+changed it) is what a page on a 1920x1080 view needs before it loads. Showing a page that is already built needs two
+fifths of that (128 MB). The showing part grows with the view's pixel count above 1920x1080 (a smaller view counts
+as 1920x1080). One reading is taken when the page is asked for:
+
+- A UI-mode entry whose view is not already on screen (loaded and shown, as after `ReleaseUIMode` without a hide) is
+  refused when free commit is under that need: `RequestUIMode` returns `Ok` as before, then `UIModeRefused` arrives
+  with the detail `low memory` (Papyrus: `Magelight_UIModeRefused` with `modId|low memory`), and the player gets a
+  HUD line, at most one every 30 s. Handle it as any refusal; asking again works the moment the memory is there. A
+  `kUIModeFlagQueue` request whose turn comes then is refused the same way, and the next one in the queue gets its
+  turn. A switch to another of your views (a reclaim included) is refused with `switch: low memory` unless that view
+  is on screen. UI mode then stays where it was, unless the view holding it is hidden (a reclaim whose release hid
+  it): then it ends, with `UIModeExited`.
+- A view you show without UI mode loads when its load fits the guard's last reading (at most a second old), whether
+  or not the guard is up. Views that load together are counted together: for two seconds after a load starts its
+  need still counts as taken (a UI-mode entry leaves it out too), so the second of two views shown at once can wait
+  that long.
+
+**The guard gives memory back.** It comes up when free commit falls below what the largest view needs to load, and
+while it is up:
+
+- The first load of a hidden view and everything else in the background waits. It goes on once the guard is down
+  and the load would still leave the guard's floor free. Your calls to the view stay queued, as during any load; no
+  event says it waits, and `ViewDomReady` arrives when it lands. A shown view whose load does not fit draws nothing
+  until then. The view holding UI mode and the VR keyboard load as usual, and so does the new View of a shown view
+  you rebuild (`RebuildViewAtScale`). `Navigate` and `ReloadView` on a loaded page run as usual: they replace the
+  page in its own View.
 - Hidden views are released as hibernation releases them, whether or not you called `SetViewHibernate`, once their
-  page has reached DOM ready and they have been hidden 2 s (a view never shown since it loaded, at once). A
+  page has reached DOM ready and they have been hidden 2 s (a view never shown since it loaded, at once). The view
+  that last held UI mode is kept: it is the page most likely to be opened again. A
   released view whose page you set to hibernate comes back when shown, as after hibernation. One you never set to
   hibernate (or load on show) loads again, hidden, about a minute after memory recovers (longer each time that
   reload brought the guard straight back), or when shown if that comes first; its `ViewDomReady` then comes with a
@@ -850,8 +922,8 @@ While it is up:
 - No page is prepainted.
 - Views already shown stay up and keep painting.
 
-The guard lifts once free commit is back above the floor by half the floor (at least 256 MB) and it has been up
-10 s. The log has a line each way. `lowMemoryFloorMB` `0` turns the guard off.
+The guard lifts once free commit is back at twice its floor (at least 256 MB above it) and it has been up 10 s. The
+log has a line each way. `lowMemoryFloorMB` `0` turns both off.
 
 ## A gamepad (1.6.0)
 
@@ -1046,8 +1118,9 @@ Contrast is WCAG 2's ratio. Labels are held to 3:1 on both `key` and
 - Without a theme, the keyboard is drawn exactly as before 0.31.9, including
   a held special key, which keeps its own colour there.
 - Per view: kept until you change it or destroy the view; hibernation and
-  `RebuildViewAtScale` keep it. It shows only while your view holds UI mode
-  with the keyboard up. From 1.5.0 the keyboard goes down when another view
+  `RebuildViewAtScale` keep it. It shows only while your view has the
+  keyboard (it holds UI mode, or from 1.9.0 the keyboard was shared with it)
+  and the keyboard is up. From 1.5.0 the keyboard goes down when another view
   takes UI mode (including your own other views), and shows that view's theme
   the next time a field there raises it. Any thread.
 - The font is the keyboard's own; there is no font token.
@@ -1059,7 +1132,7 @@ Contrast is WCAG 2's ratio. Labels are held to 3:1 on both `key` and
   1.1.0 a part with a bad value is refused alone: the other part of the
   message still applies, and a page that asks gets a reply saying which part
   was refused and why.
-- The keyboard page is privileged (its keys go to the UI-mode view), so it
+- The keyboard page is privileged (its keys go to the view that has the keyboard), so it
   never sees what you or a page passed: the host checks the colours, builds a
   fresh message from the numbers, and the page checks each value again.
 - The keyboard page is kept current while it is down, and after a hide it
