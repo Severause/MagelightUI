@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:#14110d;color:#e8dcc0;font:16px Georgia,serif}
+.row{padding:6px 16px;border-bottom:1px solid rgba(255,255,255,.08)}
+</style></head><body><div id="out" class="row">0</div>
+<script>
+// A page that asks matchMedia three times every frame and shows the answers in one row.
+for(var i=0;i<60;i++){var d=document.createElement('div');d.className='row';d.textContent='Row '+i+' of a page that asks matchMedia every frame';document.body.appendChild(d)}
+var o=document.getElementById('out');
+window.__bench=function(n){var w=matchMedia('(min-width: 800px)').matches,h=matchMedia('(min-height: 600px)').matches,r=matchMedia('(prefers-reduced-motion: reduce)').matches;o.textContent=n+' '+w+h+r};
+</script></body></html>

@@ -18,7 +18,7 @@ Write-Host "=== Magelight UI build ===" -ForegroundColor Cyan
 # be a newer engine than the one the notices name and the DLL-rename permission
 # covers. Moving to another build means editing this pin on purpose (and
 # re-checking both); CI pins the same build (.github/workflows/ci.yml).
-$ulBuildOfRecord = "2.0.0-beta.2"
+$ulBuildOfRecord = "2.0.0-beta.3"
 $ulVersionFile = Join-Path $PSScriptRoot "extern\ultralight\VERSION.txt"
 if (-not (Test-Path $ulVersionFile)) {
     Write-Host "extern\ultralight\VERSION.txt missing - fetch the SDK per extern\README.md" -ForegroundColor Red; exit 1

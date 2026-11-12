@@ -7,6 +7,8 @@ rem upload case (a box away from the texture's origin), the state case (the game
 rem and the release case (a View freed while a list that drew it waits and the main thread still holds its target).
 rem Every thread-mode run checks that each flush split the recording. MagelightGPU.dll comes from the build
 rem dir (MG_BUILD_DIR, default C:\b\mgl: its unpatched copy). %1 = output folder (default C:\b\mgl-deferred).
+rem Then the async path (contract 4, --mode async: Ultralight records on the page thread, the main thread replays on the
+rem immediate context) against the immediate context, with and without a budget, with its upload, state and release cases.
 rem Exit 0 when every pair matches.
 setlocal EnableDelayedExpansion
 set "OUT=%~1"
@@ -65,6 +67,39 @@ echo == release case, mixed.html, msaa 4
 "%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode immediate --msaa 4 --case release --out "%OUT%\a.raw" || (echo FAIL: release immediate run& set /a FAILS+=1)
 "%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode thread --msaa 4 --case release --out "%OUT%\b.raw" || (echo FAIL: release thread run& set /a FAILS+=1)
 "%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: release case differs& set /a FAILS+=1)
+echo.
+echo == the async path (contract 4) against the immediate context: no budget, then a tight one that cuts every drain short
+for %%P in ("%~dp0pages\mixed.html" "%ROOT%\tools\desktop-harness\pages\translucent-borders.html") do (
+  for %%M in (1 4) do (
+    echo.
+    echo == async, %%~nxP, msaa %%M
+    "%EXE%" "%UL%" %%P --gpu "%BUILD%" --mode immediate --msaa %%M --out "%OUT%\a.raw" || (echo FAIL: immediate run& set /a FAILS+=1)
+    "%EXE%" "%UL%" %%P --gpu "%BUILD%" --mode async --msaa %%M --out "%OUT%\b.raw" || (echo FAIL: async run& set /a FAILS+=1)
+    "%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: async %%~nxP msaa %%M differs& set /a FAILS+=1)
+    "%EXE%" "%UL%" %%P --gpu "%BUILD%" --mode async --msaa %%M --budget 0.02,4096 --out "%OUT%\b.raw" || (echo FAIL: async budget run& set /a FAILS+=1)
+    "%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: async with a budget, %%~nxP msaa %%M differs& set /a FAILS+=1)
+  )
+)
+echo.
+echo == async, WARP, mixed.html, msaa 4
+"%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode immediate --msaa 4 --warp --out "%OUT%\a.raw" || (echo FAIL: WARP immediate run& set /a FAILS+=1)
+"%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode async --msaa 4 --warp --budget 0.02,4096 --out "%OUT%\b.raw" || (echo FAIL: WARP async run& set /a FAILS+=1)
+"%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: async on WARP differs& set /a FAILS+=1)
+for %%D in (hardware warp) do (
+  set "DEV="
+  if "%%D"=="warp" set "DEV=--warp"
+  echo.
+  echo == async upload case, %%D: a recorded box lands where it was sent
+  "%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode async --case upload !DEV! --out "%OUT%\b.raw" || (echo FAIL: upload, %%D, async& set /a FAILS+=1)
+  echo.
+  echo == async state case, %%D: the game's bindings survive every drain
+  "%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode async --msaa 4 --case state !DEV! --budget 0.02,4096 --out "%OUT%\b.raw" || (echo FAIL: state, %%D, async& set /a FAILS+=1)
+)
+echo.
+echo == async release case, mixed.html, msaa 4: a View freed and made again
+"%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode immediate --msaa 4 --case release --out "%OUT%\a.raw" || (echo FAIL: release immediate run& set /a FAILS+=1)
+"%EXE%" "%UL%" "%~dp0pages\mixed.html" --gpu "%BUILD%" --mode async --msaa 4 --case release --out "%OUT%\b.raw" || (echo FAIL: release async run& set /a FAILS+=1)
+"%EXE%" --compare "%OUT%\a.raw" "%OUT%\b.raw" || (echo FAIL: async release case differs& set /a FAILS+=1)
 echo.
 popd
 if %FAILS% EQU 0 (echo ALL MATCH) else (echo FAILED: %FAILS%)

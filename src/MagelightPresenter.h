@@ -34,6 +34,9 @@ namespace Magelight {
         ViewId id = 0;
         ultralight::RefPtr<ultralight::View> ul;   // live for this frame
         ID3D11ShaderResourceView* srv = nullptr;   // driver RT (GPU path) or the host's CPU texture
+        // pageGpu async, in a page-thread packet: the driver texture to look `srv` up from on the game thread, once
+        // the frame that drew it has run there (`srv` is null in the packet).
+        std::uint32_t textureId = 0;
         float u0 = 0, v0 = 0, u1 = 1, v1 = 1;      // rt.uv_coords on the GPU path; 0..1 on CPU
         float x = 0, y = 0;                        // swapchain pixels (EffectivePos)
         int w = 0, h = 0;                          // view pixels

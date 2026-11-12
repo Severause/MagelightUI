@@ -23,7 +23,7 @@ Please see the accompanying NOTICES.md for full text.
    Ultralight's notices for the libraries it bundles are in
    Ultralight-NOTICES.md (WebKit LGPL 2.1/BSD, ICU, FreeType, HarfBuzz,
    skia, SQLite, libpng, libjpeg-turbo, zlib and others).
-   The three DLLs are Ultralight 2.0.0-beta.2's, renamed, with the
+   The three DLLs are Ultralight 2.0.0-beta.3's, renamed, with the
    module-name strings inside them rewritten in place (same length) so
    they import each other under the new names, with the written
    permission of Ultralight, Inc.; no code is changed. The private names
@@ -37,11 +37,13 @@ Please see the accompanying NOTICES.md for full text.
 2. Ultralight platform reference code  (c) 2026 Ultralight, Inc.
    License: zlib (the text is in THIRD_PARTY_LICENSES.txt).
    The Ultralight SDK publishes its platform implementations as source
-   under the zlib license. Two parts of it are in Magelight:
+   under the zlib license. Three parts of it are in Magelight:
    - SKSE/Plugins/Magelight/MagelightGPU.dll is an altered version of the
      SDK's Direct3D 11 reference GPU driver (platform/src/gpu/d3d11). Its
      source, with the changes marked, is the gpu/ folder of the Magelight
      UI repository.
+   - MagelightGPU.dll also contains the SDK's async GPU recorder
+     (platform/src/gpu/async: GPUDriverAsync, GPUAllocator), unmodified.
    - Magelight.dll contains the SDK's Windows font loader
      (platform/src/fonts: FontLoaderWin, TextAnalysisSource), unmodified.
    MagelightGPU.dll also embeds Ultralight's compiled Direct3D 11 shader
@@ -52,7 +54,7 @@ Please see the accompanying NOTICES.md for full text.
    Files: SKSE/Plugins/Magelight/inspector/
    License: BSD 2-Clause, Copyright (C) 2007-2021 Apple Inc. and the
    WebKit contributors; portions under the licenses named in each file.
-   Shipped unmodified from the Ultralight 2.0.0-beta.2 SDK.
+   Shipped unmodified from the Ultralight 2.0.0-beta.3 SDK.
 
 4. Libraries compiled into Magelight.dll and MagelightGPU.dll. Their
    copyright lines and full license texts are in THIRD_PARTY_LICENSES.txt.

@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;height:100%;background:transparent;color:#e8dcc0;font:15px/1.4 Georgia,serif;overflow:hidden}
+.panel{position:fixed;background:linear-gradient(180deg,rgba(28,22,16,.82),rgba(12,10,8,.9));border:1px solid rgba(201,168,106,.55);border-radius:6px;box-shadow:0 2px 0 rgba(0,0,0,.6);padding:12px 14px}
+#quest{left:28px;top:28px;width:340px}
+#notes{right:28px;top:28px;width:300px}
+#chat{left:28px;bottom:120px;width:420px}
+#bar{left:50%;bottom:28px;width:900px;margin-left:-450px;height:44px;padding:6px 14px}
+h3{margin:0 0 6px;font-size:17px;letter-spacing:.06em;color:#c9a86a}
+.card{display:flex;align-items:center;margin:6px 0;padding:6px;border:1px solid rgba(255,255,255,.12);border-radius:4px;background:rgba(255,255,255,.04)}
+.icon{width:28px;height:28px;margin-right:10px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#d8b878,#5a4424)}
+.tick{display:inline-block;width:2px;height:18px;margin:0 20px;background:rgba(232,220,192,.7)}
+#clock{position:fixed;right:40px;bottom:40px;font:22px Consolas,monospace;color:#fff}
+</style></head><body>
+<!-- A full-screen HUD of static panels with one small number that changes every frame. -->
+<div class="panel" id="quest"><h3>THE WAY OF THE VOICE</h3><div>Speak to the Greybeards</div><div>Climb the Seven Thousand Steps</div><div>Reach High Hrothgar before nightfall</div><div style="opacity:.6">Optional: rest at Ivarstead</div><div style="opacity:.6">Optional: hunt the frost troll</div></div>
+<div class="panel" id="notes"><h3>NOTICES</h3><div class="card"><span class="icon"></span>Lydia is waiting at Breezehome</div><div class="card"><span class="icon"></span>A courier has a letter for you</div><div class="card"><span class="icon"></span>Your retainer sent 120 gold</div><div class="card"><span class="icon"></span>Camp is ready to break</div></div>
+<div class="panel" id="chat"><h3>NEARBY</h3><div>Hadvar: Keep close to the wall.</div><div>Ralof: We should split up here.</div><div>Guard: No lollygagging.</div><div>Lydia: I am sworn to carry your burdens.</div><div>Farengar: Ah, the Jarl must have sent you.</div><div>Irileth: On your feet, soldier.</div><div>Belethor: Everything is for sale.</div><div>Adrianne: Got some good pieces out here.</div></div>
+<div class="panel" id="bar"><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span><span class="tick"></span></div>
+<div id="clock">0</div>
+<script>var c=document.getElementById('clock');window.__bench=function(n){c.textContent=String(n)};</script>
+</body></html>

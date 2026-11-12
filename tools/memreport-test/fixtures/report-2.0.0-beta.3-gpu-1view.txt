@@ -1,0 +1,89 @@
+===== Memory Usage Report =====
+
+-- Process Memory --
+    Working Set (RSS):       106.50 MB  (peak: 108.77 MB)
+    Private Commit:          174.56 MB
+      bmalloc committed:       1.39 MB  (WebCore/JSC)
+      mimalloc committed:       192 KB  (UltralightCore)
+
+-- JavaScript --
+    GC Object Space:              0 B   (capacity: 704 KB)
+    Extra Memory:                 0 B   (strings, ArrayBuffers, backing stores)
+    Live Objects:                 0    (protected: 225, globals: 1)
+    Live Documents:               1
+
+-- WebCore Allocator (bmalloc/libpas) --
+    Committed:                 1.39 MB
+      Live:                    1.34 MB
+      Free (held):               58 KB
+      Metadata:                   2 KB
+    Fragmentation:               60 KB  (4.2% of committed)
+    Decommitted:               2.67 MB
+      Free (decommitted):      2.67 MB
+    Cached:                       0 B 
+
+-- WebCore Resource Cache --
+    Images:                       0 B   (decoded: 0 B)
+    CSS Stylesheets:              0 B 
+    Scripts:                      0 B 
+    Fonts:                        0 B 
+
+-- WebCore Compositor --
+    BitmapTexturePool:         8.44 MB  (1 textures, 1 GPU / 0 CPU)
+      pool limits:          budget floor 150 MB, idle 2.0 s, sweep 300 ms, pad 128 px, excess 400000 px
+      Layer Tiles:             8.44 MB  (1 textures)
+      Idle Pool:                  0 B   (0 textures)
+        Driven by:
+          Layer Tiles:          100.0%
+    Compositor budget:       150.00 MB
+      used at last pass:       8.44 MB
+      tiles held:              8.44 MB
+      magnified (est.):           0 B 
+      held surplus (est.):        0 B 
+      intermediates peak:         0 B 
+      raster-scale steps:         0    (deferred: 0, clamped layers: 0)
+    ShadowBufferPool:             0 B   (0 buffers)
+
+-- WebCore Fonts --
+    Font objects:                 2    (inactive: 0)
+
+-- GPU Resources (VRAM estimated) --
+    Textures:                 16.25 MB, VRAM: 16.25 MB  (7 textures)
+      GlyphAtlas:                64 KB  (1)
+      CurveArena:              8.00 MB  (1)
+      CurveIndex:              8.00 MB  (1)
+      AlphaCorrectionLUT:       192 KB  (2)
+      Texture Pool:               0 B   (in-use: 0 B)
+    Render Targets:           16.41 MB  (2 targets)
+      ViewCanvas:              7.97 MB  (1)
+      LayerTile:               8.44 MB  (1)
+      Render Texture Pool:    16.41 MB  (in-use: 16.41 MB)
+    Geometry Buffers:           648 KB, VRAM: 648 KB  (1 buffers)
+
+-- Caches --
+    Font Cache:                  16 KB
+    Photon Cache:                48 B   (pages: 16.00 MB)
+    Shadow Cache:                 0 B 
+
+-- Pools --
+    Bitmap Pool:                446 KB  (in-use: 0 B)
+    Paint Pool:                 771 KB
+    Geometry Pool:              648 KB
+    Path Tessellator:             8 B 
+
+-- HTML5 Canvas Elements --
+    Total:                        0
+    Accelerated:                  0
+    Unaccelerated:                0
+
+-- ImageBuffers --
+    GPU (accelerated):            0 B   (0 buffers)
+    CPU (unaccelerated):          0 B   (0 buffers)
+
+-- Internal Canvas Instances --
+    CPU:                          0
+    GPU:                          2
+    GPU Deferred:                 0
+    Pending Commands:             0
+    Recorder:                     0
+===============================

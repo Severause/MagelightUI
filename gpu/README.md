@@ -1,7 +1,8 @@
 # gpu/ — the Magelight GPU backend (MagelightGPU.dll)
 
 **License: Zlib** (the notice is reproduced at the top of `MagelightGpuDriver.cpp`). This component is
-adapted from the Direct3D 11 reference GPUDriver that ships as source in the **Ultralight 2.0.0-beta.2 SDK**
+adapted from the Direct3D 11 reference GPUDriver that ships as source in the **Ultralight 2.0.0-beta.2 SDK**, brought
+in line with **2.0.0-beta.3**'s (appended command lists, immutable storage from the flag alone, whole-block uploads)
 (`platform/src/GPUDriver.cpp`, `platform/src/gpu/d3d11/GPUDriverD3D11.cpp`,
 `platform/src/gpu/d3d11/GPUContextD3D11.cpp`; Copyright (c) 2026 Ultralight, Inc.). It is an altered version
 of that source: the changes are marked `// MG:` and listed below.
@@ -69,3 +70,14 @@ Modifications vs the SDK reference driver (marked `// MG:` in source):
   nothing there, and a boxed `UpdateSubresource` is given the bitmap's origin where the runtime emulates command
   lists (`DriverCommandLists` false), which otherwise applies the box's offset twice. `tools/deferred-test` checks it
   against the immediate context byte for byte, on hardware and on WARP (emulated lists), splits included.
+- Contract 4: the **async path** (`MgGpu_CreateAsync`, the host's `"pageGpu": "async"`). The driver Ultralight sees
+  is the SDK's recorder, `platform::GPUDriverAsync` (`platform/src/gpu/async`, zlib, built in place and unmodified):
+  on the thread that owns Ultralight every driver call becomes part of a frame and no device or context call is made. The game
+  thread replays the frames in order on this driver, on the immediate context (`MgGpu_AsyncDrain`), within a time and
+  byte budget, resuming a frame the budget cut short. The SDK's own executor and Direct3D 11 frame backend are not
+  used: the replay is `AsyncPath` here, over entry points the driver gained for it (`UpdateTextureRows`, a
+  recorded box's rows; `CreateGeometryStorage` / `WriteGeometryRange`, buffers that keep their contents, since the
+  recorder writes ranges into them; `DrawCommands`; `RegisterExternalAt`). The budget is tested between operations and
+  a frame's destroys are not metered. Readbacks are not offered. External textures on an async handle are queued under
+  the recorder's id counter and applied once the frames recorded before them have run.
+  `tools/deferred-test --mode async` checks it against the immediate context byte for byte.

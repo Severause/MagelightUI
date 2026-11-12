@@ -65,6 +65,7 @@ int main(int argc, char** argv)
 
     Fixture(dir, "report-2.0.0-beta.2-gpu-6views.txt", 6.15, 6, 21.93, 11.54, 0, 75.75, 16.25, 132.36, 425.66);
     Fixture(dir, "report-2.0.0-beta.2-cpu-2views.txt", 2.27, 2, 6.75, 2.32, 0, 44.44, 0, 0, 172.02);
+    Fixture(dir, "report-2.0.0-beta.3-gpu-1view.txt", 0, 1, 1.39, 0, 0, 8.44, 16.25, 16.41, 174.56);   // tools/bench-test --memreport
 
     {
         const Figures f = Parse(Read(dir + "\\report-2.0.0-beta.2-gpu-6views.txt"));

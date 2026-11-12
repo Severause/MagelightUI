@@ -31,3 +31,6 @@ extern/ultralight-1.3-old/
 # tools/desktop-harness compiles in place.
 tools/desktop-harness/*.obj
 tools/desktop-harness/*.exe
+
+# Ultralight logs the offline tools write into their working folder
+/*_ul.log

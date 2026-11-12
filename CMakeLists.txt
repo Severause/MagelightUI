@@ -194,14 +194,27 @@ set(ULTRALIGHT_SHADER_HEADERS "${ULTRALIGHT_DIR}/platform/shaders/generated/head
 if(NOT EXISTS "${ULTRALIGHT_SHADER_HEADERS}/d3d11/shaders.h")
     message(FATAL_ERROR "Ultralight D3D11 shader headers not found at ${ULTRALIGHT_SHADER_HEADERS}/d3d11 (Ultralight 2.0 SDK layout).")
 endif()
-add_library(MagelightGPU SHARED gpu/MagelightGpuDriver.cpp ${CMAKE_CURRENT_BINARY_DIR}/version_gpu.rc)
+# The async path's recorder is the SDK's own (zlib), built in place like the font loader: never copied here.
+set(ULTRALIGHT_ASYNC_SOURCES
+    ${ULTRALIGHT_DIR}/platform/src/gpu/async/GPUDriverAsync.cpp
+    ${ULTRALIGHT_DIR}/platform/src/gpu/async/GPUAllocator.cpp
+)
+foreach(_mgl_async ${ULTRALIGHT_ASYNC_SOURCES})
+    if(NOT EXISTS "${_mgl_async}")
+        message(FATAL_ERROR "Ultralight async GPU driver source not found: ${_mgl_async} (2.0.0-beta.3 or later).")
+    endif()
+endforeach()
+add_library(MagelightGPU SHARED gpu/MagelightGpuDriver.cpp ${ULTRALIGHT_ASYNC_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}/version_gpu.rc)
 target_include_directories(MagelightGPU PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
-target_include_directories(MagelightGPU SYSTEM PRIVATE ${ULTRALIGHT_DIR}/include ${ULTRALIGHT_SHADER_HEADERS})
+target_include_directories(MagelightGPU SYSTEM PRIVATE ${ULTRALIGHT_DIR}/include ${ULTRALIGHT_SHADER_HEADERS}
+                           ${ULTRALIGHT_DIR}/platform/include)
 target_link_directories(MagelightGPU PRIVATE ${ULTRALIGHT_DIR}/lib)
 target_link_libraries(MagelightGPU PRIVATE Ultralight UltralightCore d3d11)
 target_compile_definitions(MagelightGPU PRIVATE MGGPU_BUILD NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)
-    target_compile_options(MagelightGPU PRIVATE /W4 /permissive- /utf-8)
+    target_compile_options(MagelightGPU PRIVATE /permissive- /utf-8)
+    # /W4 for our own file alone: the SDK's sources are not written for it.
+    set_source_files_properties(gpu/MagelightGpuDriver.cpp PROPERTIES COMPILE_OPTIONS "/W4")
 endif()
 set_target_properties(MagelightGPU PROPERTIES
     OUTPUT_NAME "MagelightGPU"

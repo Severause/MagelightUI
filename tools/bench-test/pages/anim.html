@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:#14110d;overflow:hidden}
+.dot{position:absolute;width:60px;height:60px;border-radius:12px;background:linear-gradient(135deg,#c9a86a,#5a4424);animation:spin 2s linear infinite,fade 1.3s ease-in-out infinite alternate}
+@keyframes spin{from{transform:rotate(0) translateX(0)}to{transform:rotate(360deg) translateX(40px)}}
+@keyframes fade{from{opacity:.35}to{opacity:1}}
+</style></head><body>
+<script>
+// Forty elements under CSS animations: nothing here is driven by the host's tick, so the frames drawn show the cadence.
+for(var i=0;i<40;i++){var d=document.createElement('div');d.className='dot';d.style.left=(40+(i%10)*180)+'px';d.style.top=(60+(i/10|0)*220)+'px';d.style.animationDelay=(-i*0.11)+'s';document.body.appendChild(d)}
+</script></body></html>

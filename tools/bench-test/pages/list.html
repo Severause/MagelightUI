@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;height:100%;background:#14110d;color:#e8dcc0;font:15px/1.5 Georgia,serif;overflow:hidden}
+#box{height:100%;overflow:hidden}
+.row{display:flex;padding:7px 18px;border-bottom:1px solid rgba(201,168,106,.25)}
+.row span{flex:1}.row b{width:90px;color:#c9a86a;font-weight:normal;text-align:right}
+</style></head><body><div id="box"></div>
+<script>
+// A long item list scrolled every frame: text and borders redrawn, as an inventory list being wheeled through.
+var b=document.getElementById('box'),names=['Iron Sword','Steel Greatsword of Burning','Leather Boots','Potion of Minor Healing','Dwarven Metal Ingot','Ebony War Axe','Glass Bow of Thunderbolts','Scroll of Fireball','Elven Gilded Armor','Petty Soul Gem'];
+for(var i=0;i<600;i++){var r=document.createElement('div');r.className='row';r.innerHTML='<span>'+names[i%10]+' ('+i+')</span><b>'+(i*7%400)+' gold</b><b>'+(i%23)+'.5 wt</b>';b.appendChild(r)}
+window.__bench=function(n){b.scrollTop=(n*37)%(b.scrollHeight-b.clientHeight)};
+</script></body></html>

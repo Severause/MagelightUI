@@ -7,6 +7,10 @@
 //                     the main thread, which runs them on the immediate context the way the host does
 //                     (PageThread::RunRecordedList, a flush between parts, the next page frame already started) and
 //                     keeps an AddRef on the frame's target SRV.
+//   --mode async      Ultralight on a page thread as above, but the driver it sees is the recorder of the async path
+//                     (MgGpu_CreateAsync, contract 4): that thread makes no Direct3D call. The main thread runs the
+//                     recorded frames on the immediate context with MgGpu_AsyncDrain, here under --budget (ms,bytes;
+//                     0,0 = none), and reads the View's target once the frame that drew it has run.
 //
 // --case release: at frame 60 the View is released and made again on the same page; frame 59's lists run only once the
 // driver's counts show a render target freed (the run fails if none is), and the main thread still copies from the
@@ -15,8 +19,8 @@
 // game leaves them, must still be bound after every page frame. --warp runs on WARP, which prints its
 // DriverCommandLists (0 exercises the emulated path).
 //
-//   deferred_test.exe <sdkDir> <page.html> --gpu <dir> --mode immediate|thread --out <file.raw> [--msaa N] [--warp]
-//                     [--case release|upload|state] [--frames N]
+//   deferred_test.exe <sdkDir> <page.html> --gpu <dir> --mode immediate|thread|async --out <file.raw> [--msaa N] [--warp]
+//                     [--case release|upload|state] [--frames N] [--budget ms,bytes]
 //   deferred_test.exe --compare a.raw b.raw     exit 0 when every byte matches
 
 #define NOMINMAX
@@ -48,6 +52,8 @@ namespace
     int         g_msaa = 1;
     int         g_frames = 180;
     bool        g_warp = false;
+    double        g_budgetMs = 0.0;      // async mode: MgGpu_AsyncDrain's limits (0 = none)
+    std::uint64_t g_budgetBytes = 0;
 
     using MgCreateFn = void* (*)(ID3D11Device*, ID3D11DeviceContext*, void (*)(const char*));
     using MgGetDrvFn = void* (*)(void*);
@@ -58,6 +64,12 @@ namespace
     using MgTakeFn = ID3D11CommandList* (*)(void*);
     using MgStatsFn = int (*)(void*, MgGpuStats*);
     using MgInfoFn = const MgGpuInfo* (*)();
+    using MgCreateAsyncFn = void* (*)(ID3D11Device*, ID3D11DeviceContext*, int, void (*)(const char*));
+    using MgDrainFn = std::uint64_t (*)(void*, double, std::uint64_t);
+    using MgAsyncStateFn = int (*)(void*, MgGpuAsyncState*);
+    MgCreateAsyncFn g_mgCreateAsync = nullptr;
+    MgDrainFn       g_mgDrain = nullptr;
+    MgAsyncStateFn  g_mgAsyncState = nullptr;
     MgCreateFn  g_mgCreate = nullptr;
     MgGetDrvFn  g_mgDrv = nullptr;
     MgHasFn     g_mgHas = nullptr;
@@ -111,6 +123,13 @@ namespace
         g_mgSamples = reinterpret_cast<MgSamplesFn>(GetProcAddress(gpu, "MgGpu_SetSampleCount"));
         g_mgTake = reinterpret_cast<MgTakeFn>(GetProcAddress(gpu, "MgGpu_TakeCommandList"));
         g_mgStats = reinterpret_cast<MgStatsFn>(GetProcAddress(gpu, "MgGpu_GetStats"));
+        g_mgCreateAsync = reinterpret_cast<MgCreateAsyncFn>(GetProcAddress(gpu, "MgGpu_CreateAsync"));
+        g_mgDrain = reinterpret_cast<MgDrainFn>(GetProcAddress(gpu, "MgGpu_AsyncDrain"));
+        g_mgAsyncState = reinterpret_cast<MgAsyncStateFn>(GetProcAddress(gpu, "MgGpu_AsyncGetState"));
+        if (!g_mgCreateAsync || !g_mgDrain || !g_mgAsyncState) {
+            std::printf("MagelightGPU.dll lacks the async path\n");
+            return false;
+        }
         if (!g_mgCreate || !g_mgDrv || !g_mgHas || !g_mgDraw || !g_mgSrv || !g_mgSamples || !g_mgTake || !g_mgStats) {
             std::printf("MagelightGPU.dll lacks an export\n");
             return false;
@@ -159,7 +178,7 @@ namespace
         Platform::instance().set_font_loader(GetPlatformFontLoader());
         Platform::instance().set_file_system(GetPlatformFileSystem(String(g_sdk.c_str())));
         Platform::instance().set_logger(GetDefaultLogger("deferred_test_ul.log"));
-        if (!InitDriver(ctx)) return false;
+        if (!g_mg && !InitDriver(ctx)) return false;   // async mode made its driver on the main thread
         Platform::instance().set_gpu_driver(static_cast<GPUDriver*>(g_mgDrv(g_mg)));
         g_renderer = Renderer::Create();
         if (!g_renderer) return false;
@@ -167,16 +186,18 @@ namespace
         return true;
     }
 
-    // One page frame. Returns the View's target SRV, AddRef'ed (the host's snapshot), or nullptr.
-    ID3D11ShaderResourceView* PageFrame(int frame)
+    // --case release, on Ultralight's thread: at frame 60 the View is released and made again on the same page.
+    // Ultralight keeps a released View's target in its caches; the purge frees it.
+    void ReleaseCase(int frame)
     {
-        if (g_case == "release" && frame == 60) {
-            // Ultralight keeps a released View's target in its caches; the purge frees it, while the main thread still
-            // holds its SRV and frame 59's lists that draw it wait.
-            g_view = nullptr;
-            g_renderer->PurgeMemory();
-            MakeView();
-        }
+        if (g_case != "release" || frame != 60) return;
+        g_view = nullptr;
+        g_renderer->PurgeMemory();
+        MakeView();
+    }
+
+    void LateContent(int frame)
+    {
         // Glyphs and shapes the first paint did not have: Ultralight adds them to textures it already made, which is
         // the driver's UpdateTexture with a dirty box (the upload the emulated command lists place wrongly unless the
         // driver adjusts the source pointer). Every frame from here on draws them.
@@ -188,6 +209,13 @@ namespace
                 "<span style=\"font-size:19px;font-style:italic\">qwfpgjluy ;[]{}#~@ 9182736450</span>"
                 "<span style=\"display:inline-block;width:60px;height:40px;margin-left:12px;border-radius:13px 4px;"
                 "background:rgba(20,120,60,.6);box-shadow:0 0 9px #000\"></span></div>'); ''"));
+    }
+
+    // One page frame. Returns the View's target SRV, AddRef'ed (the host's snapshot), or nullptr.
+    ID3D11ShaderResourceView* PageFrame(int frame)
+    {
+        ReleaseCase(frame);   // the main thread still holds the old target's SRV, and frame 59's lists that draw it wait
+        LateContent(frame);
         g_renderer->Update();
         g_renderer->RefreshDisplay(0);
         g_renderer->Render();
@@ -562,6 +590,154 @@ namespace
         return StateVerdict(held && Dump(held) ? 0 : 2);
     }
 
+    // ---- --mode async ----------------------------------------------------------------------------------------------
+    // The page thread records; the main thread replays. A page frame's packet says which frame it recorded last and
+    // which texture is the View's target, and the main thread shows that target only once that frame has run.
+    struct AsyncPacket {
+        std::uint64_t frameId = 0;
+        std::uint32_t textureId = 0;
+        bool          ready = false;
+    };
+    AsyncPacket g_asyncPacket;
+
+    MgGpuAsyncState AsyncState()
+    {
+        MgGpuAsyncState st{};
+        st.size = sizeof(st);
+        g_mgAsyncState(g_mg, &st);
+        return st;
+    }
+
+    DWORD WINAPI AsyncPageThread(void*)
+    {
+        SetThreadDescription(GetCurrentThread(), L"deferred_test page thread");
+        ULONG g = 64 * 1024;
+        SetThreadStackGuarantee(&g);
+        const bool ok = InitPage(nullptr);
+        {
+            std::lock_guard<std::mutex> lk(g_mx);
+            g_pageFailed = !ok;
+        }
+        g_cv.notify_all();
+        if (!ok) return 2;
+        for (int f = 0; f < g_frames; ++f) {
+            {
+                std::unique_lock<std::mutex> lk(g_mx);
+                g_cv.wait(lk, [&] { return g_go >= f; });
+            }
+            ReleaseCase(f);
+            LateContent(f);
+            g_renderer->Update();
+            g_renderer->RefreshDisplay(0);
+            // Every frame renders, once the recorder takes one, so the run matches the other modes frame for frame (the
+            // host renders regardless and stops only at a long backlog). The main thread keeps draining meanwhile.
+            while (!AsyncState().ready) Sleep(0);
+            g_renderer->Render();
+            AsyncPacket p;
+            p.frameId = AsyncState().lastQueued;
+            p.textureId = g_view->render_target().texture_id;
+            p.ready = true;
+            {
+                std::lock_guard<std::mutex> lk(g_mx);
+                g_asyncPacket = p;
+            }
+            g_cv.notify_all();
+        }
+        return 0;
+    }
+
+    // The upload case on the recorder: the same two calls, inside a synchronize pair so they make a frame.
+    DWORD WINAPI AsyncUploadThread(void*)
+    {
+        auto* drv = static_cast<GPUDriver*>(g_mgDrv(g_mg));
+        RefPtr<Bitmap> bmp = Bitmap::Create(kUpW, kUpH, BitmapFormat::BGRA8_UNORM_SRGB);
+        const auto fill = [&](bool box) {
+            auto* p = static_cast<std::uint8_t*>(bmp->LockPixels());
+            for (std::uint32_t y = 0; y < kUpH; ++y)
+                for (std::uint32_t x = 0; x < kUpW; ++x) {
+                    const bool in = box && x >= kBoxL && x < kBoxR && y >= kBoxT && y < kBoxB;
+                    reinterpret_cast<std::uint32_t*>(p + static_cast<size_t>(y) * bmp->row_bytes())[x] = in ? kUpBox : kUpBack;
+                }
+            bmp->UnlockPixels();
+        };
+        fill(false);
+        const std::uint32_t id = drv->NextTextureId();
+        drv->BeginSynchronize();
+        drv->CreateTexture(id, bmp, 0);
+        drv->EndSynchronize();
+        fill(true);
+        drv->BeginSynchronize();
+        drv->UpdateTexture(id, bmp, IntRect{ kBoxL, kBoxT, kBoxR, kBoxB });
+        drv->EndSynchronize();
+        g_asyncPacket.textureId = id;
+        return 0;
+    }
+
+    int RunAsync()
+    {
+        g_mg = g_mgCreateAsync(g_dev, g_imm, g_msaa, &GpuLog);
+        if (!g_mg) { std::printf("MgGpu_CreateAsync refused the context\n"); return 2; }
+        std::printf("  MSAA asked %d, got %d; budget %.2f ms, %llu bytes\n", g_msaa, g_mgSamples(g_mg, g_msaa), g_budgetMs,
+                    static_cast<unsigned long long>(g_budgetBytes));
+        if (g_case == "upload") {
+            HANDLE u = CreateThread(nullptr, 0, AsyncUploadThread, nullptr, 0, nullptr);
+            if (!u) return 2;
+            WaitForSingleObject(u, INFINITE);
+            while (g_mgDrain(g_mg, g_budgetMs, g_budgetBytes) < AsyncState().lastQueued) {}
+            auto* srv = static_cast<ID3D11ShaderResourceView*>(g_mgSrv(g_mg, g_asyncPacket.textureId));
+            return srv && Dump(srv) ? CheckUpload() : 2;
+        }
+        if (g_case == "state" && !MakeSentinels()) return 2;
+        HANDLE t = CreateThread(nullptr, static_cast<SIZE_T>(8) << 20, AsyncPageThread, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+        if (!t) return 2;
+        std::uint64_t drains = 0;
+        const auto drain = [&] {
+            if (g_case == "state") BindSentinels();
+            const std::uint64_t done = g_mgDrain(g_mg, g_budgetMs, g_budgetBytes);
+            if (g_case == "state") CheckSentinels();
+            ++drains;
+            return done;
+        };
+        AsyncPacket newest;
+        for (int f = 0; f < g_frames; ++f) {
+            {
+                std::lock_guard<std::mutex> lk(g_mx);
+                g_go = f;
+            }
+            g_cv.notify_all();
+            for (;;) {
+                drain();   // the page frame records while this runs what is queued, as the host's Present does
+                std::unique_lock<std::mutex> lk(g_mx);
+                if (g_pageFailed) { std::printf("the page thread failed to start\n"); return 2; }
+                if (g_asyncPacket.ready) {
+                    newest = g_asyncPacket;
+                    g_asyncPacket = {};
+                    break;
+                }
+                lk.unlock();
+                Sleep(0);
+            }
+            Sleep(2);   // the other modes' pace: the page loads over the first frames, before the late content is added
+        }
+        WaitForSingleObject(t, INFINITE);
+        if (!g_ready) { std::printf("the page never loaded\n"); return 2; }
+        while (drain() < newest.frameId) {}
+        const MgGpuAsyncState st = AsyncState();
+        std::printf("  frames recorded %llu, run %llu; %llu drains, %llu stopped inside a frame by the budget\n",
+                    static_cast<unsigned long long>(st.lastQueued), static_cast<unsigned long long>(st.lastExecuted),
+                    static_cast<unsigned long long>(drains), static_cast<unsigned long long>(st.cutShort));
+        if (st.lastExecuted != st.lastQueued || st.framesInFlight != 0) {
+            std::printf("FAIL: frames are left over (%u in flight)\n", st.framesInFlight);
+            return 1;
+        }
+        if ((g_budgetMs > 0.0 || g_budgetBytes) && !st.cutShort) {
+            std::printf("FAIL: the budget never stopped a drain inside a frame, so the resume was not exercised\n");
+            return 1;
+        }
+        auto* srv = static_cast<ID3D11ShaderResourceView*>(g_mgSrv(g_mg, newest.textureId));   // resolves MSAA
+        return StateVerdict(srv && Dump(srv) ? 0 : 2);
+    }
+
     int Compare(const std::string& a, const std::string& b)
     {
         const std::string x = ReadFile(a), y = ReadFile(b);
@@ -592,8 +768,9 @@ int main(int argc, char** argv)
     SetUnhandledExceptionFilter(&OnCrash);
     if (argc == 4 && std::string(argv[1]) == "--compare") return Compare(argv[2], argv[3]);
     if (argc < 3) {
-        std::printf("usage: deferred_test <sdkDir> <page.html> --gpu dir --mode immediate|thread --out file.raw "
-                    "[--msaa N] [--warp] [--case release|upload|state] [--frames N]\n       deferred_test --compare a.raw b.raw\n");
+        std::printf("usage: deferred_test <sdkDir> <page.html> --gpu dir --mode immediate|thread|async --out file.raw "
+                    "[--msaa N] [--warp] [--case release|upload|state] [--frames N] [--budget ms,bytes]\n"
+                    "       deferred_test --compare a.raw b.raw\n");
         return 2;
     }
     g_sdk = argv[1];
@@ -608,6 +785,11 @@ int main(int argc, char** argv)
         else if (a == "--warp") g_warp = true;
         else if (a == "--case") g_case = next();
         else if (a == "--frames") g_frames = std::atoi(next().c_str());
+        else if (a == "--budget") {
+            const std::string b = next();
+            g_budgetMs = std::atof(b.c_str());
+            if (const auto comma = b.find(','); comma != std::string::npos) g_budgetBytes = std::strtoull(b.c_str() + comma + 1, nullptr, 10);
+        }
         else { std::printf("unknown option %s\n", a.c_str()); return 2; }
     }
     if (ReadFile(g_page).empty()) { std::printf("could not read %s\n", g_page.c_str()); return 2; }
@@ -623,7 +805,7 @@ int main(int argc, char** argv)
                 th.DriverCommandLists, g_msaa, g_case.empty() ? "" : (", case " + g_case).c_str(), g_page.c_str());
     std::fflush(stdout);
     if (!LoadDriver()) return 2;
-    const int r = g_mode == "thread" ? RunThread() : RunImmediate();
+    const int r = g_mode == "thread" ? RunThread() : g_mode == "async" ? RunAsync() : RunImmediate();
     std::fflush(stdout);
     // Ultralight's objects belong to the page thread: leave them, as the host does at exit.
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(r));

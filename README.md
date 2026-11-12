@@ -125,7 +125,7 @@ and that no other mod binds: one binding per key, and the first binder keeps it.
 ## Building the host
 
 CMake + CommonLib (MinLL/CommonLibVR, an MIT continuation of CommonLibSSE-NG, through vcpkg),
-the Ultralight 2.0.0-beta.2 Free SDK under `extern/ultralight/` (not committed). It needs Visual
+the Ultralight 2.0.0-beta.3 Free SDK under `extern/ultralight/` (not committed). It needs Visual
 Studio's C++ tools and a standalone vcpkg: `VCPKG_ROOT`, or `C:\vcpkg` when that is unset
 (CONTRIBUTING.md step 2). `build.ps1` builds
 to `C:\b\mgl`, stages an installable layout under `C:\b\mgl\stage` (`-Examples` builds and
@@ -171,15 +171,16 @@ download and are installed beside the runtime under `SKSE/Plugins/Magelight/lice
 
 - **Ultralight** runtime — reaches players under Ultralight's End User License Agreement
   (`EULA.txt`); Magelight's author uses it under the Ultralight Free License Agreement v2. The
-  three DLLs are Ultralight 2.0.0-beta.2's, renamed, with the module-name strings inside them
+  three DLLs are Ultralight 2.0.0-beta.3's, renamed, with the module-name strings inside them
   rewritten in place (same length) so they import each other under the new names, with the
   written permission of Ultralight, Inc.; no code is changed. The private names let two
   Ultralight-based plugins coexist in one process. That permission is the author's: a mod that
   bundles Magelight ships its files as they are and never renames or patches Ultralight's DLLs
   itself ([docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)).
 - **Ultralight SDK platform code** — zlib. `MagelightGPU.dll` is an altered version of the SDK's
-  Direct3D 11 reference driver (source: `gpu/`, its own DLL behind a C ABI), and `Magelight.dll`
-  contains the SDK's Windows font loader, unmodified. The compiled shaders `MagelightGPU.dll`
+  Direct3D 11 reference driver (source: `gpu/`, its own DLL behind a C ABI) and also contains the
+  SDK's async GPU recorder, unmodified, and `Magelight.dll` contains the SDK's Windows font loader,
+  unmodified. The compiled shaders `MagelightGPU.dll`
   embeds are Ultralight's, licensed only for use with Ultralight.
 - **Web Inspector** (staged by `build.ps1`, not in the player download) — Apple BSD.
 - Compiled into `Magelight.dll`: CommonLibVR (MinLL's MIT continuation of CommonLibSSE-NG),

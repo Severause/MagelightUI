@@ -77,13 +77,14 @@ License Agreement:
   the DLLs, among them the zlib text of the Ultralight SDK code in
   `MagelightGPU.dll` and `Magelight.dll`.
 - **Ship Magelight's files as they come.** The three Ultralight DLLs are
-  Ultralight 2.0.0-beta.2's, renamed, with the module-name strings inside them
+  Ultralight 2.0.0-beta.3's, renamed, with the module-name strings inside them
   rewritten in place so they import each other under the new names, with the
   written permission of Ultralight, Inc. to Magelight's author. That
   permission is the author's, not yours: never rename or patch Ultralight's
   DLLs yourself, and do not strip the notices.
 - **No source to publish.** `MagelightGPU.dll` is an altered version of the
-  SDK's zlib-licensed Direct3D 11 reference driver, and the font loader inside
+  SDK's zlib-licensed Direct3D 11 reference driver (with the SDK's async GPU
+  recorder beside it, unmodified), and the font loader inside
   `Magelight.dll` is the SDK's zlib source, unmodified; zlib asks for nothing
   beyond the notices already in `license\`. `MagelightGPU.dll` also embeds
   Ultralight's compiled shaders, licensed only for use with Ultralight.
