@@ -64,6 +64,18 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## Scout: Ultralight 2.0.0-beta.3 and `pageGpu` async (not a release)
+
+- **Ultralight 2.0.0-beta.3** is the SDK build of record on this branch. The GPU driver appends command lists (beta.3
+  may hand over more than one before a draw), takes immutable storage from the flag alone and uploads whole blocks
+  of a block-compressed texture.
+- **`"pageGpu": "async"`** (`Magelight.json`, with the page thread): the page thread records its graphics work as
+  frames through Ultralight's async driver and makes no Direct3D call; the game thread replays them at Present, at
+  most `asyncBudgetMs` (1.5) and `asyncBudgetMB` (8) a frame. No deferred context is involved, so a replaced
+  `d3d11.dll` or a single-threaded device does not turn the page thread off. `MagelightGPU.dll` contract 4.
+  Checked offline only (`tools/deferred-test --mode async`); not yet run in game.
+- `tools/bench-test`: the per-frame cost of a page through `MagelightGPU.dll`, for comparing two SDK builds.
+
 ## 1.8.0 - Unreleased
 
 ### What players notice

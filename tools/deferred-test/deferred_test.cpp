@@ -731,6 +731,7 @@ namespace
                 lk.unlock();
                 Sleep(0);
             }
+            Sleep(2);   // the other modes' pace: the page loads over the first frames, before the late content is added
         }
         WaitForSingleObject(t, INFINITE);
         if (!g_ready) { std::printf("the page never loaded\n"); return 2; }

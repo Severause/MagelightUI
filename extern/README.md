@@ -26,7 +26,9 @@ What the build uses:
   (renamed, see `build.ps1`). `AppCore.dll` does not: 2.0's imports CoreMessaging.dll and the WinRT
   api-sets, and Magelight needs nothing from it but the font loader.
 - `platform/`: Ultralight's reference platform implementations as source, under the zlib licence
-  (`platform/LICENSE`). Two parts are built, in place and never copied here:
+  (`platform/LICENSE`). Three parts are built, in place and never copied here
+  (the third: `platform/src/gpu/async/GPUDriverAsync.cpp` and `GPUAllocator.cpp`, the recorder of the async path,
+  compiled unmodified into `MagelightGPU.dll`):
   `platform/src/fonts/FontLoaderWin.cpp` and `TextAnalysisSource.cpp` are compiled unmodified
   into `Magelight.dll`, and `gpu/` adapts the Direct3D 11 reference driver (`gpu/README.md`).
 - `platform/shaders/generated/headers/d3d11`: the compiled shaders `MagelightGPU.dll` embeds,

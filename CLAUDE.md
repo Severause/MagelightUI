@@ -52,7 +52,7 @@ tools/gamepad-test/         src/GamepadCore.h's ledger, router, keys style and p
 tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus by geometry under zoom and device scale, scopes, editing, stale packets (build.bat)
 tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it; --thread: pages on the page thread, which must pass without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1) or the page thread (MG_PAGE_THREAD=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
-tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
+tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held; then the async path (`--mode async`, contract 4) against the immediate context, with and without a budget (build.bat)
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
 tools/lowmemory-test/       src/LowMemoryCore.h's floor, hysteresis and setting clamp (build.bat)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
@@ -426,7 +426,7 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     (`PageThreadMain`) owns Ultralight from `Renderer::Create` on and is the render thread of invariants 2, 13, 16 and 22-26: every page
     part of the frame (`PageWorkBegin`, `MaterializeImages`, Update, the second sync, the prepaint, Render,
     `CollectView`, `TickMemoryReport`) runs there (`PageThreadFrame`) and nowhere else. `MagelightGPU.dll` gets a
-    deferred context of the game's device (contract 3) and only the page thread calls it; the game's immediate
+    deferred context of the game's device (contract 3) and only the page thread calls it (with `"pageGpu": "async"` it gets the async path's recorder instead, contract 4: the page thread makes no Direct3D call, none of the device refusals below apply, the game thread replays its recorded frames at Present within `asyncBudgetMs` / `asyncBudgetMB`, and a page frame's views are shown once the frame it recorded has run, their SRVs looked up on the game thread every frame); the game's immediate
     context is used on the game thread alone. At Present (`ThreadModeFrame`) it takes every page frame finished
     since the last Present and at once lets the next one start (`PageThread::Handoff`), so that frame records while
     the game thread runs the taken frames' command lists in order (none is ever dropped: each carries uploads later
