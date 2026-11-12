@@ -27,7 +27,7 @@ src/GamepadCore.h           the gamepad layer's rules (1.6.0): who holds the pad
 src/PathTextCore.h          paths as text: every std::string path is UTF-8 (FromUtf8 / ToUtf8, ToFileUrl, what the file system is asked for); never path(std::string) or path::string()
 src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
 src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
-src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): the floor, the lift's hysteresis, the setting's clamp
+src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): what a page needs to open, the guard's floor and hysteresis, the page files' growth, the setting's clamp
 src/FocusShareCore.h        focus sharing's rules (1.9.0): which view a press moves the keyboard to, when it goes back
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
@@ -55,7 +55,7 @@ tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCo
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held (build.bat)
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
-tools/lowmemory-test/       src/LowMemoryCore.h's floor, hysteresis and setting clamp (build.bat)
+tools/lowmemory-test/       src/LowMemoryCore.h's needs, floor, hysteresis, growth room and setting clamp (build.bat)
 tools/focusshare-test/      src/FocusShareCore.h's press and settle rules (build.bat)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
@@ -487,20 +487,43 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     every SDK bump.
 28. **Low memory: prevent the throw, never survive it (1.8.0).** An allocation that fails inside Ultralight throws
     through closed-source frames, and the frame guard turns the overlay off for the session (`LogSehAndDisable`); never
-    resume after one. Instead, while free commit is under `lowMemoryFloorMB` (`s_lowMemory`, raised and lifted by
-    `TickLowMemoryGuard` in `PageWorkBegin` before hibernation; `src/LowMemoryCore.h`), nothing new is shown or loaded:
-    `SetUIModeImpl` and `SwitchUIModeView` refuse a view not already on screen (`OnScreenLocked`; `UIModeRefused`
-    "low memory", with a reading of their own, `LowMemoryNow`, ahead of a main-menu request), `MaterializeViews` holds
-    first loads and wakes, no prepaint or new inspector runs, and `HibernateIdleViews` releases every hidden view whose
-    page reached DOM ready; the released views that never hibernate load again hidden once the guard has been down a
-    minute (doubled each time such a reload brought it back, `Guard::ReloadDue`). Views already shown stay up, the views
-    a UI mode that is on needs (`NeededByUIMode`) load and stay, and a shown view a rebuild released that frame loads
-    (`s_rebuiltShown`; holding the rebuild would leave its scale out of step with its View). A switch refused for
-    memory while the holder's view is hidden (a reclaim's withdrawn release) ends UI mode. `Navigate` and
-    `ReloadView` replace a page in its own View and are not held: holding one stops a shown page's calls. A new path
-    that creates a View or shows a page checks the guard too. After render death nothing is released: on the GPU path
-    every page target is made and freed by Ultralight or the driver, and calling either after the throw is the resume
-    this rules out (the CPU path's host copies, `forceCpu` only, are left too).
+    resume after one. Free commit is the room under the commit limit plus what the page files can still grow by
+    (1.8.1, `PageFileGrowthNow`, asked only while the room alone is short of the guard's lift or of what an open
+    asks, and never when a job object caps the game's commit; a file the registry says Windows manages gets at least
+    the documented maximum; the reading never waits for its lock). Two questions are asked apart (1.8.1;
+    `src/LowMemoryCore.h`), and mixing them back into one floor is the 1.8.0 bug that kept every page closed on a PC
+    a few hundred MB from its limit:
+    - **May this page open?** One reading against what that page needs (`CheckOpenNow`: a show when its page is
+      built with no rebuild pending, else a load; the show grows with the view's pixels), with no hysteresis.
+      `SetUIModeImpl` and `SwitchUIModeView` refuse a view not already on screen (`OnScreenLocked`) on it
+      (`UIModeRefused` "low memory", ahead of a main-menu request). From that check until UI mode holds the view,
+      `s_openingView` keeps `HibernateIdleViews` from releasing the page it judged.
+    - **Should the host give memory back?** The guard (`s_lowMemory`, raised and lifted by `TickLowMemoryGuard` in
+      `PageWorkBegin` before hibernation, below what loading the largest view needs, `s_guardFloorBytes`). While it
+      is up no prepaint or new inspector runs, and `HibernateIdleViews` releases every hidden view whose page reached
+      DOM ready, but for the view that last held UI mode (`s_lastUIModeView`: released, its next open would need a
+      load). The released views that never hibernate load again hidden once the guard has been down a minute
+      (doubled each time such a reload brought it back, `Guard::ReloadDue`). Once the guard has sampled, its floor is
+      never under an open's need, so when an open is short the guard is up or comes up at its next sample.
+    - **Loads come out of a budget.** A page's memory lands over the frames after its load starts, where a reading
+      does not show it, so for `kLoadSettleMs` a load is still landing (`SpendLoad` in `LoadViewLocked`,
+      `s_startedLoads`). `s_guardBudget` is the guard's last sample held to what should be left once those have
+      landed: what the oldest was judged on, less the needs of all of them (`LowMemory::SettledFree`; never the
+      reading less their needs, which counts what has landed twice and refused pages at session start).
+      `MaterializeViews` starts a view a mod is showing when its own load fits, guard up or down, and a hidden view
+      only with the guard down and the guard's floor left over (`JudgeLoad`), so views that load together do not all
+      count the same room. `CheckOpenNow` holds its own reading to the same bound (`s_expectedFree`, until
+      `s_settledAtMs`, so it ends when page frames stop). The guard lifts at twice its floor, where a background
+      load of the largest view fits again, and the released views are sent back to load only once one fits.
+    Views already shown stay up, the views a UI mode that is on needs (`NeededByUIMode`) load and stay, and a shown
+    view a rebuild released that frame loads (`s_rebuiltShown`; holding the rebuild would leave its scale out of step
+    with its View). A switch refused for memory while the holder's view is hidden (a reclaim's withdrawn release)
+    ends UI mode. `Navigate` and `ReloadView` replace a page in its own View and are not held: holding one stops a
+    shown page's calls. A new path that creates a View or shows a page asks one of these questions. Windows' commit
+    events (`CommitEventsNow`) are logged and never decided on: their thresholds are not documented. After render
+    death nothing is released: on the GPU path every page target is made and freed by Ultralight or the driver, and
+    calling either after the throw is the resume this rules out (the CPU path's host copies, `forceCpu` only, are
+    left too).
 29. **WebKit's context menu never runs.** Its default for a `contextmenu` over selected text in an editable field
     faults in a spelling lookup in Ultralight 2.0 (`MgWCore.dll +0x1D635DC`, 1.7.1 field log: the overlay off for the
     session), in any frame, for a right release, the Menu key, Shift+F10 or a page's own dispatch (one inside a page's
