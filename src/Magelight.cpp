@@ -102,9 +102,9 @@ namespace Magelight {
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
     //                         // (and no main-menu pages, 1.7.1)
-    //   "pageGpu": "deferred" // with pageThread, how the page thread's GPU work reaches the game's context: "deferred"
-    //                         // = a deferred context whose lists the game thread runs; "async" = frames the page
-    //                         // thread records and the game thread replays (no device or context call off it)
+    //   "pageGpu": "async"    // 1.9.0: with pageThread, how the page thread's GPU work reaches the game's context:
+    //                         // "async" = frames the page thread records and the game thread replays (no device or
+    //                         // context call off it); "deferred" = a deferred context whose lists the game thread runs
     //   "asyncBudgetMs": 1.5  // pageGpu async: a Present that spent this long replaying page frames starts no further
     //                         // operation (one always finishes; 0 = no limit)
     //   "asyncBudgetMB": 8    // pageGpu async: the same for the data it uploaded, in MB (0 = no limit)
@@ -188,12 +188,15 @@ namespace Magelight {
     // hover-only rows black.
     static std::atomic<PageThread::Mode> s_pageThreadMode{ PageThread::Mode::Off };
     static bool PageThreadOn() { return s_pageThreadMode.load() == PageThread::Mode::On; }
-    // Magelight.json "pageGpu": "async" (with the page thread). The page thread's driver is then the recorder of
-    // MagelightGPU's async path (contract 4): it makes no device or context call (it still takes and drops references
-    // on a mod's image SRVs), so only a single-threaded device refuses it, and the game thread replays what it
-    // recorded at Present, starting no further operation once asyncBudgetMs or asyncBudgetMB are spent in a frame
-    // (ThreadModeFrame). Wanted from the file; s_pageAsync once StartPageThread made the driver.
-    static bool              s_pageAsyncWanted = false;
+    // Magelight.json "pageGpu" (with the page thread): "async" unless the file says "deferred". The page thread's
+    // driver is then the recorder of MagelightGPU's async path (contract 4): it makes no device or context call (it
+    // still takes and drops references on a mod's image SRVs), so only a single-threaded device refuses it, and the
+    // game thread replays what it recorded at Present, starting no further operation once asyncBudgetMs or
+    // asyncBudgetMB are spent in a frame (ThreadModeFrame). Wanted from the file; s_pageAsync once StartPageThread
+    // made the driver.
+    static bool              s_pageAsyncWanted = true;
+    // The file named "async" itself: a fallback from async is then worth a warning, not just a line.
+    static bool              s_pageAsyncAsked = false;
     static std::atomic<bool> s_pageAsync{ false };
     static double            s_asyncBudgetMs = 1.5;
     static std::uint64_t     s_asyncBudgetBytes = 8ull << 20;
@@ -624,11 +627,12 @@ namespace Magelight {
                     SKSE::log::info("Magelight: pageThread is ignored on Skyrim VR - pages run in the game's frame");
                 }
             }
-            if (auto it = j.find("pageGpu"); it != j.end() && it->is_string()) {
-                const std::string how = it->get<std::string>();
-                if (how == "async") s_pageAsyncWanted = true;
-                else if (how != "deferred")
-                    SKSE::log::warn("Magelight: pageGpu \"{}\" is neither \"deferred\" nor \"async\" - using \"deferred\"", how);
+            if (auto it = j.find("pageGpu"); it != j.end()) {
+                const std::string how = it->is_string() ? HotkeyNames::Lower(it->get<std::string>()) : std::string();
+                if (how == "deferred") s_pageAsyncWanted = false;
+                else if (how == "async") s_pageAsyncAsked = true;
+                else
+                    SKSE::log::warn("Magelight: pageGpu {} is neither \"async\" nor \"deferred\" - using \"async\"", it->dump());
             }
             if (auto it = j.find("asyncBudgetMs"); it != j.end() && it->is_number())
                 s_asyncBudgetMs = std::clamp(it->get<double>(), 0.0, 1000.0);
@@ -10146,19 +10150,21 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // ── The page thread (1.7.0, "pageThread") ────────────────────────────────
     // With it on, a thread of Magelight's own (PageThreadMain) owns Ultralight from Renderer::Create on: script,
-    // layout, Update, Render, and the GPU driver recording into a deferred context of the game's device. Each page
-    // frame ends in a PagePacket: its command list and what it drew. At Present the game thread (ThreadModeFrame)
-    // takes every finished packet and at once lets the page thread start its next frame, then runs their lists in
-    // order on the immediate context and draws the newest packet's views. It never waits on the page thread, so a
-    // page stuck in a script freezes every page (they share this thread) but never the game (the watchdog names it).
-    // A recorded list keeps every resource it uses alive until it is released, and a packet's SRVs hold references of
-    // their own, so a View Ultralight frees meanwhile cannot pull a texture from under the game thread
-    // (tools/deferred-test). No fiber here: the thread's stack is WebKit's own, in a frame and between frames
-    // (tools/fiber-gc-test --thread passes without the VM lock); it holds the lock between frames for speed only (an
-    // idle frame about 13 us against 235). Flat only (VR never asks for it).
-    // pageGpu async (s_pageAsync): no deferred context and no list. The driver is a recorder; a packet names the last
-    // frame it recorded and each view's texture, and the game thread replays the frames within a budget and looks the
-    // SRVs up itself, from the driver, once a packet's frame has run.
+    // layout, Update, Render, and the GPU driver recording the frame's GPU work. Each page frame ends in a PagePacket:
+    // what it recorded and what it drew. At Present the game thread (ThreadModeFrame) takes every finished packet and
+    // at once lets the page thread start its next frame, then runs what they recorded in order on the immediate
+    // context and draws the newest packet's views. It never waits on the page thread, so a page stuck in a script
+    // freezes every page (they share this thread) but never the game (the watchdog names it). No fiber here: the
+    // thread's stack is WebKit's own, in a frame and between frames (tools/fiber-gc-test --thread passes without the
+    // VM lock); it holds the lock between frames for speed only (an idle frame about 13 us against 235). Flat only
+    // (VR never asks for it).
+    // pageGpu async (s_pageAsync, the default): no deferred context and no list. The driver is a recorder; a packet
+    // names the last frame it recorded and each view's texture, and the game thread replays the frames within a budget
+    // and looks the SRVs up itself, from the driver, once a packet's frame has run.
+    // pageGpu "deferred": the driver records into a deferred context of the game's device and a packet carries its
+    // command list. A recorded list keeps every resource it uses alive until it is released, and a packet's SRVs hold
+    // references of their own, so a View Ultralight frees meanwhile cannot pull a texture from under the game thread
+    // (tools/deferred-test).
     struct PagePacket {
         // The frame's recorded GPU work, in order: the parts the driver split off at each flush (MgGpu_TakeCommandList),
         // then the frame's own. Empty when the frame rendered nothing.
@@ -10419,18 +10425,23 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
-    // so, its deferred context, its handoff and the thread. False: the mode is Off (the log line says why) and render
-    // init runs again next frame, as without the setting.
+    // so, its async driver or deferred context, its handoff and the thread. False: the mode is Off (the log line says
+    // why) and render init runs again next frame, as without the setting.
     static bool StartPageThread()
     {
         // pageGpu async: the driver is made here, on the game thread that replays on it. The page thread then makes no
         // device or context call, so it needs no deferred context, and of the device refusals below only the
-        // single-threaded one applies (that thread still takes and drops references on a mod's image SRVs).
+        // single-threaded one applies (that thread still takes and drops references on a mod's image SRVs). When async
+        // cannot be had, the deferred path and all its refusals apply.
         bool async = false;
         if (s_pageAsyncWanted) {
-            if (s_forceCpu.load()) SKSE::log::warn("Magelight: pageGpu async needs the GPU driver (forceCpu is set) - using a deferred context");
+            const auto stepAside = [](const char* why) {   // the default stepping aside is no fault: a warning only when asked
+                if (s_pageAsyncAsked) SKSE::log::warn("Magelight: pageGpu async needs {} - using a deferred context", why);
+                else SKSE::log::info("Magelight: pageGpu async needs {} - using a deferred context", why);
+            };
+            if (s_forceCpu.load()) stepAside("the GPU driver (forceCpu is set)");
             else if (!s_gpuCreate || !s_gpuCreateAsync || !s_gpuAsyncDrain || !s_gpuAsyncState || !s_context)
-                SKSE::log::warn("Magelight: pageGpu async needs MagelightGPU.dll - using a deferred context");
+                stepAside("MagelightGPU.dll");
             else if ((s_gpu = s_gpuCreateAsync(s_device, s_context, s_msaa, &GpuLogBridge)) == nullptr)
                 SKSE::log::warn("Magelight: the async GPU driver could not be made - using a deferred context");
             else async = true;

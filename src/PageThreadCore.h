@@ -1,8 +1,9 @@
 #pragma once
 // The page thread (1.7.0, "pageThread"): whether it may run, and how a page frame reaches the game thread. With it on,
-// a thread of Magelight's own owns Ultralight and records each frame's GPU work into a deferred context; the game
-// thread, at Present, takes every finished frame (TakeAll) and at once lets the page thread start the next one (Go),
-// then runs the taken frames' command lists in order and composites the newest while that one records. The page
+// a thread of Magelight's own owns Ultralight and records each frame's GPU work (as async driver frames, or with
+// pageGpu "deferred" into a deferred context); the game thread, at Present, takes every finished frame (TakeAll) and at
+// once lets the page thread start the next one (Go), then runs what the taken frames recorded in order and composites
+// the newest while that one records. The page
 // thread makes at most one frame per Go and the game thread takes them all, so none is dropped (each carries uploads
 // later frames build on) and at most a couple ever wait. The game thread never waits on the page thread: TakeAll and
 // Go hold only the queue's own lock, for a swap. Windows and the standard library only, so tools/pagethread-test runs
@@ -74,7 +75,7 @@ namespace Magelight::PageThread {
 
     // Whether Smooth Motion takes engine mode under composite "auto". Engine mode keeps Streamline's wrapper objects
     // away from the engine's, or the device is lost; a swapchain that cannot be trusted has never had the UI pass.
-    // Behind a replaced d3d11.dll or dxgi.dll with neither, the engine's device cannot carry the page thread (Decide)
+    // Behind a replaced d3d11.dll or dxgi.dll with neither, the engine's device cannot carry the deferred path (Decide)
     // and the UI pass draws without flicker on ENB.
     inline bool SmoothMotionTakesEngineMode(bool graphicsDllReplaced, bool streamlineOrUntrustedChain)
     {
@@ -84,7 +85,8 @@ namespace Magelight::PageThread {
     // Why the page thread cannot run on this device, for the log line, or null when it can. A single-threaded device
     // may not be used from a second thread; a device (or a wrapper of one) that refuses a deferred context leaves the
     // driver nothing to record into; the ENGINE's device behind a replaced d3d11.dll or dxgi.dll faults on the first
-    // shader recorded under ENB (the swapchain's device there does not). Named in that order.
+    // shader recorded under ENB (the swapchain's device there does not). Named in that order. pageGpu async records
+    // no deferred context, so it passes the last two as clear.
     inline const char* Decide(UINT deviceCreationFlags, bool deferredContextOk, bool engineDeviceOverReplacedDll = false)
     {
         if (deviceCreationFlags & D3D11_CREATE_DEVICE_SINGLETHREADED) return "the game's device is single-threaded";
