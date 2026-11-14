@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Magelight drawer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  /* Host 1.9.1, "hitTest": "content" (manifest.json): the pointer takes this fullscreen view only where the page
+     has an element. The wrapper covers the screen, so it opts out with pointer-events, and the drawer opts back in. */
+  .screen { position: fixed; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; }
+  .drawer {
+    position: absolute; top: 12%; right: 0; width: 280px; padding: 12px 14px; pointer-events: auto;
+    box-sizing: border-box; background: #1e1913; border: 1px solid #5a4a2e; border-right: 0;
+    border-radius: 6px 0 0 6px; color: #e8dcc4; font: 13px Georgia, serif;
+    transition: transform 160ms ease-out;
+  }
+  .drawer.closed { transform: translateX(236px); }
+  h1 { margin: 0 0 6px; font-size: 14px; color: #cba560; font-weight: normal; }
+  p { margin: 0 0 8px; color: #8a7a5a; font-size: 11px; line-height: 1.4; }
+  button {
+    background: #292118; border: 1px solid #5a4a2e; border-radius: 4px; padding: 4px 10px;
+    color: #e8dcc4; font: 12px Georgia, serif; cursor: pointer;
+  }
+  button:hover { border-color: #cba560; }
+  kbd { background: #292118; border: 1px solid #3b3221; border-radius: 3px; padding: 0 4px; font: 11px monospace; }
+</style></head>
+<body>
+  <div class="screen">
+    <div class="drawer" id="d">
+      <button id="b" data-ml-sound="click">Close</button>
+      <h1 style="margin-top:8px">Fullscreen drawer</h1>
+      <p>This view covers the whole screen, above the panel (<kbd>F7</kbd>) and the note (<kbd>F11</kbd>). Only
+        this drawer takes the pointer: click, hover or scroll anywhere else and the view below gets it.</p>
+      <p>Click the note or the panel to type there; <kbd>F10</kbd> closes the drawer.</p>
+    </div>
+  </div>
+  <script>
+    var d = document.getElementById('d'), b = document.getElementById('b');
+    b.addEventListener('click', function () {
+      var closed = d.classList.toggle('closed');
+      b.textContent = closed ? 'Open' : 'Close';
+    });
+  </script>
+</body></html>

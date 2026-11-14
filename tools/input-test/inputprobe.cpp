@@ -10,6 +10,9 @@
 //            no cancellation the page did not make itself (checked; runs last, since a fault ends the run)
 //   routes   which view each pointer source's events go to, Input::PointerRoutes, with two VR hands (checked)
 //   queue    the input queue a page frame drains, Input::QueueRule: moves merged, releases and markers kept (checked)
+//   hittest  content hit testing's page function, HitTest::kPageScript, asked as the host asks it: what counts as an
+//            element in Ultralight's WebKit (pointer-events, <html> and <body>, an iframe), and a page that replaces
+//            elementFromPoint or __mlHit (checked)
 //   lostkeys what the muted keyboard poll passes on, Input::LostKeys: only keys the window never got (checked)
 //   keys, dead, state, mouse, wheel   the matrix the design was made from (printed, a few checks): the events
 //            Magelight 1.x built by hand, the bare 2.0 constructor and MakeKeyEvent side by side; the es-419 layout's
@@ -28,6 +31,7 @@
 #include <Ultralight/Ultralight.h>
 
 #include "InputCore.h"
+#include "HitTestCore.h"
 
 #ifndef MG_NO_MINHOOK
 #include <MinHook.h>
@@ -45,6 +49,7 @@
 
 using namespace ultralight;
 namespace In = Magelight::Input;
+namespace HT = Magelight::HitTest;
 
 static const char* kPage = R"(<!doctype html><html><head><style>
 body{margin:0;font:14px sans-serif}
@@ -1717,9 +1722,60 @@ static void LostKeysTest()
     }
 }
 
+// ── hittest: the page function behind content hit testing ────────────────
+// A 700x500 page: a wrapper over the whole window that opts out of the pointer, and in it a panel that opts back in
+// (with a child), a box that does not, a transparent handle that does, and an iframe.
+static const char* kHitPage = R"(<!DOCTYPE html><html><head><style>
+html,body{margin:0;height:100%;background:transparent}
+#screen{position:fixed;top:0;right:0;bottom:0;left:0;pointer-events:none}
+#panel{position:absolute;left:100px;top:100px;width:200px;height:100px;background:#333;pointer-events:auto}
+#child{margin:10px;width:50px;height:20px;background:#666}
+#inert{position:absolute;left:400px;top:100px;width:100px;height:100px;background:#933}
+#handle{position:absolute;left:400px;top:300px;width:100px;height:40px;pointer-events:auto}
+#frame{position:absolute;left:100px;top:300px;width:120px;height:80px;border:0;pointer-events:auto}
+</style></head><body><div id="screen"><div id="panel"><div id="child"></div></div><div id="inert"></div>
+<div id="handle"></div><iframe id="frame" srcdoc="<html><body style='background:transparent'></body></html>"></iframe>
+</div></body></html>)";
+
+static std::string Hit(int x, int y) { return Js(HT::CallScript(x, y)); }
+
+static void HitTestTest()
+{
+    std::printf("== hittest: HitTest::kPageScript\n");
+    NewView(kHitPage, "file:///hit.html", HT::kPageScript);
+    Expect("hittest: on the panel", Hit(150, 180), "1");
+    Expect("hittest: on the panel's child", Hit(120, 115), "1");
+    Expect("hittest: on the wrapper beside the panel (pointer-events none)", Hit(350, 50), "0");
+    Expect("hittest: on a box that inherits pointer-events none", Hit(450, 150), "0");
+    Expect("hittest: on a transparent element that takes the pointer", Hit(450, 320), "1");
+    Expect("hittest: on an iframe with nothing in it", Hit(160, 340), "1");
+    Expect("hittest: left of the page", Hit(-5, -5), "0");
+    Expect("hittest: past the page's edge", Hit(5000, 5000), "0");
+    Expect("hittest: the answers the host reads as empty", std::string(HT::Empty(Hit(350, 50)) ? "empty" : "element") + " " +
+           (HT::Empty(Hit(150, 180)) ? "empty" : "element"), "empty element");
+    // The wrapper taking the pointer again covers everything.
+    Js("document.getElementById('screen').style.pointerEvents='auto'"); Pump();
+    Expect("hittest: a wrapper that takes the pointer covers the page", Hit(350, 50), "1");
+    Js("document.getElementById('screen').style.pointerEvents=''"); Pump();
+    // A page that replaces the lookup or the function changes nothing.
+    Js("document.elementFromPoint=function(){return document.getElementById('panel');};"
+       "Document.prototype.elementFromPoint=function(){return document.getElementById('panel');};");
+    Expect("hittest: a page's own elementFromPoint is not asked", Hit(350, 50), "0");
+    Js("try{window.__mlHit=function(){return '0';};}catch(e){}");
+    Expect("hittest: a page cannot replace the function", Hit(150, 180), "1");
+    // <body> filling the window is not an element; a div in it is.
+    NewView("<!DOCTYPE html><html><body style='margin:0;height:100%;background:#123'><div id='d' style='width:50px;height:50px'></div></body></html>",
+            "file:///hit2.html", HT::kPageScript);
+    Expect("hittest: <body>, even painted", Hit(300, 300), "0");
+    Expect("hittest: a div in it", Hit(20, 20), "1");
+    // A page the page core never reached answers as an element.
+    NewView("<!DOCTYPE html><html><body></body></html>", "file:///hit3.html", nullptr);
+    Expect("hittest: a page without the function takes the pointer", Hit(300, 300), "1");
+}
+
 static int ToolMain(int argc, char** argv)
 {
-    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|queue|lostkeys|keys|dead|state|mouse|wheel|contextmenu|menufault|armfault ...]\n"); return 2; }
+    if (argc < 2) { std::printf("usage: inputprobe <sdkDir> [paths|polled|polledcontrol|release|leave|guard|routes|queue|hittest|lostkeys|keys|dead|state|mouse|wheel|contextmenu|menufault|armfault ...]\n"); return 2; }
     const std::string sdk = argv[1];
     std::vector<std::string> want;
     for (int i = 2; i < argc; ++i) want.push_back(argv[i]);
@@ -1745,6 +1801,7 @@ static int ToolMain(int argc, char** argv)
     if (on("guard")) GuardTest();
     if (on("routes")) RoutesTest();
     if (on("queue")) QueueTest();
+    if (on("hittest")) HitTestTest();
     if (on("lostkeys")) LostKeysTest();
     if (on("keys")) { NewView(); KeysTest(); }
     if (on("dead")) { NewView(); DeadTest(); }

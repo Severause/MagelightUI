@@ -36,8 +36,10 @@ namespace Magelight {
     // with stdint, not the Win32 aliases, because this header is parsed before
     // <windows.h> in the VR translation units. msg is a WM_* pointer message; w/l are
     // the WPARAM/LPARAM payload; hand (0 left, 1 right) is the pointer source, which
-    // keeps its own press and hover. Mutex-guarded; callable from the present thread.
-    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam, int hand);
+    // keeps its own press and hover; view is the ViewId of the panel the ray hit, which
+    // the message goes to while that view shows (0 = the view at the point: a release
+    // goes to the view the press began on either way). Mutex-guarded; callable from the present thread.
+    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam, int hand, std::uint64_t view);
 
     // Text a VR keyboard typed, for the UI-mode page: printable runs as edits (Editor::InsertText, the page's
     // beforeinput and input events), \b, \t and \r or \n (CR LF as one) as the Backspace, Tab and Enter keys, other
@@ -363,6 +365,8 @@ namespace Magelight {
     bool SetViewFocusSharing(ViewId view, std::uint32_t flags);
     // The view a click shared the keyboard with while UI mode is on; 0 while the UI-mode view has it. Any thread.
     ViewId GetSharedKeyView();
+    // 1.9.1 (invariant 31): HitTest::kRect / kContent on a view. false: the view is gone or an inspector. Any thread.
+    bool SetViewHitTest(ViewId view, std::uint32_t mode);
     bool ViewOpensAtMainMenu(ViewId view);        // 1.7.1 the main menu is open and this view may show over it
     bool MainMenuPagesAvailable();                // 1.7.1 the "mainMenu" capability: the page thread is on or wanted
     bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)

@@ -17,6 +17,7 @@
 #include "MemoryReportCore.h"
 #include "LowMemoryCore.h"
 #include "FocusShareCore.h"
+#include "HitTestCore.h"
 #include "PageStackCore.h"
 
 #include <RE/Skyrim.h>
@@ -1001,6 +1002,8 @@ namespace Magelight {
         std::uint64_t order = 0;
         bool escapeCapture = false;   // 0.28.0: the page owns Escape (delivered as a key, no UI-mode exit)
         std::uint32_t focusShare = 0; // 1.9.0: FocusShare::kGive / kTake (SetViewFocusSharing, invariant 30)
+        std::uint32_t hitTest = HitTest::kRect;   // 1.9.1: HitTest::kRect / kContent (SetViewHitTest, invariant 31)
+        bool hitEmpty = false;        // content mode: the page's last answer to the mouse was "nothing here" (the cursor's pick reads it)
         bool freezeWorld = false;     // 0.31.0: freeze the world behind this view while it holds UI mode paused
         NetLevel netLevel = NetLevel::File;   // the owning mod's NetworkPolicy; File when no mod owns the view
         int  scrollStep = 40;         // 0.28.0: px per wheel notch
@@ -1289,7 +1292,8 @@ namespace Magelight {
     // translation unit that calls them. Only the file-local queue needs a fwd.
     // keys: the Input::KeyBits a key message is read with; < 0 = capture them now (CaptureKeyBits(false)).
     // source: the Input::PointerSource a pointer message comes from.
-    static void QueueInput(UINT msg, WPARAM w, LPARAM l, int keys = -1, std::uint8_t source = Input::kPointerMouse);
+    static void QueueInput(UINT msg, WPARAM w, LPARAM l, int keys = -1, std::uint8_t source = Input::kPointerMouse,
+                           ViewId view = 0);
     // A key message's source when the gamepad's keys style made it: it goes to the UI-mode view's page, never to a view
     // the keyboard was shared with, as the pad stays the holder's (invariant 30). Key messages carry no pointer source.
     static constexpr std::uint8_t kKeySourcePad = 0x80;
@@ -1482,6 +1486,11 @@ namespace Magelight {
         }
         if (name == "__prepaint") {   // 0.31.11: SetViewPrepaint from the page itself ('1' / '0')
             SetViewPrepaint(id, arg == "1");
+            return JSValueMakeUndefined(ctx);
+        }
+        if (name == "__hittest") {   // 1.9.1: SetViewHitTest from the page itself ('content' / 'rect'); other text is dropped
+            std::uint32_t mode = HitTest::kRect;
+            if (HitTest::ParseMode(arg, mode)) SetViewHitTest(id, mode);
             return JSValueMakeUndefined(ctx);
         }
         if (name == "__gamepad") {   // 1.6.0: the page core's gamepad helper (GamepadScript.h)
@@ -1767,6 +1776,8 @@ namespace Magelight {
             // Middle, back and forward buttons: no autoscroll, auxclick instead of click; no WebKit context menu, in
             // the page or its frames (InputCore.h).
             std::string(Input::kPointerGuardScript) +
+            // Content hit testing: the function the host asks whether the page has an element at a point (HitTestCore.h).
+            std::string(HitTest::kPageScript) +
             // IME: the page core draws the IME's candidate list the host hands it on '__ime' (ImeCore.h), in a box at
             // the anchor, the composition character the IME's window would open at, in viewport CSS px (the
             // composition itself is the field's own: Editor::SetComposition). Every message is first a cancelable
@@ -2338,6 +2349,7 @@ namespace Magelight {
         LPARAM lparam;
         std::uint16_t keys = 0;   // a key message's Input::KeyBits, captured when it was queued (Input::MakeKeyEvent)
         std::uint8_t source = Input::kPointerMouse;   // a pointer message's Input::PointerSource
+        ViewId view = 0;          // a VR hand's pointer message: the view whose panel its ray hit (0 = the view at the point)
     };
     static HWND                  s_hwnd = nullptr;
     static WNDPROC               s_origWndProc = nullptr;
@@ -3165,7 +3177,7 @@ namespace Magelight {
         }
     }
 
-    static void QueueInput(UINT msg, WPARAM w, LPARAM l, int keys, std::uint8_t source)
+    static void QueueInput(UINT msg, WPARAM w, LPARAM l, int keys, std::uint8_t source, ViewId view)
     {
         const bool keyMsg = msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP ||
                             msg == WM_CHAR;
@@ -3175,8 +3187,8 @@ namespace Magelight {
         const bool tailMove = !s_inputQueue.empty() && s_inputQueue.back().msg == WM_MOUSEMOVE &&
                               s_inputQueue.back().source == source;
         switch (Input::QueueRule(s_inputQueue.size(), tailMove, msg, msg == 0 || msg == kKeyReleaseMsg)) {
-        case Input::QueueStep::Append: s_inputQueue.push_back({ msg, w, l, bits, source }); break;
-        case Input::QueueStep::ReplaceTail: s_inputQueue.back() = { msg, w, l, bits, source }; break;
+        case Input::QueueStep::Append: s_inputQueue.push_back({ msg, w, l, bits, source, view }); break;
+        case Input::QueueStep::ReplaceTail: s_inputQueue.back() = { msg, w, l, bits, source, view }; break;
         case Input::QueueStep::Drop: break;
         }
     }
@@ -3454,11 +3466,13 @@ namespace Magelight {
     }
 
     // Public bridge (declared in Magelight.h with stdint types): the VR laser's pointer messages, each tagged with
-    // its hand (DrainInputQueue routes every hand on its own). Keys and text go through QueueTypedText.
-    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam, int hand)
+    // its hand (DrainInputQueue routes every hand on its own) and the view whose panel the ray hit: two panels can
+    // share a flat rectangle, so the point alone does not say which one the hand points at. Keys and text go through
+    // QueueTypedText.
+    void QueueSyntheticInput(unsigned int msg, std::uintptr_t wparam, std::intptr_t lparam, int hand, ViewId view)
     {
         const std::uint8_t source = hand == 1 ? Input::kPointerHand1 : Input::kPointerHand0;
-        QueueInput(static_cast<UINT>(msg), static_cast<WPARAM>(wparam), static_cast<LPARAM>(lparam), -1, source);
+        QueueInput(static_cast<UINT>(msg), static_cast<WPARAM>(wparam), static_cast<LPARAM>(lparam), -1, source, view);
     }
 
     // Game thread only (a posted task). Idempotent. Step-logged (0.3.2 diagnostics:
@@ -6520,8 +6534,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         CursorTintSet tint;                    // the drawn cursor's colours (0.31.1); empty = the host's
     };
 
-    // The page at (x, y): the topmost visible interactive view there, else the UI-mode view (DrainInputQueue's hit
-    // order, so it is the page the mouse events go to while no button is held). Hiding needs the pointer INSIDE that
+    // The page at (x, y): the topmost visible interactive view that takes the pointer there, else the UI-mode view
+    // (DrainInputQueue's hit order, so it is the page the mouse events go to while no button is held). Hiding needs the pointer INSIDE that
     // page: outside every view the host cursor always draws, so a stale "none" never leaves the player without a
     // pointer. Precedence: cursorForce > the view's own set > its mod's default > the host cursor; modCursors false
     // drops the images and the tint.
@@ -6529,15 +6543,28 @@ float4 ps_straight(VSOut i) : SV_Target {
     {
         CursorPick pick;
         const MlView* view = nullptr;
+        const MlView* through = nullptr;   // the UI-mode view, when the pointer is over a part of it that lets it through
         bool inside = false;
+        const ViewId holder = static_cast<ViewId>(s_uiModeView.load());
         for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
             const MlView& v = **it;
             if (!v.ul || !v.visible || v.clickThrough || !ViewShows(v)) continue;
             float ex = 0, ey = 0;
             EffectivePos(v, bw, bh, ex, ey);
-            if (x >= ex && y >= ey && x < ex + v.w && y < ey + v.h) { view = &v; inside = true; break; }
+            if (!(x >= ex && y >= ey && x < ex + v.w && y < ey + v.h)) continue;
+            // This thread cannot ask a page: a content-mode view is passed where its last answer to the mouse was
+            // "nothing here" (invariant 31), a frame behind DrainInputQueue at most.
+            if (HitTest::CursorSkips({ v.hitTest == HitTest::kContent, v.domReady }, v.hitEmpty)) {
+                if (v.id == holder) through = &v;
+                continue;
+            }
+            view = &v;
+            inside = true;
+            break;
         }
-        if (!view) view = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+        // The UI-mode page still gets the moves over its own empty part, so its cursor (a "none" included) holds there.
+        if (!view && through) { view = through; inside = true; }
+        if (!view) view = FindViewLocked(holder);
         if (!view) return pick;
         const PageCursor kind = static_cast<PageCursor>(view->pageCursor);
         pick.kind = (kind == PageCursor::None || kind == PageCursor::Custom) ? PageCursor::Arrow : kind;
@@ -7763,13 +7790,30 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     }
 
+    // Whether the page has an element at (x, y), in viewport CSS px: content hit testing's question (HitTestCore.h,
+    // invariant 31). True when the page cannot answer. Render thread, outside s_viewsMutex, as every host script runs
+    // (invariant 16), and only for a page that reached DOM ready: the script gives a page with none of its own its
+    // window object, as ArmMenuGuard's does.
+    bool PageHasElementAt(ultralight::View& ul, int x, int y)
+    {
+        if (auto ctxScope = ul.LockJSContext()) {
+            std::string result;
+            JsBridge::ErrorInfo err;
+            if (JsBridge::Evaluate(*ctxScope, HitTest::CallScript(x, y), "magelight:hittest", result, err))
+                return !HitTest::Empty(result);
+        }
+        return true;
+    }
+
     // Translate queued Windows messages into Ultralight events. Render thread only (the sole thread that touches
     // views); no Ultralight call is made under s_viewsMutex.
     // Routing: keys and text -> the view that has the keyboard (KeyViewNow: the UI-mode view, or one it shared the
     // keyboard with, invariant 30), but the gamepad's keys -> the UI-mode view. A pointer event -> the view a button its
     // source holds was pressed
-    // on, else the topmost visible interactive view under the point, else the UI-mode view (a point outside every
-    // view reaches it as a move outside its page). The wheel always goes where it points.
+    // on, else the view a VR hand's message names, else the topmost visible interactive view that takes the pointer
+    // at the point (a content-mode view only where its page has an element, invariant 31), else the UI-mode view (a
+    // point no view takes reaches it as a move outside its page, or over its own empty part). The wheel always goes
+    // where it points.
     static void DrainInputQueue(float bw, float bh)
     {
         std::vector<InputMsg> msgs;
@@ -7859,22 +7903,72 @@ float4 ps_straight(VSOut i) : SV_Target {
             t.step = v.scrollStep > 0 ? v.scrollStep : 40;   // 0.28.0 per-view wheel step
             return t;
         };
-        // The topmost visible interactive view containing (mx, my), else the UI-mode view.
-        auto hitTest = [&](int mx, int my) {
-            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
-            for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
-                const MlView& v = **it;
-                if (!v.ul || !v.visible || v.clickThrough || !ViewShows(v)) continue;
-                float ex = 0, ey = 0;
-                EffectivePos(v, bw, bh, ex, ey);
-                if (mx >= ex && my >= ey && mx < ex + v.w && my < ey + v.h) {
-                    PointerTarget t = targetOf(v);
-                    t.inside = true;
-                    return t;
+        // The topmost visible interactive view that takes the pointer at (mx, my), else the UI-mode view. A view in
+        // content mode takes it only where its page has an element (HitTest::Resolve, invariant 31): the views
+        // containing the point are read under the lock, and their pages asked outside it, since a page's script can
+        // call back into the host (invariant 16) and a mod it reaches can create or reorder views. On VR every view
+        // is a rectangle here: the laser asked the page of the panel it hit and named that view in its message.
+        // `mouse`: the flat pointer, whose answers the cursor's pick reads (MlView::hitEmpty).
+        struct HitCandidate { PointerTarget target; HitTest::Candidate facts; };
+        std::vector<HitCandidate> hitViews;
+        std::vector<HitTest::Candidate> hitFacts;
+        auto hitTest = [&](int mx, int my, bool mouse) {
+            hitViews.clear();
+            PointerTarget fallback;
+            bool asks = false;
+            {
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+                const bool flat = !VR::IsLive();
+                for (auto it = s_views.rbegin(); it != s_views.rend(); ++it) {
+                    const MlView& v = **it;
+                    if (!v.ul || !v.visible || v.clickThrough || !ViewShows(v)) continue;
+                    float ex = 0, ey = 0;
+                    EffectivePos(v, bw, bh, ex, ey);
+                    if (!(mx >= ex && my >= ey && mx < ex + v.w && my < ey + v.h)) continue;
+                    HitCandidate c{ targetOf(v), { v.hitTest == HitTest::kContent, flat && v.domReady } };
+                    c.target.inside = true;
+                    hitViews.push_back(std::move(c));
+                    if (!HitTest::Asks(hitViews.back().facts)) break;   // it takes the pointer: nothing below is reached
+                    asks = true;
+                }
+                const MlView* u = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
+                if (u && u->ul) fallback = targetOf(*u);
+            }
+            if (!asks) return hitViews.empty() ? fallback : hitViews.back().target;
+            hitFacts.clear();
+            for (const HitCandidate& c : hitViews) hitFacts.push_back(c.facts);
+            const int count = static_cast<int>(hitViews.size());
+            const int hit = HitTest::Resolve(hitFacts.data(), count, [&](int i) {
+                const PointerTarget& t = hitViews[static_cast<std::size_t>(i)].target;
+                return PageHasElementAt(*t.ul, t.X(mx), t.Y(my));
+            });
+            // The answers, for the cursor; and a view destroyed while its page was asked takes nothing.
+            bool gone = false;
+            {
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+                for (int i = 0; i < count && (hit < 0 || i <= hit); ++i) {
+                    MlView* v = FindViewLocked(hitViews[static_cast<std::size_t>(i)].target.id);
+                    const bool live = v && v->ul && !v->destroyPending;
+                    if (i == hit && !live) gone = true;
+                    if (live && mouse && HitTest::Asks(hitFacts[static_cast<std::size_t>(i)])) v->hitEmpty = (i != hit);
                 }
             }
-            const MlView* u = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
-            return (u && u->ul) ? targetOf(*u) : PointerTarget{};
+            return (hit < 0 || gone) ? fallback : hitViews[static_cast<std::size_t>(hit)].target;
+        };
+        // The view a VR hand's message names (the panel its ray hit), while it still shows a page.
+        auto named = [&](ViewId id) {
+            if (!id) return PointerTarget{};
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            const MlView* v = FindViewLocked(id);
+            if (!v || !v->ul || v->destroyPending || !v->visible || v->clickThrough || !ViewShows(*v)) return PointerTarget{};
+            PointerTarget t = targetOf(*v);
+            t.inside = true;
+            return t;
+        };
+        // Where a message points: the view it names, else the view at its point.
+        auto pointed = [&](const InputMsg& e, int mx, int my) {
+            PointerTarget t = named(e.view);
+            return t.ul ? t : hitTest(mx, my, e.source == Input::kPointerMouse);
         };
         // The view `src`'s held buttons were pressed on, while it keeps its page; otherwise that hold is over.
         auto captured = [&](unsigned src) {
@@ -7888,9 +7982,9 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_pointer.Drop(src);
             return PointerTarget{};
         };
-        auto pointerTarget = [&](unsigned src, int mx, int my) {
-            PointerTarget t = captured(src);
-            return t.ul ? t : hitTest(mx, my);
+        auto pointerTarget = [&](const InputMsg& e, int mx, int my) {
+            PointerTarget t = captured(e.source);
+            return t.ul ? t : pointed(e, mx, my);
         };
         // `src`'s pointer went to view `id`. The view it left hides its tooltip and gets a move outside itself (its
         // mouseout and mouseleave fire and its :hover clears), each when PointerRoutes::Hover says so.
@@ -8134,7 +8228,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 break;
             case WM_MOUSEMOVE: {
                 const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
-                const PointerTarget t = pointerTarget(e.source, mx, my);
+                const PointerTarget t = pointerTarget(e, mx, my);
                 noteHover(e.source, t.id);
                 if (!t.ul) break;
                 UL evt{ UL::kType_MouseMoved, t.X(mx), t.Y(my), UL::kButton_None };
@@ -8146,7 +8240,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN: {
                 const UL::Button btn = buttonOf(e);
                 const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
-                const PointerTarget t = pointerTarget(e.source, mx, my);
+                const PointerTarget t = pointerTarget(e, mx, my);
                 noteHover(e.source, t.id);
                 if (!t.ul) break;
                 // A left press moves the keyboard when the holder shares it (invariant 30), before the press, so the
@@ -8172,7 +8266,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP: {
                 const UL::Button btn = buttonOf(e);
                 const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
-                const PointerTarget t = pointerTarget(e.source, mx, my);
+                const PointerTarget t = pointerTarget(e, mx, my);
                 const UL evt{ UL::kType_MouseUp, t.X(mx), t.Y(my), btn };
                 if (t.ul) {
                     if (Input::ArmsMenuGuard(e.msg, e.wparam)) ArmMenuGuard(t.ul.get());
@@ -8183,7 +8277,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             case kPadScrollMsg: {
                 const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
-                const PointerTarget t = hitTest(mx, my);
+                const PointerTarget t = pointed(e, mx, my);
                 if (!t.ul) break;
                 ultralight::ScrollEvent evt{ ultralight::ScrollEvent::kType_ScrollByPixel, 0,
                                              static_cast<int>(static_cast<std::intptr_t>(e.wparam)) };
@@ -8198,7 +8292,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 // ~40 px per notch (WHEEL_DELTA = 120), at the point: the element under the pointer scrolls even on
                 // a page that has had no move. Outside every view the UI-mode page scrolls where its pointer was.
                 const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);
-                const PointerTarget t = hitTest(mx, my);
+                const PointerTarget t = pointed(e, mx, my);
                 if (!t.ul) break;
                 const int delta = GET_WHEEL_DELTA_WPARAM(e.wparam) * t.step / WHEEL_DELTA;   // default 40px per notch
                 ultralight::ScrollEvent evt{ ultralight::ScrollEvent::kType_ScrollByPixel, 0, delta };
@@ -9524,6 +9618,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!addRef) pv.ul = v.ul;
         pv.layer = v.layer; pv.isInspector = v.isInspector; pv.gpuPath = s_gpuActive;
         pv.clickThrough = v.clickThrough;   // B3: the laser skips click-through views like hitTest does
+        pv.asksPage = HitTest::Asks({ v.hitTest == HitTest::kContent, v.domReady });
+        pv.deviceScale = v.deviceScale > 0.f ? v.deviceScale : 1.f;
         pv.repainted = v.repaintedThisFrame;
         // Cutout: view pixels -> this quad's uv range (the GPU
         // target may be padded, so map through its uv rect).
@@ -12916,6 +13012,21 @@ float4 ps_straight(VSOut i) : SV_Target {
     ViewId GetSharedKeyView()
     {
         return static_cast<ViewId>(s_keyView.load());
+    }
+
+    bool SetViewHitTest(ViewId view, std::uint32_t mode)
+    {
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending || v->isInspector) return false;
+            if (v->hitTest == mode) return true;
+            v->hitTest = mode;
+            v->hitEmpty = false;   // no answer yet in this mode: the cursor stays on the view until the mouse asks
+        }
+        SKSE::log::info("Magelight: view {} hit test: {}", view,
+                        mode == HitTest::kContent ? "content (the pointer passes where the page has no element)" : "rect");
+        return true;
     }
 
     bool ViewOpensAtMainMenu(ViewId view)

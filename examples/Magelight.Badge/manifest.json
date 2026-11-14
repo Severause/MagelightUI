@@ -31,6 +31,7 @@
       "hotkey": "F7",
       "hotkeyPause": false,
       "shareFocus": true,
+      "acceptFocus": true,
       "vrHotkey": {
         "button": "a",
         "modifier": "grip",
@@ -54,6 +55,16 @@
       "startVisible": false,
       "hotkey": "F11",
       "acceptFocus": true
+    },
+    "drawer": {
+      "path": "views/drawer/index.html",
+      "layer": "popup",
+      "fullscreen": true,
+      "startVisible": false,
+      "hotkey": "F10",
+      "hotkeyPause": false,
+      "shareFocus": true,
+      "hitTest": "content"
     }
   }
 }

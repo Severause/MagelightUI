@@ -198,11 +198,14 @@ UI mode is on:
 | grip | on a panel: grab it (1.6.1), held on the ray at the grab distance until the grip lets go, then pinned there for this opening; anywhere else, while no panel is held: every non-HUD panel re-placed in front of you | grabbing needs the polled controller level |
 | stick, while that hand holds a panel (1.6.1) | X turns it about the vertical (60°/s, at most 60° either way from facing the head); Y pushes it away (up) or pulls it in (down), 0.8 m/s, 0.35-6 m | the stick does not scroll the page meanwhile; polled level only |
 
-`hitTest` in `DrainInputQueue` works in swapchain pixels; the VR path
-converts the overlay uv to the VIEW's swapchain rect (`EffectivePos` + `w/h`)
-so the existing hit-test resolves the same view. Multiple visible overlays
-therefore behave like the flat stack: the ray hits one quad, and that quad's
-pixel maps onto exactly that view.
+`DrainInputQueue` works in swapchain pixels; the VR path converts the overlay
+uv to the VIEW's swapchain rect (`EffectivePos` + `w/h`) and names the view in
+each message (`QueueSyntheticInput`'s `view`, 1.9.1), so the message reaches
+the page of the panel the ray hit even where two views share a flat rectangle
+(two fullscreen views at panel size). A view in content mode (`SetViewHitTest`,
+1.9.1) takes the ray only where its page has an element: the laser asks the
+page (`PageHasElementAt`, when the hit moves, on a trigger edge, or every
+200 ms) and, past an empty part, goes on to the next quad.
 
 **Keeping the game from acting on the same trigger** is the same
 suppression UI mode already applies (`ToggleControls` off for
@@ -397,8 +400,8 @@ unimplemented call on OC returns false = a silent miss); controller index
 re-resolved per frame via `GetTrackedDeviceIndexForControllerRole` and
 BOUNDS-CHECKED against `k_unTrackedDeviceIndexInvalid`/max (an off controller
 returns 0xFFFFFFFF → OOB pose read → CTD, the most likely first-cut crash);
-`heightM = widthM * texH/texW`; topmost-first hit (reverse frame order, matches
-the host hitTest); pixel injected through a new `Magelight::QueueSyntheticInput`
+`heightM = widthM * texH/texW`; topmost-first hit (reverse frame order, the
+host's order); pixel injected through a new `Magelight::QueueSyntheticInput`
 bridge (the file-static `QueueInput` is invisible to the VR translation units); trigger drives
 clicks off the LEVEL not the edge counter; the sink swallows the VR trigger +
 thumbstick while a page is focused so they can't also fire the weapon / turn
