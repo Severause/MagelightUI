@@ -72,6 +72,12 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 - **Two mods' pages on screen can share the keyboard.** When both mods opt in, a click on the other mod's page moves
   the typing there (a chat box beside a scene menu, say), and a click back returns it, without closing either page.
+- **ENB setups that drew pages in the game's frame get the page thread back.** Since 1.8.0, a setup that draws with
+  the game's own device behind ENB (`"composite": "engine"`, or NVIDIA Smooth Motion with Streamline wrapping the
+  game) ran pages in the game's frame, because the page thread's drawing crashed there. The page thread now hands its
+  drawing to the game as recorded frames and makes no graphics call itself (`"pageGpu": "async"`, the new default),
+  so those setups keep it (`forceCpu` still takes 1.8's path). If pages misbehave, `"pageGpu": "deferred"` in
+  `Magelight.json` goes back to 1.8's path; send the log.
 
 ### For mod authors
 
@@ -86,12 +92,16 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 - **Ultralight 2.0.0-beta.3** is the SDK build of record. The GPU driver appends command lists (beta.3
   may hand over more than one before a draw), takes immutable storage from the flag alone and uploads whole blocks
   of a block-compressed texture.
-- **`"pageGpu": "async"`** (`Magelight.json`, with the page thread): the page thread records its graphics work as
-  frames through Ultralight's async driver and makes no device or context call; the game thread replays them at
-  Present and starts no further operation once `asyncBudgetMs` (1.5) or `asyncBudgetMB` (8) are spent in a frame. No
-  deferred context is involved, so a replaced `d3d11.dll` does not turn the page thread off (a single-threaded device
-  still does). `MagelightGPU.dll` contract 4. Checked offline (`tools/deferred-test --mode async`, byte for byte
-  against the in-frame path) and in one short in-game session on flat; not on ENB, not on VR.
+- **`"pageGpu": "async"` is the default** (`Magelight.json`, with the page thread): the page thread records its
+  graphics work as frames through Ultralight's async driver and makes no device or context call; the game thread
+  replays them at Present and starts no further operation once `asyncBudgetMs` (1.5) or `asyncBudgetMB` (8) are spent
+  in a frame. No deferred context is involved, so a replaced `d3d11.dll` does not turn the page thread off (a
+  single-threaded device still does), nor does the engine's own device behind one, which the deferred path refuses.
+  `"deferred"` keeps 1.7.0's deferred context. `MagelightGPU.dll` contract 4. Checked offline (`tools/deferred-test
+  --mode async`, byte for byte against the in-frame path) and in game on flat: several sessions behind Community
+  Shaders, and on ENB with ENB Anti-Aliasing with each device: the swapchain's, and the engine's own (`composite`
+  `engine`, the setup whose page thread faulted on its first draw in 1.7.1), with pages, a live 3D view and a page
+  of large pictures open. VR is unaffected (pages there run in the game's frame).
 - Offline gates run on beta.3: deferred-test, fiber-gc-test (GATE PASS), pagethread-test, bridge-test, editor-test,
   font-test, input-test, visibility-test, ime-test, ime-box-test, gamepad-page-test, tooltip-test, hosttheme-test,
   gamepad-test, lowmemory-test, memreport-test, pathtext-test, polledkeys-test, and the stage lint.
