@@ -52,12 +52,15 @@ namespace Magelight::HitTest {
     inline bool CursorSkips(const Candidate& c, bool lastEmpty) { return Asks(c) && lastEmpty; }
 
     // Installed with the page core, once per window: '1' when the page has an element at (x, y) in viewport CSS px,
-    // '0' when only <html>, <body> or nothing is there. An <iframe> is an element whatever its document shows. It
-    // keeps the document's own elementFromPoint, so a page that replaces it runs nothing inside the host's question,
-    // and answers '1' when the lookup throws.
+    // '0' when only <html>, <body> or nothing is there. An <iframe> is an element whatever its document shows. A
+    // document still loading answers '1': the host's DOM-ready flag does not see a reload the page starts itself, and
+    // a page with no <body> yet would otherwise let every click through. It keeps the document's own
+    // elementFromPoint, so a page that replaces it runs nothing inside the host's question, and answers '1' when
+    // the lookup throws.
     inline constexpr const char* kPageScript =
         "(function(){var F=Document.prototype.elementFromPoint;"
         "try{Object.defineProperty(window,'__mlHit',{value:function(x,y){var d=document,e;"
+        "if(d.readyState==='loading')return '1';"
         "try{e=F.call(d,x,y);}catch(z){return '1';}"
         "return(!e||e===d.documentElement||e===d.body)?'0':'1';}});}catch(x){}})();";
 

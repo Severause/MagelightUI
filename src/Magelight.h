@@ -34,7 +34,8 @@ namespace Magelight {
     // VR laser (src/MagelightVR/Laser.cpp, present thread) injects synthetic pointer
     // input through the same thread-safe queue DrainInputQueue drains. Typed
     // with stdint, not the Win32 aliases, because this header is parsed before
-    // <windows.h> in the VR translation units. msg is a WM_* pointer message; w/l are
+    // <windows.h> in the VR translation units. msg is a WM_* pointer message (WM_MOUSELEAVE:
+    // the hand points at no view, so the view it hovered gets its leave); w/l are
     // the WPARAM/LPARAM payload; hand (0 left, 1 right) is the pointer source, which
     // keeps its own press and hover; view is the ViewId of the panel the ray hit, which
     // the message goes to while that view shows (0 = the view at the point: a release

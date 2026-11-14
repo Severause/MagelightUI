@@ -200,12 +200,15 @@ UI mode is on:
 
 `DrainInputQueue` works in swapchain pixels; the VR path converts the overlay
 uv to the VIEW's swapchain rect (`EffectivePos` + `w/h`) and names the view in
-each message (`QueueSyntheticInput`'s `view`, 1.9.1), so the message reaches
+each message but the release, which goes to the view the press began on
+(`QueueSyntheticInput`'s `view`, 1.9.1), so the message reaches
 the page of the panel the ray hit even where two views share a flat rectangle
 (two fullscreen views at panel size). A view in content mode (`SetViewHitTest`,
 1.9.1) takes the ray only where its page has an element: the laser asks the
 page (`PageHasElementAt`, when the hit moves, on a trigger edge, or every
-200 ms) and, past an empty part, goes on to the next quad.
+200 ms) and, past an empty part, goes on to the next quad, except while that
+hand holds a press begun on the view. A hand that stops pointing at any view
+queues `WM_MOUSELEAVE`, and the view it hovered gets its leave.
 
 **Keeping the game from acting on the same trigger** is the same
 suppression UI mode already applies (`ToggleControls` off for

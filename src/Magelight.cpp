@@ -1003,7 +1003,8 @@ namespace Magelight {
         bool escapeCapture = false;   // 0.28.0: the page owns Escape (delivered as a key, no UI-mode exit)
         std::uint32_t focusShare = 0; // 1.9.0: FocusShare::kGive / kTake (SetViewFocusSharing, invariant 30)
         std::uint32_t hitTest = HitTest::kRect;   // 1.9.1: HitTest::kRect / kContent (SetViewHitTest, invariant 31)
-        bool hitEmpty = false;        // content mode: the page's last answer to the mouse was "nothing here" (the cursor's pick reads it)
+        // Content mode: the page's last answer to the mouse was "nothing here" (the cursor's pick reads it).
+        bool hitEmpty = false;
         bool freezeWorld = false;     // 0.31.0: freeze the world behind this view while it holds UI mode paused
         NetLevel netLevel = NetLevel::File;   // the owning mod's NetworkPolicy; File when no mod owns the view
         int  scrollStep = 40;         // 0.28.0: px per wheel notch
@@ -2111,6 +2112,7 @@ namespace Magelight {
                     id = v->id;
                     cb = v->onDomReady;
                     v->domReady = true;   // outbound calls held during the load flow now
+                    v->hitEmpty = false;   // a new document has answered nothing yet (invariant 31)
                     v->docDomReady = true;
                     v->hostLoad.pending = false;
                     v->prepainted = false;
@@ -6535,8 +6537,8 @@ float4 ps_straight(VSOut i) : SV_Target {
     };
 
     // The page at (x, y): the topmost visible interactive view that takes the pointer there, else the UI-mode view
-    // (DrainInputQueue's hit order, so it is the page the mouse events go to while no button is held). Hiding needs the pointer INSIDE that
-    // page: outside every view the host cursor always draws, so a stale "none" never leaves the player without a
+    // (DrainInputQueue's hit order, so it is the page the mouse events go to while no button is held). Hiding needs
+    // the pointer INSIDE that page: outside every view the host cursor always draws, so a stale "none" never leaves the player without a
     // pointer. Precedence: cursorForce > the view's own set > its mod's default > the host cursor; modCursors false
     // drops the images and the tint.
     static CursorPick PickCursorAtLocked(int x, int y, float bw, float bh)
@@ -6553,7 +6555,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             EffectivePos(v, bw, bh, ex, ey);
             if (!(x >= ex && y >= ey && x < ex + v.w && y < ey + v.h)) continue;
             // This thread cannot ask a page: a content-mode view is passed where its last answer to the mouse was
-            // "nothing here" (invariant 31), a frame behind DrainInputQueue at most.
+            // "nothing here" (invariant 31). The answer is as old as the last mouse message.
             if (HitTest::CursorSkips({ v.hitTest == HitTest::kContent, v.domReady }, v.hitEmpty)) {
                 if (v.id == holder) through = &v;
                 continue;
@@ -7909,11 +7911,11 @@ float4 ps_straight(VSOut i) : SV_Target {
         // call back into the host (invariant 16) and a mod it reaches can create or reorder views. On VR every view
         // is a rectangle here: the laser asked the page of the panel it hit and named that view in its message.
         // `mouse`: the flat pointer, whose answers the cursor's pick reads (MlView::hitEmpty).
-        struct HitCandidate { PointerTarget target; HitTest::Candidate facts; };
-        std::vector<HitCandidate> hitViews;
-        std::vector<HitTest::Candidate> hitFacts;
+        std::vector<PointerTarget> hitViews;         // the views containing the point, topmost first
+        std::vector<HitTest::Candidate> hitFacts;    // and what Resolve reads of each
         auto hitTest = [&](int mx, int my, bool mouse) {
             hitViews.clear();
+            hitFacts.clear();
             PointerTarget fallback;
             bool asks = false;
             {
@@ -7925,21 +7927,19 @@ float4 ps_straight(VSOut i) : SV_Target {
                     float ex = 0, ey = 0;
                     EffectivePos(v, bw, bh, ex, ey);
                     if (!(mx >= ex && my >= ey && mx < ex + v.w && my < ey + v.h)) continue;
-                    HitCandidate c{ targetOf(v), { v.hitTest == HitTest::kContent, flat && v.domReady } };
-                    c.target.inside = true;
-                    hitViews.push_back(std::move(c));
-                    if (!HitTest::Asks(hitViews.back().facts)) break;   // it takes the pointer: nothing below is reached
+                    hitViews.push_back(targetOf(v));
+                    hitViews.back().inside = true;
+                    hitFacts.push_back({ v.hitTest == HitTest::kContent, flat && v.domReady });
+                    if (!HitTest::Asks(hitFacts.back())) break;   // it takes the pointer: nothing below is reached
                     asks = true;
                 }
                 const MlView* u = FindViewLocked(static_cast<ViewId>(s_uiModeView.load()));
                 if (u && u->ul) fallback = targetOf(*u);
             }
-            if (!asks) return hitViews.empty() ? fallback : hitViews.back().target;
-            hitFacts.clear();
-            for (const HitCandidate& c : hitViews) hitFacts.push_back(c.facts);
+            if (!asks) return hitViews.empty() ? fallback : hitViews.back();
             const int count = static_cast<int>(hitViews.size());
             const int hit = HitTest::Resolve(hitFacts.data(), count, [&](int i) {
-                const PointerTarget& t = hitViews[static_cast<std::size_t>(i)].target;
+                const PointerTarget& t = hitViews[static_cast<std::size_t>(i)];
                 return PageHasElementAt(*t.ul, t.X(mx), t.Y(my));
             });
             // The answers, for the cursor; and a view destroyed while its page was asked takes nothing.
@@ -7947,13 +7947,13 @@ float4 ps_straight(VSOut i) : SV_Target {
             {
                 std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
                 for (int i = 0; i < count && (hit < 0 || i <= hit); ++i) {
-                    MlView* v = FindViewLocked(hitViews[static_cast<std::size_t>(i)].target.id);
+                    MlView* v = FindViewLocked(hitViews[static_cast<std::size_t>(i)].id);
                     const bool live = v && v->ul && !v->destroyPending;
                     if (i == hit && !live) gone = true;
                     if (live && mouse && HitTest::Asks(hitFacts[static_cast<std::size_t>(i)])) v->hitEmpty = (i != hit);
                 }
             }
-            return (hit < 0 || gone) ? fallback : hitViews[static_cast<std::size_t>(hit)].target;
+            return (hit < 0 || gone) ? fallback : hitViews[static_cast<std::size_t>(hit)];
         };
         // The view a VR hand's message names (the panel its ray hit), while it still shows a page.
         auto named = [&](ViewId id) {
@@ -8225,6 +8225,9 @@ float4 ps_straight(VSOut i) : SV_Target {
             case kKeyReleaseMsg:
                 releaseKeys();
                 releaseButtons();
+                break;
+            case WM_MOUSELEAVE:   // a VR hand points at no view any more (TickLaser); it carries no point
+                noteHover(e.source, 0);
                 break;
             case WM_MOUSEMOVE: {
                 const int mx = GET_X_LPARAM(e.lparam), my = GET_Y_LPARAM(e.lparam);

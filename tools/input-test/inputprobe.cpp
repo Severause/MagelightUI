@@ -1768,6 +1768,12 @@ static void HitTestTest()
             "file:///hit2.html", HT::kPageScript);
     Expect("hittest: <body>, even painted", Hit(300, 300), "0");
     Expect("hittest: a div in it", Hit(20, 20), "1");
+    // A document still loading (here one the page opened and has not closed) takes the pointer everywhere.
+    Js("document.open();document.write('<body style=\"margin:0\"><div style=\"width:50px;height:50px\"></div>');");
+    Expect("hittest: a document still loading takes the pointer", Js("document.readyState") + " " + Hit(300, 300), "loading 1");
+    Js("document.close();"); Pump();
+    Expect("hittest: once it has loaded, its <body> does not", Hit(300, 300), "0");
+    Expect("hittest: once it has loaded, its div does", Hit(20, 20), "1");
     // A page the page core never reached answers as an element.
     NewView("<!DOCTYPE html><html><body></body></html>", "file:///hit3.html", nullptr);
     Expect("hittest: a page without the function takes the pointer", Hit(300, 300), "1");

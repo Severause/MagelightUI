@@ -568,20 +568,25 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     point under `s_viewsMutex`, topmost first, down to the first that is not asked (a rectangle view, or a page that
     has not reached DOM ready), then asks each content-mode page outside the lock (`PageHasElementAt`: a script, so
     invariant 16 applies, and a mod the page reaches can create, destroy or reorder views meanwhile: no `s_views`
-    iterator is kept across it, and the view that answered is looked up again before it is used). Every other
-    reader follows that answer and never asks a page itself:
+    iterator is kept across it, and the view that answered is looked up again before it is used). A document the
+    page reloads itself is not seen by the DOM-ready flag: `__mlHit` answers for it as a rectangle while it loads.
+    Every other reader follows that answer and never asks a page itself:
     - the cursor's pick runs on the game thread, which cannot ask: it passes a content view whose last answer to
-      the mouse was empty (`MlView::hitEmpty`, written by `hitTest` for the mouse source only), a frame behind at
-      most; the UI-mode view keeps its own cursor over its own empty part, since it still gets those moves;
+      the mouse was empty (`MlView::hitEmpty`, written by `hitTest` for the mouse source only and cleared at DOM
+      ready), so it is as old as the last mouse message; the UI-mode view keeps its own cursor over its own empty
+      part, since it still gets those moves;
     - press capture, hover and its leave, the keyboard's move (invariant 30), tooltips and the menu guard read
       the resolved target, so they need nothing;
     - on VR the laser decides, not `hitTest`: it asks the page of the panel its ray hits (`PresentedView::asksPage`,
       on Ultralight's thread with no lock held, at most once per moved hit, trigger edge or 200 ms) and goes on to
-      the next quad, and its messages name the view (`InputMsg::view`), which `DrainInputQueue` routes to while
-      that view shows. `hitTest` treats every view as a rectangle while VR is live: a flat point cannot say which
+      the next quad (never past the view this hand holds a press on: the host keeps that press's moves there),
+      and its messages name the view (`InputMsg::view`), which `DrainInputQueue` routes to while that view shows;
+      a hand that points at no view any more queues `WM_MOUSELEAVE`, the leave a flat pointer's move to another
+      view gives. `hitTest` treats every view as a rectangle while VR is live: a flat point cannot say which
       of two panels sharing a rectangle the ray is on.
 
     Where no view takes the pointer it goes to the UI-mode view with `inside` false, as outside every view (no
     keyboard move, no text-focus click). A new reader of "the view under the pointer" uses `hitTest`'s result or
     `hitEmpty`, never its own rectangle walk; a new way to ask a page goes through `PageHasElementAt`, outside the
-    lock and only for a page that reached DOM ready. `tools/hittest-test` checks the rules, and `tools/input-test`'s `hittest` section the page function in Ultralight's WebKit.
+    lock and only for a page that reached DOM ready. `tools/hittest-test` checks the rules, and
+    `tools/input-test`'s `hittest` section the page function in Ultralight's WebKit.

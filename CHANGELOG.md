@@ -76,7 +76,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   mod's page below, on flat and in VR. Each mod turns this on for its own page; nothing changes for the others.
 - **VR: clicks follow the laser between two fullscreen pages.** Two pages that cover the same screen rectangle
   (two fullscreen ones) are two panels in VR; with one moved aside, the laser's clicks on the lower one could reach
-  the upper one's page. They now go to the panel the laser is on.
+  the upper one's page. They now go to the panel the laser is on. A button also stops looking hovered once the
+  laser leaves every panel.
 
 ### For mod authors
 
@@ -88,7 +89,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   (`SetViewFocusSharing`) go to the view that takes the pointer; a press still keeps its moves and release. A page
   that has not reached DOM ready takes the pointer as a rectangle. Off by default (`kHitTestRect`). See "Letting
   the pointer through a view's empty parts" in `docs/CPP.md`.
-- The `Magelight.Badge` example has a fullscreen `drawer` view (F10) over its panel and note that shows it.
+- The `Magelight.Badge` example has a fullscreen `drawer` view (Home) over its note that shows it; its `minHost`
+  is now 1.9.1.
 - Offline gate: `tools/hittest-test` (`src/HitTestCore.h`: which view takes the pointer, which pages are asked, the
   cursor's rule) and `tools/input-test`'s `hittest` section (the page function in Ultralight's WebKit: what
   `pointer-events`, `<html>`, `<body>` and an iframe answer). Not yet checked in game, flat or VR.

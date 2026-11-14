@@ -907,15 +907,17 @@ element whatever its document shows.
 **What follows the pointer.** Moves, presses, the wheel, hover (`:hover`, `mouseleave`), tooltips, the cursor image
 and a click's keyboard move (`SetViewFocusSharing`) all go to the view that takes the pointer. A press begun on
 your view still keeps its moves and its release while the button is held, so a drag across your page's empty part
-does not end there. The cursor image is picked a frame behind the pointer at most. Where no view takes the pointer
-it goes to the view that holds UI mode, as it does outside every view: that page sees a move or a click on its
-`<body>`.
+does not end there. The cursor image follows the page's answer to the last mouse message, so a page that changes
+under a still pointer keeps the old cursor until the pointer moves. Where no view takes the pointer it goes to the
+view that holds UI mode, as it does outside every view: over its own empty part that page sees a move or a click
+on its `<body>`.
 
-**A page that cannot answer** (still loading, or a load that failed) takes the pointer as a rectangle, so a view
+**A page that cannot answer** (still loading) takes the pointer as a rectangle, so a view
 never lets clicks through before it has drawn anything.
 
 **VR.** Each view is its own panel. The laser asks the page of the panel it hits and, where that page has no
-element, goes on to the panel behind it; the beam, the pointer mark and a grip's grab follow the panel that takes it.
+element, goes on to the panel behind it; the beam, the pointer mark and a grip's grab follow the panel that takes
+it, and over an empty part with no panel behind there is no beam.
 
 **UI mode is separate.** Content mode decides where the pointer goes, not who has the keyboard. Two fullscreen
 views that should both be typed into also need `SetViewFocusSharing` (above): the one that holds UI mode gives, the

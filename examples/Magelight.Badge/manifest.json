@@ -2,7 +2,7 @@
   "modId": "Magelight.Badge",
   "name": "Magelight badge (manifest example)",
   "version": "0.1.0",
-  "minHost": "0.18.0",
+  "minHost": "1.9.1",
   "session": "isolated",
   "views": {
     "badge": {
@@ -31,7 +31,6 @@
       "hotkey": "F7",
       "hotkeyPause": false,
       "shareFocus": true,
-      "acceptFocus": true,
       "vrHotkey": {
         "button": "a",
         "modifier": "grip",
@@ -61,7 +60,7 @@
       "layer": "popup",
       "fullscreen": true,
       "startVisible": false,
-      "hotkey": "F10",
+      "hotkey": "Home",
       "hotkeyPause": false,
       "shareFocus": true,
       "hitTest": "content"
