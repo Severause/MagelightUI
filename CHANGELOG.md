@@ -66,6 +66,17 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
+## 1.9.1 - Unreleased
+
+### What players notice
+
+- **The game's own menus work while a mod keeps a page on screen.** Where Magelight draws pages anywhere but at
+  plain Present (Streamline, an upscaler, a replaced `d3d11.dll` or `dxgi.dll`, NVIDIA Smooth Motion, or
+  `"composite": "ui"` / `"engine"`), an invisible menu stays open while a page is shown, and it took the mouse and
+  the keys from every game menu under it, and for a second after the last page hid: with another mod's page up, the
+  Tween, Stats and Level Up menus could not be clicked, moved through or closed. It now passes them on. Pages are
+  unchanged: they take the mouse and keys only in UI mode, as before. Flat only; VR never opens that menu.
+
 ## 1.9.0 - Unreleased
 
 ### What players notice
