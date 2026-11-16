@@ -174,7 +174,7 @@ Before 0.30.0 every page could reach loopback without asking.
   `shareFocus` / `acceptFocus`, host 1.9.0): a click on a view that accepts it gives that view the keys while
   UI mode stays the holder's. HUD/click-through views never take UI mode.
 - A view takes the pointer anywhere in its rectangle unless its manifest sets `"hitTest": "content"` (host
-  1.9.1): the pointer then takes it only where its page has an element, and passes to the view below elsewhere.
+  1.9.2): the pointer then takes it only where its page has an element, and passes to the view below elsewhere.
 - Hotkeys never open over an engine menu, the console or game text entry; while a page has key
   focus only its own key fires (to close), and not even that while it has shared the keyboard.
 - Pages are file-only unless the mod opts into loopback (see [Network](#network)).

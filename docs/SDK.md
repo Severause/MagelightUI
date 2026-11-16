@@ -36,7 +36,7 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
   is hidden, after it loads (and, from 1.5.0, once more when the page settles), so its first show is not one
   long frame ([CPP.md](CPP.md), "A painted first open"); `'0'` turns it off. `capabilities.prepaint` says the
   host has it.
-- **`__hittest`** (host 1.9.1): `send('__hittest', 'content')` makes the pointer take this view only where the
+- **`__hittest`** (host 1.9.2): `send('__hittest', 'content')` makes the pointer take this view only where the
   page has an element, so the empty parts of a fullscreen page let clicks, hover and the wheel through to the view
   below; `'rect'` puts the whole rectangle back. `<html>` and `<body>` never count and `pointer-events: none`
   hides an element from the test, so a wrapper that fills the window (a framework's `#root`) takes

@@ -159,8 +159,9 @@ namespace {
         &Magelight::Api4::SetViewPolledKeys,
         // 1.9.0 appendix
         &Magelight::Api4::SetViewFocusSharing,
-        // 1.9.1 appendix
+        // 1.9.2 appendix
         &Magelight::Api4::SetViewHitTest,
+        &Magelight::Api4::AddPageRoot,
     };
 
 }  // namespace

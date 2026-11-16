@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../Shared/shared.css">
+<script src="../Shared/shared.js"></script>
+<style>
+  body { margin: 0; font: 15px/1.3 sans-serif; color: #fff; background: rgba(20, 20, 24, 0.85); }
+  #r { padding: 8px 12px; border-left: 6px solid #888; height: 48px; box-sizing: border-box; }
+  .pass { border-color: #3c3 !important; } .fail { border-color: #e33 !important; }
+</style>
+</head>
+<body>
+<div id="r">hud: waiting</div>
+<script>
+  (function () {
+    var expect = 'shared';
+    var js = !!window.__mgShared;
+    var css = getComputedStyle(document.documentElement).getPropertyValue('--mg-shared').trim() === '1';
+    var meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+    var net = meta && meta.content.indexOf('localhost') >= 0 ? 'loopback' : 'file';
+    var shared = expect === 'shared';
+    var pass = js === shared && css === shared && net === 'loopback';
+    var r = document.getElementById('r');
+    r.className = pass ? 'pass' : 'fail';
+    r.textContent = (pass ? 'PASS ' : 'FAIL ') + 'hud: shared script ' + (js ? 'loaded' : 'refused') +
+      ', style ' + (css ? 'loaded' : 'refused') + ', network ' + net + ' (want ' +
+      (shared ? 'loaded' : 'refused') + ', loopback)';
+    var report = JSON.stringify({ page: 'hud', pass: pass, js: js, css: css, net: net });
+    if (window.magelight) window.magelight.send('result', report);
+  })();
+</script>
+</body>
+</html>

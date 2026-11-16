@@ -119,6 +119,19 @@ namespace MAGELIGHT_API {
             return id;
         }
 
+        /// Let this mod's pages read a folder above their own, for pages kept
+        /// outside Data\Magelight that share files (Data\<YourUI>\views\MyMod\
+        /// holding Hud\Hud.html and Scripts\Global.js). Absolute path inside the
+        /// game's Data folder; call before createView. False when the host is
+        /// older than 1.9.2 or refuses the folder (v4()->GetLastErrorMessage
+        /// says why).
+        bool addPageRoot(const char* absFolder)
+        {
+            if (!m_v4 || !m_mod || m_v4->hostVersionNumber < 10902 || m_v4->QueryCapability("pageRoot") != 1)
+                return false;
+            return m_v4->AddPageRoot(m_mod, absFolder) == Result::Ok;
+        }
+
         /// Called when UI mode LEAVES this view (Escape, its hotkey, a lost
         /// race, a load boundary) — the "the user closed it" signal. Also
         /// fires if the view never got UI mode (UIModeRefused).

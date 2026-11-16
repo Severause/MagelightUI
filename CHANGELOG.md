@@ -13,7 +13,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
-| 1.9.1 | 10901 | Content hit testing: a view takes the pointer only where its page has an element, so the empty parts of a fullscreen view let it through to the view below: `SetViewHitTest` with `kHitTestRect` / `kHitTestContent`, manifest `"hitTest"`, the page's `'__hittest'` message, `QueryCapability("hitTest")` |
+| 1.9.2 | 10902 | `AddPageRoot(mod, folder)`: a folder inside the game's Data folder that the mod's pages read from, for pages kept outside `Data\Magelight` that share files above their own folder (a page set laid out for another UI host); `QueryCapability("pageRoot")` |
+| 1.9.2 | 10902 | Content hit testing: a view takes the pointer only where its page has an element, so the empty parts of a fullscreen view let it through to the view below: `SetViewHitTest` with `kHitTestRect` / `kHitTestContent`, manifest `"hitTest"`, the page's `'__hittest'` message, `QueryCapability("hitTest")` |
 | 1.9.0 | 10900 | The keyboard shared on a click while one view holds UI mode: `SetViewFocusSharing` with `kFocusShareGive` / `kFocusShareTake`, the `KeyFocusGained` / `KeyFocusLost` events, manifest `"shareFocus"` / `"acceptFocus"`, `QueryCapability("focusShare")` |
 | 1.8.1 | — | Low memory: `UIModeRefused` `low memory` only when one reading is short of what that view's page needs (to show a built page, else to load it), no longer for as long as the guard is up; a view shown without UI mode loads when its load fits, guard up or not; hidden loads also wait while they would bring free commit under the guard's floor; the view that last held UI mode is not released; `lowMemoryFloorMB` is what a 1920x1080 page needs to load, default 320 |
 | 1.8.0 | 10800 | Other plugins' key reads a page lets through while it holds UI mode: `kUIModeFlagPassPolledKeys` on `RequestUIMode`, `SetViewPolledKeys` (named DLLs, named keys, or both), manifest `"polledKeys"`, `QueryCapability("polledKeys")` |
@@ -67,7 +68,9 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
 
-## 1.9.1 - Unreleased
+## 1.9.2 - Unreleased
+
+1.9.1 was never released: its changes ship here.
 
 ### What players notice
 
@@ -84,6 +87,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   the keys from every game menu under it, and for a second after the last page hid: with another mod's page up, the
   Tween, Stats and Level Up menus could not be clicked, moved through or closed. It now passes them on. Pages are
   unchanged: they take the mouse and keys only in UI mode, as before. Flat only; VR never opens that menu.
+- Nothing on its own. A mod whose pages live outside `Data\Magelight` (a mod that also supports another UI host
+  from the same files) can now show them with their scripts and styles, where before the page came up bare.
 
 ### For mod authors
 
@@ -96,10 +101,22 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   that has not reached DOM ready takes the pointer as a rectangle. Off by default (`kHitTestRect`). See "Letting
   the pointer through a view's empty parts" in `docs/CPP.md`.
 - The `Magelight.Badge` example has a fullscreen `drawer` view (Home) over its note that shows it; its `minHost`
-  is now 1.9.1.
+  is now 1.9.2.
 - Offline gate: `tools/hittest-test` (`src/HitTestCore.h`: which view takes the pointer, which pages are asked, the
   cursor's rule) and `tools/input-test`'s `hittest` section (the page function in Ultralight's WebKit: what
   `pointer-events`, `<html>`, `<body>` and an iframe answer). Not yet checked in game, flat or VR.
+- **`AddPageRoot(mod, folder)`**: your pages may read any file under `folder`. A page kept outside `Data\Magelight`
+  (passed as an absolute path) reads only its own folder and what lies under it, so a page in `views\Hud\` that
+  loads `../Scripts/Global.js` had that load refused (`file read outside Data\Magelight or any page root
+  refused`). Call it before `CreateViewEx`: a view whose page lies under the folder takes it as its own, so
+  relative cursor images resolve against it and devMode watches all of it. Your pages keep your mod's network
+  policy. The folder must exist and lie inside the game's Data folder, below it, outside `Data\Magelight` and
+  outside Magelight's own folder and the folders holding it. `MagelightMod::addPageRoot` gates it for you. See
+  "Pages that share files above their own folder" in `docs/CPP.md`.
+- Offline gate: `tools/pageroot-test` (`src/PageRootCore.h`: containment, the folder rules, which root a page
+  reads from). In game: `tools/pageroot-test/ingame` (MgPageRootTest, a plugin with pages laid out for another UI
+  host; CMake `-DMG_TEST_PLUGINS=ON`). Not yet checked in game.
+
 
 ## 1.9.0 - Unreleased
 

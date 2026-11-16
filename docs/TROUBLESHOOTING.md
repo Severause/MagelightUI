@@ -6,7 +6,7 @@ Everything below starts in **`Magelight.log`**, in `Documents\My Games\<game>\SK
 `OneDrive\Documents\My Games\...`. The host logs one line per view it creates, per manifest it
 reads, per page that fails to load, and per hotkey press. Read it before anything else, and copy
 it before you start the game again: each launch overwrites it. Line one names the running
-version (`Magelight v1.9.1 loading`); the lines after it name the game (SE, AE or VR, its version and
+version (`Magelight v1.9.2 loading`); the lines after it name the game (SE, AE or VR, its version and
 SKSE's), Windows (or the Wine under Proton), the CPU and RAM, and, once the game's data has loaded,
 every graphics adapter with its driver version, the one the game renders on marked. Paths in the
 log show your user folder as `%USERPROFILE%`. Each line starts with the date and time, a level
@@ -156,7 +156,7 @@ mod that must be on top uses the `popup` or `system` layer for stacking, not UI 
 ## Clicks do not reach the page under another page
 
 A view takes the pointer anywhere in its rectangle, so a fullscreen view, however transparent, takes every click
-meant for a view below it. The mod that owns the upper view can let them through (host 1.9.1): manifest
+meant for a view below it. The mod that owns the upper view can let them through (host 1.9.2): manifest
 `"hitTest": "content"`, `SetViewHitTest`, or `magelight.send('__hittest', 'content')` from the page. The log says
 `view N hit test: content` when it is on. If clicks still stop at the upper page, an element of it covers the spot:
 a wrapper that fills the window needs `pointer-events: none` (and the panels inside it `pointer-events: auto`). If

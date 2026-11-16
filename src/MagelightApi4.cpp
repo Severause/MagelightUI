@@ -32,6 +32,7 @@
 #include "CxxThrowCore.h"
 #include "FocusShareCore.h"
 #include "HitTestCore.h"
+#include "PageRootCore.h"
 
 #include <windows.h>
 #include "PathTextCore.h"   // after windows.h
@@ -83,6 +84,7 @@ namespace Magelight::Api4 {
             bool scriptOwned = false;
             Magelight::NetLevel net = Magelight::NetLevel::File;   // NetworkPolicy, pushed to every view of the mod
             Magelight::CursorSet cursor;   // 0.31.0: the manifest's default cursor, pushed to every view of the mod
+            std::vector<std::filesystem::path> pageRoots;   // 1.9.2 AddPageRoot, Normalize'd; served at `net`
             std::map<ViewId, ViewRec> views;
             // Generation token: queued game-thread deliveries check it, so an
             // event queued just before UnregisterMod never reaches a freed user.
@@ -254,6 +256,28 @@ namespace Magelight::Api4 {
                 level = m->net;
                 views.clear();
                 for (const auto& [id, rec] : m->views) views.push_back(id);
+            }
+        }
+
+        // Serves the mod's page roots at its network level. Reads again after serving: a SetNetworkPolicy or
+        // AddPageRoot that ran meanwhile may have served a root at the level read before it, so this serves again
+        // until both stood still.
+        void PushRootLevels(ModId mod)
+        {
+            for (;;) {
+                std::vector<std::filesystem::path> roots;
+                Magelight::NetLevel level;
+                {
+                    std::lock_guard<std::mutex> lk(s_mutex);
+                    const Mod* m = FindLocked(mod);
+                    if (!m) return;
+                    roots = m->pageRoots;
+                    level = m->net;
+                }
+                for (const auto& r : roots) Magelight::ServePageRoot(r, level);
+                std::lock_guard<std::mutex> lk(s_mutex);
+                const Mod* m = FindLocked(mod);
+                if (!m || (m->net == level && m->pageRoots.size() == roots.size())) return;
             }
         }
 
@@ -828,12 +852,14 @@ namespace Magelight::Api4 {
         if (!desc || desc->size < sizeof(ViewDesc) || !outView) return Result::InvalidArgument;
         std::string session;
         Magelight::NetLevel net = Magelight::NetLevel::File;
+        std::vector<std::filesystem::path> roots;
         {
             std::lock_guard<std::mutex> lk(s_mutex);
             const Mod* m = FindLocked(mod);
             if (!m) return Result::InvalidMod;
             session = m->sessionName;
             net = m->net;
+            roots = m->pageRoots;
         }
         if (Magelight::IsRenderDead()) return Fail(mod, Result::RenderDead, DeadMessage("CreateViewEx"));
         if (!desc->htmlPath || !*desc->htmlPath) return Fail(mod, Result::InvalidArgument, "CreateViewEx: htmlPath is empty");
@@ -852,8 +878,13 @@ namespace Magelight::Api4 {
             case Anchor::BottomRight: x = -(desc->x + desc->w); y = -(desc->y + desc->h); break;
             }
         }
+        // A page under one of the mod's AddPageRoot folders reads from that folder (the deepest that holds it).
+        const std::filesystem::path pageRoot = Magelight::PageRootRules::Deepest(
+            roots, Magelight::PageRootRules::Normalize(Magelight::PathText::FromUtf8(desc->htmlPath)));
+        const std::string pageRootText = pageRoot.empty() ? std::string() : Magelight::PathText::ToUtf8(pageRoot);
         const ViewId id = Magelight::CreateView(desc->htmlPath, x, y, w, h, desc->onDomReady,
-                                                desc->clickThrough, desc->startVisible, session.c_str(), net);
+                                                desc->clickThrough, desc->startVisible, session.c_str(), net,
+                                                pageRootText.c_str());
         if (!id) return Fail(mod, Result::Internal, "CreateViewEx: host refused the view");
         if (desc->uiScale > 0.0f) Magelight::SetViewScale(id, desc->uiScale);   // 0.26.9: real device scale
         Magelight::SetViewLayer(id, static_cast<int>(desc->layer));
@@ -881,7 +912,8 @@ namespace Magelight::Api4 {
         }
         if (Magelight::DevModeEnabled()) {
             const std::filesystem::path page = Magelight::PathText::FromUtf8(desc->htmlPath);
-            Dev::WatchView(id, (page.is_absolute() ? page : Magelight::RuntimeDirPath() / page).parent_path());
+            Dev::WatchView(id, !pageRoot.empty() ? pageRoot
+                                                 : (page.is_absolute() ? page : Magelight::RuntimeDirPath() / page).parent_path());
         }
         *outView = id;
         return Result::Ok;
@@ -1192,7 +1224,8 @@ namespace Magelight::Api4 {
         if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
         if (n == "polledkeys") return 1;    // SetViewPolledKeys / kUIModeFlagPassPolledKeys / manifest "polledKeys" (1.8.0)
         if (n == "focusshare") return 1;    // SetViewFocusSharing / KeyFocusGained / KeyFocusLost / manifest "shareFocus", "acceptFocus" (1.9.0)
-        if (n == "hittest") return 1;       // SetViewHitTest / manifest "hitTest" / the page's '__hittest' (1.9.1)
+        if (n == "hittest") return 1;       // SetViewHitTest / manifest "hitTest" / the page's '__hittest' (1.9.2)
+        if (n == "pageroot") return 1;      // AddPageRoot (1.9.2)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1331,7 +1364,7 @@ namespace Magelight::Api4 {
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
                                         "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu",
-                                        "polledKeys", "focusShare", "hitTest" };
+                                        "polledKeys", "focusShare", "hitTest", "pageRoot" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1546,6 +1579,7 @@ namespace Magelight::Api4 {
         }
         const std::size_t viewCount = views.size();
         PushNetLevel(mod, std::move(views), level);
+        PushRootLevels(mod);
         if (changed) {
             SKSE::log::info("Magelight[v4]: mod {} ('{}') network policy {} ({} view(s))", mod, name,
                 level == NetLevel::Any      ? "ANY — its pages may reach the internet" :
@@ -1863,7 +1897,7 @@ namespace Magelight::Api4 {
         return Result::Ok;
     }
 
-    // 1.9.1 (HitTestCore.h; the routing is DrainInputQueue's, CLAUDE.md invariant 31).
+    // 1.9.2 (HitTestCore.h; the routing is DrainInputQueue's, CLAUDE.md invariant 31).
     static_assert(HitTest::kRect == MAGELIGHT_API::kHitTestRect && HitTest::kContent == MAGELIGHT_API::kHitTestContent,
                   "HitTestCore's modes must be the API's");
     Result SetViewHitTest(ViewId view, std::uint32_t mode)
@@ -1874,6 +1908,36 @@ namespace Magelight::Api4 {
                                                                 "kHitTestContent");
         if (!Magelight::SetViewHitTest(view, mode))
             return Fail(OwnerOf(view), Result::InvalidView, "SetViewHitTest: view is gone or is an inspector");
+        return Result::Ok;
+    }
+
+    // 1.9.2 (PageRootCore.h). The disk is asked once, here; the file system then serves the folder by name, so
+    // whatever is put under it later is served too.
+    Result AddPageRoot(ModId mod, const char* folder)
+    {
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            if (!FindLocked(mod)) return Result::InvalidMod;
+        }
+        if (!folder || !*folder) return Fail(mod, Result::InvalidArgument, "AddPageRoot: folder is empty");
+        const std::filesystem::path root = Magelight::PageRootRules::Normalize(Magelight::PathText::FromUtf8(folder));
+        const std::filesystem::path data = (Magelight::GameRootPath() / L"Data").lexically_normal();
+        if (const char* why = Magelight::PageRootRules::Refusal(root, data, data / L"Magelight", Magelight::RuntimeDirPath()))
+            return Fail(mod, Result::InvalidArgument, std::string("AddPageRoot: ") + why + ": " + folder);
+        std::error_code ec;
+        if (!std::filesystem::is_directory(root, ec))
+            return Fail(mod, Result::InvalidArgument, std::string("AddPageRoot: no such folder: ") + folder);
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            Mod* m = FindLocked(mod);
+            if (!m) return Result::InvalidMod;
+            if (Magelight::PageRootRules::Contains(m->pageRoots, root)) return Result::Ok;
+            m->pageRoots.push_back(root);
+            name = m->modId;
+        }
+        PushRootLevels(mod);
+        SKSE::log::info("Magelight[v4]: mod {} ('{}') pages may read {}", mod, name, Magelight::SysInfo::ForLog(root));
         return Result::Ok;
     }
 

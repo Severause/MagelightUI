@@ -323,7 +323,7 @@ namespace Magelight::Manifest {
                     const std::uint32_t share = (MJBool(v, "shareFocus", false, vctx) ? MAGELIGHT_API::kFocusShareGive : 0u) |
                                                 (MJBool(v, "acceptFocus", false, vctx) ? MAGELIGHT_API::kFocusShareTake : 0u);
                     if (share) Api4::SetViewFocusSharing(id, share);
-                    // 1.9.1: "content" = the pointer takes the view only where its page has an element (SetViewHitTest).
+                    // 1.9.2: "content" = the pointer takes the view only where its page has an element (SetViewHitTest).
                     std::uint32_t hitMode = MAGELIGHT_API::kHitTestRect;
                     if (!Magelight::HitTest::ParseMode(MJStr(v, "hitTest", "rect", vctx), hitMode))
                         SKSE::log::warn("Magelight[manifest]: {}'hitTest' should be \"rect\" or \"content\" — ignored", vctx);

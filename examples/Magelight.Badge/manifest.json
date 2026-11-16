@@ -2,7 +2,7 @@
   "modId": "Magelight.Badge",
   "name": "Magelight badge (manifest example)",
   "version": "0.1.0",
-  "minHost": "1.9.1",
+  "minHost": "1.9.2",
   "session": "isolated",
   "views": {
     "badge": {
