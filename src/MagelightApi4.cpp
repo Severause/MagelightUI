@@ -31,6 +31,7 @@
 #include "MagelightGameTask.h"
 #include "CxxThrowCore.h"
 #include "FocusShareCore.h"
+#include "HitTestCore.h"
 
 #include <windows.h>
 #include "PathTextCore.h"   // after windows.h
@@ -1191,6 +1192,7 @@ namespace Magelight::Api4 {
         if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
         if (n == "polledkeys") return 1;    // SetViewPolledKeys / kUIModeFlagPassPolledKeys / manifest "polledKeys" (1.8.0)
         if (n == "focusshare") return 1;    // SetViewFocusSharing / KeyFocusGained / KeyFocusLost / manifest "shareFocus", "acceptFocus" (1.9.0)
+        if (n == "hittest") return 1;       // SetViewHitTest / manifest "hitTest" / the page's '__hittest' (1.9.1)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1329,7 +1331,7 @@ namespace Magelight::Api4 {
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
                                         "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu",
-                                        "polledKeys", "focusShare" };
+                                        "polledKeys", "focusShare", "hitTest" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1858,6 +1860,20 @@ namespace Magelight::Api4 {
                                                                 "kFocusShareGive and kFocusShareTake");
         if (!Magelight::SetViewFocusSharing(view, flags))
             return Fail(OwnerOf(view), Result::InvalidView, "SetViewFocusSharing: view is gone or is an inspector");
+        return Result::Ok;
+    }
+
+    // 1.9.1 (HitTestCore.h; the routing is DrainInputQueue's, CLAUDE.md invariant 31).
+    static_assert(HitTest::kRect == MAGELIGHT_API::kHitTestRect && HitTest::kContent == MAGELIGHT_API::kHitTestContent,
+                  "HitTestCore's modes must be the API's");
+    Result SetViewHitTest(ViewId view, std::uint32_t mode)
+    {
+        if (const Result g = GateView(view, "SetViewHitTest"); g != Result::Ok) return g;
+        if (!HitTest::KnownMode(mode))
+            return Fail(OwnerOf(view), Result::InvalidArgument, "SetViewHitTest: mode is neither kHitTestRect nor "
+                                                                "kHitTestContent");
+        if (!Magelight::SetViewHitTest(view, mode))
+            return Fail(OwnerOf(view), Result::InvalidView, "SetViewHitTest: view is gone or is an inspector");
         return Result::Ok;
     }
 

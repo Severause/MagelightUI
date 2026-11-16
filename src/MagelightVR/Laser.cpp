@@ -114,6 +114,8 @@ namespace Magelight::VR {
         bool s_stickOnPage[2] = { false, false };        // this hand's stick moved a held page: no scroll until centred
         bool s_gripSeeded[2] = { false, false };         // latch seeded from the live level on UI-mode entry
         int  s_lastPx[2] = { 0, 0 }, s_lastPy[2] = { 0, 0 };   // last hit pixel per hand (the UP lands here)
+        ViewId s_lastView[2] = { 0, 0 };                        // the view that pixel was on
+        ViewId s_pressView[2] = { 0, 0 };                       // the view this hand's held trigger was pressed on (0 = none)
 
         // Ends a held trigger: its release at the hand's last hit pixel (a web click needs the press and the release
         // on the same element; an up at (0,0) re-hit-tests to a corner far outside every control). Every path that
@@ -124,8 +126,37 @@ namespace Magelight::VR {
         {
             if (!s_lastTriggerDown[hand]) return;
             s_lastTriggerDown[hand] = false;
+            s_pressView[hand] = 0;
             const auto upPos = static_cast<std::intptr_t>(MAKELPARAM(static_cast<WORD>(s_lastPx[hand]), static_cast<WORD>(s_lastPy[hand])));
-            Magelight::QueueSyntheticInput(WM_LBUTTONUP, 0, upPos, hand);
+            Magelight::QueueSyntheticInput(WM_LBUTTONUP, 0, upPos, hand, 0);
+        }
+
+        // Content hit testing (HitTestCore.h): a hand's last question to a view's page and its answer. A steady
+        // hand asks again only every kAskAgainMs, since the page under it can change, not on every frame.
+        struct PageAnswer { ViewId view = 0; int x = 0, y = 0; bool has = true; ULONGLONG tick = 0; };
+        PageAnswer s_pageAnswers[2][4];
+        constexpr ULONGLONG kAskAgainMs = 200;
+
+        // Whether the page of `pv` has an element where the ray hit its panel (u, v). `fresh`: ask now whatever
+        // was answered before (a press is judged on what the page shows at the press). The point is the one the
+        // hand's message will reach the page at: the same rounding to a flat pixel, then DrainInputQueue's to CSS px,
+        // or a press at an element's edge could be judged on one pixel and land on the next.
+        bool PanelHasElement(int hand, const PresentedView& pv, float u, float v, bool fresh)
+        {
+            const int px = static_cast<int>(std::lround(pv.x + u * pv.w)), py = static_cast<int>(std::lround(pv.y + v * pv.h));
+            const int x = static_cast<int>(static_cast<float>(px - static_cast<int>(pv.x)) / pv.deviceScale);
+            const int y = static_cast<int>(static_cast<float>(py - static_cast<int>(pv.y)) / pv.deviceScale);
+            const ULONGLONG now = GetTickCount64();
+            PageAnswer* slot = nullptr;
+            PageAnswer* oldest = &s_pageAnswers[hand][0];
+            for (PageAnswer& a : s_pageAnswers[hand]) {
+                if (a.view == pv.id) { slot = &a; break; }
+                if (a.tick < oldest->tick) oldest = &a;
+            }
+            if (slot && !fresh && slot->x == x && slot->y == y && now - slot->tick < kAskAgainMs) return slot->has;
+            if (!slot) slot = oldest;
+            *slot = PageAnswer{ pv.id, x, y, Magelight::PageHasElementAt(*pv.ul, x, y), now };
+            return slot->has;
         }
 
         // Grab-and-move state (present thread; the request comes from the page).
@@ -428,6 +459,7 @@ namespace Magelight::VR {
     {
         for (int h = 0; h < 2; ++h) {
             HideBeam(h); s_hover[h] = HoverState{}; s_lastTriggerDown[h] = false; s_scrollAccum[h] = 0.0f;
+            s_lastView[h] = 0; s_pressView[h] = 0;
             s_gripWas[h] = false; s_gripSeeded[h] = false; s_gripDrag[h] = false; s_stickOnPage[h] = false;
             s_dragRequest.store(0); s_dragView = 0; s_dragHand = -1;
             s_hands[h].stickY_mil.store(0); s_hands[h].gripEdge.store(false);
@@ -516,8 +548,12 @@ namespace Magelight::VR {
                 else gripEdge = s_hands[hand].gripEdge.exchange(false);
             }
 
-            // M5: topmost-first (reverse z-order), first ray hit wins —
-            // matches the host hitTest so the pixel re-resolves to this view.
+            // M5: topmost-first (reverse z-order), first ray hit wins. A view in content mode takes the ray only
+            // where its page has an element (CLAUDE.md invariant 31): past its empty part the ray goes on to the
+            // next panel, except while this hand holds a press begun on that view: the host keeps the press's moves
+            // on its view, so a drag must not stall or jump panels over an empty part. The messages below name the
+            // view, so the host routes them to this panel's page whatever other view shares its flat rectangle.
+            const bool triggerEdge = (polled ? trig : s_hands[hand].triggerDown.load()) != s_lastTriggerDown[hand];
             bool hit = false; float bestU = 0, bestV = 0, bestDist = 0;
             const PresentedView* target = nullptr;
             for (auto rit = frame.rbegin(); rit != frame.rend(); ++rit) {
@@ -534,10 +570,11 @@ namespace Magelight::VR {
                 const float widthM  = ClampWidthM(r.placement.widthMeters);
                 const float heightM = widthM * static_cast<float>(r.texH) / static_cast<float>(r.texW);  // M4
                 float u, v, dist;
-                if (IntersectQuad(r.world, widthM, heightM, ctrl, u, v, dist)) {
-                    hit = true; bestU = u; bestV = v; bestDist = dist; target = &pv;
-                    break;
-                }
+                if (!IntersectQuad(r.world, widthM, heightM, ctrl, u, v, dist)) continue;
+                const bool heldHere = s_lastTriggerDown[hand] && pv.id == s_pressView[hand];
+                if (pv.asksPage && !heldHere && !PanelHasElement(hand, pv, u, v, triggerEdge)) continue;
+                hit = true; bestU = u; bestV = v; bestDist = dist; target = &pv;
+                break;
             }
             s_hover[hand].hit = hit;
             if (hit && target) { s_hover[hand].view = target->id; s_hover[hand].u = bestU; s_hover[hand].v = bestV; }
@@ -625,16 +662,25 @@ namespace Magelight::VR {
                 const int px = static_cast<int>(std::lround(target->x + bestU * target->w));
                 const int py = static_cast<int>(std::lround(target->y + bestV * target->h));
                 // Only when it actually moved: each queued move costs a
-                // hitTest under the views mutex plus a WebKit hover
+                // lookup under the views mutex plus a WebKit hover
                 // hit-test on the present thread, and a steady hand
                 // otherwise pays that 90-180 times a second for nothing.
-                const bool moved = (px != s_lastPx[hand] || py != s_lastPy[hand]);
+                const bool moved = (px != s_lastPx[hand] || py != s_lastPy[hand] || target->id != s_lastView[hand]);
+                s_lastView[hand] = target->id;
                 s_lastPx[hand] = px; s_lastPy[hand] = py;
                 const auto pos = static_cast<std::intptr_t>(MAKELPARAM(static_cast<WORD>(px), static_cast<WORD>(py)));
                 if (moved || (nowDown != s_lastTriggerDown[hand]))
-                    Magelight::QueueSyntheticInput(WM_MOUSEMOVE, nowDown ? MK_LBUTTON : 0, pos, hand);
-                if (nowDown && !s_lastTriggerDown[hand])
-                    Magelight::QueueSyntheticInput(WM_LBUTTONDOWN, MK_LBUTTON, pos, hand);
+                    Magelight::QueueSyntheticInput(WM_MOUSEMOVE, nowDown ? MK_LBUTTON : 0, pos, hand, target->id);
+                if (nowDown && !s_lastTriggerDown[hand]) {
+                    Magelight::QueueSyntheticInput(WM_LBUTTONDOWN, MK_LBUTTON, pos, hand, target->id);
+                    s_pressView[hand] = target->id;
+                }
+            }
+            // The ray left every panel, or went onto a content view's empty part with nothing behind: the view it
+            // pointed at gets its leave (its :hover and tooltip clear), as a flat pointer moving off it does.
+            else if (s_lastView[hand]) {
+                Magelight::QueueSyntheticInput(WM_MOUSELEAVE, 0, 0, hand, 0);
+                s_lastView[hand] = 0;
             }
             // Whether or not the ray still hits, so a drag that left the panel still releases.
             if (!nowDown) ReleaseTrigger(hand);
@@ -668,7 +714,7 @@ namespace Magelight::VR {
                     while (std::fabs(s_scrollAccum[hand]) >= 1.0f) {
                         const short delta = static_cast<short>(s_scrollAccum[hand] > 0 ? WHEEL_DELTA : -WHEEL_DELTA);   // stick up = wheel up
                         Magelight::QueueSyntheticInput(WM_MOUSEWHEEL,
-                            static_cast<std::uintptr_t>(MAKEWPARAM(0, static_cast<WORD>(delta))), pos, hand);
+                            static_cast<std::uintptr_t>(MAKEWPARAM(0, static_cast<WORD>(delta))), pos, hand, target->id);
                         s_scrollAccum[hand] += (delta > 0) ? -1.0f : 1.0f;
                     }
                 }

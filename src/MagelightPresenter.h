@@ -46,6 +46,10 @@ namespace Magelight {
         int layer = 1;                             // Layer enum value (z-order tier)
         bool gpuPath = true;                       // premultiplied BGRA either way; see the alpha switch
         bool clickThrough = false;                 // host hitTest skips these; the VR laser must too (B3)
+        // Content hit testing (HitTestCore.h): the pointer takes this view only where its page has an element, and
+        // the page can be asked (PageHasElementAt). The laser asks with the hit in CSS px: view px / deviceScale.
+        bool asksPage = false;
+        float deviceScale = 1.0f;
         bool isInspector = false;                  // never presented in VR
         // Sampled from View::needs_paint() BEFORE Renderer::Render() clears
         // it — i.e. "this view's pixels change this frame". The flat
@@ -56,6 +60,10 @@ namespace Magelight {
     };
 
     using PresentedFrame = std::vector<PresentedView>;
+
+    // Whether the page has an element at (x, y), viewport CSS px; true when it cannot answer (Magelight.cpp).
+    // Ultralight thread only, with no host lock held: it runs a script in the page.
+    bool PageHasElementAt(ultralight::View& ul, int x, int y);
 
     // A pointer mark to stamp INTO the copy target (VR laser hit): view uv.
     // Pages never draw a cursor (the OS does on flat; nothing does on VR), so

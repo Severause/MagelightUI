@@ -2,7 +2,7 @@
   "modId": "Magelight.Badge",
   "name": "Magelight badge (manifest example)",
   "version": "0.1.0",
-  "minHost": "0.18.0",
+  "minHost": "1.9.1",
   "session": "isolated",
   "views": {
     "badge": {
@@ -54,6 +54,16 @@
       "startVisible": false,
       "hotkey": "F11",
       "acceptFocus": true
+    },
+    "drawer": {
+      "path": "views/drawer/index.html",
+      "layer": "popup",
+      "fullscreen": true,
+      "startVisible": false,
+      "hotkey": "Home",
+      "hotkeyPause": false,
+      "shareFocus": true,
+      "hitTest": "content"
     }
   }
 }

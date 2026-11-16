@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.9.1 | 10901 | Content hit testing: a view takes the pointer only where its page has an element, so the empty parts of a fullscreen view let it through to the view below: `SetViewHitTest` with `kHitTestRect` / `kHitTestContent`, manifest `"hitTest"`, the page's `'__hittest'` message, `QueryCapability("hitTest")` |
 | 1.9.0 | 10900 | The keyboard shared on a click while one view holds UI mode: `SetViewFocusSharing` with `kFocusShareGive` / `kFocusShareTake`, the `KeyFocusGained` / `KeyFocusLost` events, manifest `"shareFocus"` / `"acceptFocus"`, `QueryCapability("focusShare")` |
 | 1.8.1 | — | Low memory: `UIModeRefused` `low memory` only when one reading is short of what that view's page needs (to show a built page, else to load it), no longer for as long as the guard is up; a view shown without UI mode loads when its load fits, guard up or not; hidden loads also wait while they would bring free commit under the guard's floor; the view that last held UI mode is not released; `lowMemoryFloorMB` is what a 1920x1080 page needs to load, default 320 |
 | 1.8.0 | 10800 | Other plugins' key reads a page lets through while it holds UI mode: `kUIModeFlagPassPolledKeys` on `RequestUIMode`, `SetViewPolledKeys` (named DLLs, named keys, or both), manifest `"polledKeys"`, `QueryCapability("polledKeys")` |
@@ -70,12 +71,35 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
+- **A mod's fullscreen page no longer has to block the pages under it.** A mod whose page covers the whole screen
+  for a drawer or a few movable panels can now let clicks, hover and the wheel through its empty parts to another
+  mod's page below, on flat and in VR. Each mod turns this on for its own page; nothing changes for the others.
+- **VR: clicks follow the laser between two fullscreen pages.** Two pages that cover the same screen rectangle
+  (two fullscreen ones) are two panels in VR; with one moved aside, the laser's clicks on the lower one could reach
+  the upper one's page. They now go to the panel the laser is on. A button also stops looking hovered once the
+  laser leaves every panel.
 - **The game's own menus work while a mod keeps a page on screen.** Where Magelight draws pages anywhere but at
   plain Present (Streamline, an upscaler, a replaced `d3d11.dll` or `dxgi.dll`, NVIDIA Smooth Motion, or
   `"composite": "ui"` / `"engine"`), an invisible menu stays open while a page is shown, and it took the mouse and
   the keys from every game menu under it, and for a second after the last page hid: with another mod's page up, the
   Tween, Stats and Level Up menus could not be clicked, moved through or closed. It now passes them on. Pages are
   unchanged: they take the mouse and keys only in UI mode, as before. Flat only; VR never opens that menu.
+
+### For mod authors
+
+- **`SetViewHitTest(view, kHitTestContent)`** (manifest `"hitTest": "content"`, or from the page
+  `magelight.send('__hittest', 'content')`): the pointer takes the view only where its page has an element. The host
+  asks the page `document.elementFromPoint` at the point; nothing, `<html>` and `<body>` are empty, and
+  `pointer-events: none` hides an element from it, so a fullscreen wrapper takes `pointer-events: none` and the
+  panels inside it `pointer-events: auto`. Moves, presses, the wheel, hover, the cursor and a click's keyboard move
+  (`SetViewFocusSharing`) go to the view that takes the pointer; a press still keeps its moves and release. A page
+  that has not reached DOM ready takes the pointer as a rectangle. Off by default (`kHitTestRect`). See "Letting
+  the pointer through a view's empty parts" in `docs/CPP.md`.
+- The `Magelight.Badge` example has a fullscreen `drawer` view (Home) over its note that shows it; its `minHost`
+  is now 1.9.1.
+- Offline gate: `tools/hittest-test` (`src/HitTestCore.h`: which view takes the pointer, which pages are asked, the
+  cursor's rule) and `tools/input-test`'s `hittest` section (the page function in Ultralight's WebKit: what
+  `pointer-events`, `<html>`, `<body>` and an iframe answer). Not yet checked in game, flat or VR.
 
 ## 1.9.0 - Unreleased
 

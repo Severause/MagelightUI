@@ -29,6 +29,7 @@ src/GamepadScript.h         the page core's gamepad helper, window.magelight.gam
 src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
 src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): what a page needs to open, the guard's floor and hysteresis, the page files' growth, the setting's clamp
 src/FocusShareCore.h        focus sharing's rules (1.9.0): which view a press moves the keyboard to, when it goes back
+src/HitTestCore.h           content hit testing's rules (1.9.1): which view under the pointer takes it, which pages are asked, the cursor's rule, the page function
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -45,7 +46,7 @@ tools/memreport-test/       src/MemoryReportCore.h against captured GetMemoryUsa
 tools/bridge-test/          src/JsBridgeCore.h and the page's __mlNative on a CPU view (build.bat builds and runs it)
 tools/visibility-test/      View::set_visible on CPU and GPU views: hidden pages, the prepaint, the frame order SyncViewVisibility relies on (build.bat)
 tools/pathtext-test/        src/PathTextCore.h's conversions, and a page loaded through Ultralight from a folder named in Chinese and Cyrillic with # and % (build.bat)
-tools/input-test/           src/InputCore.h's key events on the flat and VR paths, the polled-keys exemption, the releases, the leave, the pointer guard (the context-menu guard in every frame, with its menufault and armfault controls), the input queue's rule and the lost keys (build.bat; MinHook from the build dir)
+tools/input-test/           src/InputCore.h's key events on the flat and VR paths, the polled-keys exemption, the releases, the leave, the pointer guard (the context-menu guard in every frame, with its menufault and armfault controls), the input queue's rule, content hit testing's page function and the lost keys (build.bat; MinHook from the build dir)
 tools/ime-test/             src/ImeCore.h's candidate-list parsing and '__ime' payload rules (ime_test), the Editor calls the native composition relies on (imeprobe); build.bat builds and runs both
 tools/ime-box-test/         the page core's IME candidate box in Ultralight's own WebKit: a reading the Editor composed, zoom, an iframe editor, device scale, the opt-outs (build.bat; needs node)
 tools/editor-test/          src/EditStateCore.h's text-focus rules on real EditableState reports, typed text as the host fires it, views/keyboard's layouts (build.bat)
@@ -58,6 +59,7 @@ tools/bench-test/            what a page costs per frame through MagelightGPU.dl
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
 tools/lowmemory-test/       src/LowMemoryCore.h's needs, floor, hysteresis, growth room and setting clamp (build.bat)
 tools/focusshare-test/      src/FocusShareCore.h's press and settle rules (build.bat)
+tools/hittest-test/         src/HitTestCore.h's walk, cursor, mode and answer rules (build.bat)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
@@ -561,3 +563,30 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     focuses the field). Its `KeyFocusGained` / `KeyFocusLost` are emitted after the drain, outside every lock. A new
     reader of "the page the player types into" calls `KeyViewNow()`, never `s_uiModeView`. While the keyboard is
     shared no hotkey fires: the key may be going into another mod's field (invariant 15).
+31. **The pointer goes to the view that takes it, and a content-mode view takes it only where its page says so**
+    (1.9.1, `SetViewHitTest`, `src/HitTestCore.h`). `DrainInputQueue`'s `hitTest` reads the views containing the
+    point under `s_viewsMutex`, topmost first, down to the first that is not asked (a rectangle view, or a page that
+    has not reached DOM ready), then asks each content-mode page outside the lock (`PageHasElementAt`: a script, so
+    invariant 16 applies, and a mod the page reaches can create, destroy or reorder views meanwhile: no `s_views`
+    iterator is kept across it, and the view that answered is looked up again before it is used). A document the
+    page reloads itself is not seen by the DOM-ready flag: `__mlHit` answers for it as a rectangle while it loads.
+    Every other reader follows that answer and never asks a page itself:
+    - the cursor's pick runs on the game thread, which cannot ask: it passes a content view whose last answer to
+      the mouse was empty (`MlView::hitEmpty`, written by `hitTest` for the mouse source only and cleared at DOM
+      ready), so it is as old as the last mouse message; the UI-mode view keeps its own cursor over its own empty
+      part, since it still gets those moves;
+    - press capture, hover and its leave, the keyboard's move (invariant 30), tooltips and the menu guard read
+      the resolved target, so they need nothing;
+    - on VR the laser decides, not `hitTest`: it asks the page of the panel its ray hits (`PresentedView::asksPage`,
+      on Ultralight's thread with no lock held, at most once per moved hit, trigger edge or 200 ms) and goes on to
+      the next quad (never past the view this hand holds a press on: the host keeps that press's moves there),
+      and its messages name the view (`InputMsg::view`), which `DrainInputQueue` routes to while that view shows;
+      a hand that points at no view any more queues `WM_MOUSELEAVE`, the leave a flat pointer's move to another
+      view gives. `hitTest` treats every view as a rectangle while VR is live: a flat point cannot say which
+      of two panels sharing a rectangle the ray is on.
+
+    Where no view takes the pointer it goes to the UI-mode view with `inside` false, as outside every view (no
+    keyboard move, no text-focus click). A new reader of "the view under the pointer" uses `hitTest`'s result or
+    `hitEmpty`, never its own rectangle walk; a new way to ask a page goes through `PageHasElementAt`, outside the
+    lock and only for a page that reached DOM ready. `tools/hittest-test` checks the rules, and
+    `tools/input-test`'s `hittest` section the page function in Ultralight's WebKit.
