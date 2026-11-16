@@ -772,7 +772,10 @@ From 1.5.0 (Ultralight 2.0) a page's input matches a browser's more closely
   its own press and hover. When the pointer moves to another view
   with no button held, the view it left gets a move outside itself
   (`mouseout`, `mouseleave`, `:hover` cleared). The wheel always goes to the
-  view under the pointer and scrolls the element there. Leaving UI mode, or
+  view under the pointer and scrolls the element there. The view under the
+  pointer is the topmost one whose rectangle holds it, or, for a view in
+  content mode (1.9.1, below), the topmost one whose page has an element
+  there. Leaving UI mode, or
   the game losing focus, releases what the page saw go down: each held mouse
   button and each held modifier key.
 
@@ -874,6 +877,59 @@ if (api->hostVersionNumber >= 10900 && api->QueryCapability("focusShare") == 1)
 // The chat box's mod, on its own view:
 if (api->hostVersionNumber >= 10900 && api->QueryCapability("focusShare") == 1)
     api->SetViewFocusSharing(chatBox, MAGELIGHT_API::kFocusShareTake);
+```
+
+## Letting the pointer through a view's empty parts (1.9.1)
+
+A view takes the pointer anywhere in its rectangle, so a fullscreen view covers every view below it, however much
+of it is transparent. A page that fills the screen only to place a drawer at one edge, or panels the player can
+move anywhere, can ask for content hit testing instead: the pointer then takes the view only where its page has an
+element, and everywhere else goes to the next view down, yours or another mod's.
+
+- `SetViewHitTest(view, MAGELIGHT_API::kHitTestContent)` turns it on, `kHitTestRect` (the default) off.
+- The manifest's `"hitTest": "content"` does the same for a manifest view, and a page can ask for itself:
+  `magelight.send('__hittest', 'content')` (or `'rect'`).
+
+**What counts as an element.** The host asks the page `document.elementFromPoint` at the pointer. `<html>` and
+`<body>` never count, and an element with CSS `pointer-events: none` is not found. So a wrapper that covers the
+screen has to opt out, and what the player can click opts back in:
+
+```css
+.screen { position: fixed; inset: 0; pointer-events: none; }   /* covers everything, takes nothing */
+.drawer { pointer-events: auto; }                               /* takes the pointer */
+```
+
+A framework's root element (`#root`, `#app`) that fills the window is such a wrapper. A dim backdrop that should
+block the views below simply keeps `pointer-events: auto`; a transparent drag handle takes the pointer although
+nothing is drawn there. What the page draws does not matter, only what its elements are. An `<iframe>` is an
+element whatever its document shows.
+
+**What follows the pointer.** Moves, presses, the wheel, hover (`:hover`, `mouseleave`), tooltips, the cursor image
+and a click's keyboard move (`SetViewFocusSharing`) all go to the view that takes the pointer. A press begun on
+your view still keeps its moves and its release while the button is held, so a drag across your page's empty part
+does not end there. The cursor image follows the page's answer to the last mouse message, so a page that changes
+under a still pointer keeps the old cursor until the pointer moves. Where no view takes the pointer it goes to the
+view that holds UI mode, as it does outside every view: over its own empty part that page sees a move or a click
+on its `<body>`.
+
+**A page that cannot answer** (still loading) takes the pointer as a rectangle, so a view
+never lets clicks through before it has drawn anything.
+
+**VR.** Each view is its own panel. The laser asks the page of the panel it hits and, where that page has no
+element, goes on to the panel behind it; the beam, the pointer mark and a grip's grab follow the panel that takes
+it, and over an empty part with no panel behind there is no beam.
+
+**UI mode is separate.** Content mode decides where the pointer goes, not who has the keyboard. Two fullscreen
+views that should both be typed into also need `SetViewFocusSharing` (above): the one that holds UI mode gives, the
+other takes, and a click on it then moves the keyboard as well.
+
+The question is asked once per pointer message while the pointer is inside the view's rectangle (moves are merged,
+so about once a frame), and in VR when the laser moves or five times a second. Gate on
+`hostVersionNumber >= 10901` and `QueryCapability("hitTest") == 1`; on an older host the view stays a rectangle.
+
+```cpp
+if (api->hostVersionNumber >= 10901 && api->QueryCapability("hitTest") == 1)
+    api->SetViewHitTest(overlay, MAGELIGHT_API::kHitTestContent);
 ```
 
 ## When the game runs low on memory (1.8.0)

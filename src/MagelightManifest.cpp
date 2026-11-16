@@ -7,6 +7,7 @@
 #include "MagelightApi4.h"
 #include "MagelightManifest.h"
 #include "MagelightDevWatch.h"
+#include "HitTestCore.h"
 #include "HotkeyNames.h"
 #include "PathTextCore.h"
 
@@ -278,7 +279,7 @@ namespace Magelight::Manifest {
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
                                          "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad", "mainMenu",
-                                         "polledKeys", "shareFocus", "acceptFocus" }, vctx);
+                                         "polledKeys", "shareFocus", "acceptFocus", "hitTest" }, vctx);
                     const std::string path = MJStr(v, "path", "", vctx);
                     if (!SafeRelative(path)) {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
@@ -322,6 +323,12 @@ namespace Magelight::Manifest {
                     const std::uint32_t share = (MJBool(v, "shareFocus", false, vctx) ? MAGELIGHT_API::kFocusShareGive : 0u) |
                                                 (MJBool(v, "acceptFocus", false, vctx) ? MAGELIGHT_API::kFocusShareTake : 0u);
                     if (share) Api4::SetViewFocusSharing(id, share);
+                    // 1.9.1: "content" = the pointer takes the view only where its page has an element (SetViewHitTest).
+                    std::uint32_t hitMode = MAGELIGHT_API::kHitTestRect;
+                    if (!Magelight::HitTest::ParseMode(MJStr(v, "hitTest", "rect", vctx), hitMode))
+                        SKSE::log::warn("Magelight[manifest]: {}'hitTest' should be \"rect\" or \"content\" — ignored", vctx);
+                    else if (hitMode != MAGELIGHT_API::kHitTestRect)
+                        Api4::SetViewHitTest(id, hitMode);
                     // 1.6.0: the gamepad layer. true = the keys style (no script needed); "keys" | "navigation";
                     // or { "style": "keys" | "navigation", "cursor": bool }.
                     if (auto gp = v.find("gamepad"); gp != v.end()) {

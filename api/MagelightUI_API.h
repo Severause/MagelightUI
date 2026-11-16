@@ -366,6 +366,11 @@ namespace MAGELIGHT_API {
     inline constexpr std::uint32_t kFocusShareTake = 2;   // a click on this view takes the keyboard from a view
                                                             // that holds UI mode and gives
 
+    // Modes for SetViewHitTest (1.9.1).
+    inline constexpr std::uint32_t kHitTestRect = 0;      // the view's whole rectangle takes the pointer (the default)
+    inline constexpr std::uint32_t kHitTestContent = 1;   // only where its page has an element; elsewhere the pointer
+                                                            // goes to the view below
+
     // ── VR (0.18.0) ────────────────────────────────────────────────────────
     // Per-view placement in the headset. mode: 0 HeadLocked (glued to the head
     // — HUD widgets), 1 WorldLocked (placed once, never follows), 3 LazyFollow
@@ -646,7 +651,8 @@ namespace MAGELIGHT_API {
                                                             // turn 0 for the session when the renderer starts,
                                                             // never back; see the threading contract; 0 in VR),
                                                             // "mainMenu" (1.7.1: follows "pageThread"),
-                                                            // "polledKeys" (1.8.0), "focusShare" (1.9.0). The
+                                                            // "polledKeys" (1.8.0), "focusShare" (1.9.0),
+                                                            // "hitTest" (1.9.1). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -989,6 +995,22 @@ namespace MAGELIGHT_API {
         // "shareFocus" and "acceptFocus" set it too. 0 turns both off (the default). Any thread. InvalidView for a
         // view that is gone or an inspector; InvalidArgument for another bit.
         Result (*SetViewFocusSharing)(ViewId view, std::uint32_t flags);
+
+        // ── appended in 1.9.1 — gate on hostVersionNumber >= 10901 and QueryCapability("hitTest") ──
+        // Where the pointer takes this view. kHitTestRect (the default): anywhere in its rectangle, so a fullscreen
+        // view covers every view below it. kHitTestContent: only where its page has an element, so its empty parts
+        // let the pointer through to the next view down (a drawer or a few panels on a fullscreen page). The host
+        // asks the page document.elementFromPoint at the point: nothing, <html> and <body> are empty, and an element
+        // with CSS pointer-events: none is not found, so the page marks what passes with pointer-events (none on a
+        // fullscreen wrapper, auto on its panels). An <iframe> is an element whatever it shows. Moves, presses, the
+        // wheel, hover, the cursor and a click's keyboard move (SetViewFocusSharing) all go to the view that takes
+        // the pointer; a press begun on this view still keeps its moves and release, as in a browser. Where no view
+        // takes the pointer it goes to the UI-mode view, as outside every view. A page that has not reached DOM
+        // ready takes the pointer as a rectangle. On VR the laser asks the page of the panel it hits and goes on to
+        // the panel behind. The page can set the same itself: magelight.send('__hittest', 'content') or 'rect';
+        // manifest "hitTest" sets it too. Kept across reloads, hibernation and RebuildViewAtScale. Any thread.
+        // InvalidView for a view that is gone or an inspector; InvalidArgument for another mode.
+        Result (*SetViewHitTest)(ViewId view, std::uint32_t mode);
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)
