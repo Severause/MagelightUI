@@ -100,6 +100,12 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   (two fullscreen ones) are two panels in VR; with one moved aside, the laser's clicks on the lower one could reach
   the upper one's page. They now go to the panel the laser is on. A button also stops looking hovered once the
   laser leaves every panel.
+- **The game's own menus work while a mod keeps a page on screen.** Where Magelight draws pages anywhere but at
+  plain Present (Streamline, an upscaler, a replaced `d3d11.dll` or `dxgi.dll`, NVIDIA Smooth Motion, or
+  `"composite": "ui"` / `"engine"`), an invisible menu stays open while a page is shown, and it took the mouse and
+  the keys from every game menu under it, and for a second after the last page hid: with another mod's page up, the
+  Tween, Stats and Level Up menus could not be clicked, moved through or closed. It now passes them on. Pages are
+  unchanged: they take the mouse and keys only in UI mode, as before. Flat only; VR never opens that menu.
 
 ### For mod authors
 

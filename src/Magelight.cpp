@@ -2997,8 +2997,8 @@ namespace Magelight {
     // The carrier: an invisible menu that exists for its PostDisplay, open only while an interactive view is
     // visible. In the menu stack it reads to the engine as an open menu, so Escape no longer opens the Journal
     // while it is up: it must never stay open over plain gameplay, and a click-through HUD view draws from the
-    // end-of-frame hook instead behind a wrapper (s_endOfFrameFallback), else at Present. It takes no input; user
-    // events pass on.
+    // end-of-frame hook instead behind a wrapper (s_endOfFrameFallback), else at Present. It takes no input: user
+    // events and Scaleform events (the mouse and the keys a menu's movie reads) pass on to the menus below it.
     class MagelightOverlayMenu final : public RE::IMenu
     {
     public:
@@ -3029,7 +3029,10 @@ namespace Magelight {
 
         RE::UI_MESSAGE_RESULTS ProcessMessage(RE::UIMessage& msg) override
         {
-            if (msg.type == RE::UI_MESSAGE_TYPE::kUserEvent) return RE::UI_MESSAGE_RESULTS::kPassOn;
+            // IMenu::ProcessMessage feeds a Scaleform event to this menu's own movie and answers handled, which
+            // would take the mouse and keys from every menu under depth 9 (the Tween, Stats and Level Up menus).
+            if (msg.type == RE::UI_MESSAGE_TYPE::kUserEvent || msg.type == RE::UI_MESSAGE_TYPE::kScaleformEvent)
+                return RE::UI_MESSAGE_RESULTS::kPassOn;
             return RE::IMenu::ProcessMessage(msg);
         }
 
