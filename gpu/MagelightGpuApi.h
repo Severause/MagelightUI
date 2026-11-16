@@ -25,7 +25,7 @@ struct ID3D11CommandList;
 
 // The C ABI's revision: bump it whenever an MgGpu_* signature or meaning changes. The host refuses a backend built
 // with another revision. A backend exports every function below; the host treats a missing one as a broken build.
-#define MGGPU_CONTRACT 4u
+#define MGGPU_CONTRACT 5u
 
 extern "C" {
 
@@ -159,5 +159,10 @@ extern "C" {
     };
     // Any thread. 1 when filled, 0 for a handle that is not async. `size` as MgGpuStats'.
     MGGPU_API int MgGpu_AsyncGetState(void* handle, MgGpuAsyncState* out);
+
+    // Contract 5. The thread that owns Ultralight (the recorder's): give back the recorder's idle CPU memory, its pooled
+    // frames, idle upload chunks and cached readback block (GPUDriverAsync::PurgeMemory); what queued frames hold
+    // stays. 1 when done, 0 for a handle that is not async.
+    MGGPU_API int MgGpu_AsyncPurge(void* handle);
 
 }  // extern "C"

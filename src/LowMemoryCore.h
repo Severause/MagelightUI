@@ -311,4 +311,57 @@ namespace Magelight::LowMemory {
 
         void NoteReload(std::uint64_t nowMs) { reloadedAtMs = nowMs; }
     };
+
+    // The video-memory guard (1.9.3): the second reason to give memory back. DXGI gives the game a budget of video
+    // memory (IDXGIAdapter3::QueryVideoMemoryInfo, local segment) and counts what the whole process uses against it;
+    // past the budget Windows moves its allocations out to system RAM and the game stutters. Hidden views' render
+    // targets and tiles are video memory the game could use, so while the process is over its budget the host
+    // releases them as the commit guard does; it never refuses an open for it (an open costs a few tens of MB, and a
+    // refused page is worse than one that spills).
+    // Raised at the budget, lifted at kVideoLiftShare of it after kMinUpMs, with the commit guard's reload rule.
+    inline constexpr double kVideoLiftShare = 0.85;
+    struct VideoGuard {
+        bool up = false;
+        std::uint64_t upSinceMs = 0;
+        std::uint64_t downSinceMs = 0;
+        std::uint64_t reloadedAtMs = 0;
+        int reloadStrikes = 0;
+
+        // usage / budget in bytes; a budget of 0 (unread, or DXGI too old) changes nothing.
+        Change Update(std::uint64_t usage, std::uint64_t budget, std::uint64_t nowMs)
+        {
+            if (budget == 0) return Change::None;
+            if (!up) {
+                if (usage < budget) return Change::None;
+                if (reloadedAtMs && nowMs - reloadedAtMs < kReloadSettleMs) ++reloadStrikes;
+                reloadedAtMs = 0;
+                up = true;
+                upSinceMs = nowMs;
+                return Change::Raised;
+            }
+            if (static_cast<double>(usage) > static_cast<double>(budget) * kVideoLiftShare || nowMs - upSinceMs < kMinUpMs)
+                return Change::None;
+            up = false;
+            downSinceMs = nowMs;
+            return Change::Lifted;
+        }
+
+        std::uint64_t ReloadDelayMs() const { return kReloadAfterLiftMs << std::min(reloadStrikes, kMaxReloadDoublings); }
+        bool ReloadDue(std::uint64_t nowMs) const
+        {
+            return !up && downSinceMs != 0 && nowMs - downSinceMs >= ReloadDelayMs();
+        }
+        void NoteReload(std::uint64_t nowMs) { reloadedAtMs = nowMs; }
+    };
+
+    // Views released for memory load again once neither guard holds them: each is down and either never raised or
+    // due (its own wait since its lift), and at least one of them was raised.
+    inline bool ReleasedMayReload(const Guard& commit, const VideoGuard& video, std::uint64_t nowMs)
+    {
+        if (commit.up || video.up) return false;
+        const bool commitRaised = commit.downSinceMs != 0;
+        const bool videoRaised  = video.downSinceMs != 0;
+        if (!commitRaised && !videoRaised) return false;
+        return (!commitRaised || commit.ReloadDue(nowMs)) && (!videoRaised || video.ReloadDue(nowMs));
+    }
 }

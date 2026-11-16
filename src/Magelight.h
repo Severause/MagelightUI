@@ -376,7 +376,10 @@ namespace Magelight {
     bool SetViewHitTest(ViewId view, std::uint32_t mode);
     bool ViewOpensAtMainMenu(ViewId view);        // 1.7.1 the main menu is open and this view may show over it
     bool MainMenuPagesAvailable();                // 1.7.1 the "mainMenu" capability: the page thread is on or wanted
-    bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)
+    bool SetViewPrepaint(ViewId view, bool on);
+    // 1.9.3 manifest "hiddenTimers": "full": the view's repeating timers keep their rate while hidden (read when its
+    // View is created). False: no such view.
+    bool SetViewHiddenTimers(ViewId view, bool full);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)
     // Gamepad layer (1.6.0, GamepadCore.h). The view's opt-in, kept across reloads; a config with enabled false
     // turns it off. False = no such view, or an inspector. Any thread: the input sink applies it at its next batch.
     bool SetViewGamepad(ViewId view, const Gamepad::ViewConfig& config);

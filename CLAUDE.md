@@ -55,7 +55,7 @@ tools/gamepad-test/         src/GamepadCore.h's ledger, router, keys style and p
 tools/gamepad-page-test/    the gamepad helper in Ultralight's own WebKit: focus by geometry under zoom and device scale, scopes, editing, stale packets (build.bat)
 tools/fiber-gc-test/        the page fiber's gate (invariant 1): src/PageStackCore.h's VM lock in Magelight's frame model, must crash without it; --thread: pages on the page thread, which must pass without it (build.bat); FiberRun.h runs the other tools on the fiber (MG_PAGE_FIBER=1) or the page thread (MG_PAGE_THREAD=1)
 tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zips it) and stack_probe (pages on the game's stack, with the host's JavaScript zones)
-tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held; then the async path (`--mode async`, contract 4) against the immediate context, with and without a budget (build.bat)
+tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held; then the async path (`--mode async`, contract 5, a `MgGpu_AsyncPurge` halfway) against the immediate context, with and without a budget (build.bat)
 tools/bench-test/            what a page costs per frame through MagelightGPU.dll, for comparing two SDK builds: bench.cpp, run.ps1 (both builds, alternating passes), compare.py
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
 tools/lowmemory-test/       src/LowMemoryCore.h's needs, floor, hysteresis, growth room and setting clamp (build.bat)
@@ -207,7 +207,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `ulFiberMB`, `pageThread`, `pageGpu` / `asyncBudgetMs` / `asyncBudgetMB`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `videoMemoryGuard`, `rendererThreads`, `throttleHiddenTimers`, `ulFiberMB`, `pageThread`, `pageGpu` / `asyncBudgetMs` / `asyncBudgetMB`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).
@@ -343,7 +343,10 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     off, a device scale below 1 paints only the page's top-left scale-squared part, and
     `needs_paint()` stays true on an idle page, so `PresentedView::repainted` would make the VR
     presenter upload every frame. A new `CreateView` site sets it too. The host never calls
-    `Renderer::Recycle(Full)` or `PurgeMemory`: on Free both drop every live page's compiled script.
+    `Renderer::Recycle(Full)`, and calls `PurgeMemory` only once per rise of a memory guard (`PurgeForGuard`, 1.9.3):
+    on Free both drop every live page's compiled script, which a page recompiles as it runs again. The async
+    recorder's own `PurgeMemory` (`MgGpu_AsyncPurge`, page thread) runs on a guard rise and once after 30 s with
+    nothing shown; it gives back only idle buffers.
     `FrameWork` calls `Render` at least once a second while no view is shown: 2.0 creates and frees GPU
     resources only inside `Render`, so a View released while nothing is shown (hibernation) would keep its
     video memory until the next show.
@@ -437,7 +440,7 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     (`PageThreadMain`) owns Ultralight from `Renderer::Create` on and is the render thread of invariants 2, 13, 16 and 22-26: every page
     part of the frame (`PageWorkBegin`, `MaterializeImages`, Update, the second sync, the prepaint, Render,
     `CollectView`, `TickMemoryReport`) runs there (`PageThreadFrame`) and nowhere else. By default (`pageGpu`
-    `"async"`, 1.9.0) the page thread's driver is the async path's recorder, contract 4: the page thread makes no device or context call, of the device refusals below only the single-threaded one applies, the game thread replays its recorded frames at Present within `asyncBudgetMs` / `asyncBudgetMB`, and a page frame's views are shown once the frame it recorded has run, their SRVs looked up on the game thread every frame. With `"pageGpu": "deferred"`, or when async cannot be had (`forceCpu`, no usable `MagelightGPU.dll`, the async driver not made), `MagelightGPU.dll` gets a deferred context of the game's device instead (contract 3) and only the page thread calls it, and every refusal below applies; the game's immediate
+    `"async"`, 1.9.0) the page thread's driver is the async path's recorder, contract 5: the page thread makes no device or context call, of the device refusals below only the single-threaded one applies, the game thread replays its recorded frames at Present within `asyncBudgetMs` / `asyncBudgetMB`, and a page frame's views are shown once the frame it recorded has run, their SRVs looked up on the game thread every frame. With `"pageGpu": "deferred"`, or when async cannot be had (`forceCpu`, no usable `MagelightGPU.dll`, the async driver not made), `MagelightGPU.dll` gets a deferred context of the game's device instead (contract 3) and only the page thread calls it, and every refusal below applies; the game's immediate
     context is used on the game thread alone. At Present (`ThreadModeFrame`) it takes every page frame finished
     since the last Present and at once lets the next one start (`PageThread::Handoff`), so that frame records while
     the game thread runs the taken frames' command lists in order (none is ever dropped: each carries uploads later
@@ -522,6 +525,12 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
       count the same room. `CheckOpenNow` holds its own reading to the same bound (`s_expectedFree`, until
       `s_settledAtMs`, so it ends when page frames stop). The guard lifts at twice its floor, where a background
       load of the largest view fits again, and the released views are sent back to load only once one fits.
+    - **The video-memory guard (1.9.3, `"videoMemoryGuard"`).** The game thread samples DXGI's budget once a second
+      (`SampleVideoMemory`, `IDXGIAdapter3::QueryVideoMemoryInfo`, an adapter call, never the device's or context's);
+      `TickVideoMemoryGuard` raises `s_vramPressure` at the budget and lifts it at `kVideoLiftShare` of it
+      (`LowMemory::VideoGuard`). While it is up hidden views are released and none loads or prepaints, as with the
+      commit guard; it never refuses an open. Released views load again only once neither guard holds them
+      (`TickReleasedReload`, `LowMemory::ReleasedMayReload`), each guard's own reload wait counted.
     Views already shown stay up, the views a UI mode that is on needs (`NeededByUIMode`) load and stay, and a shown
     view a rebuild released that frame loads (`s_rebuiltShown`; holding the rebuild would leave its scale out of step
     with its View). A switch refused for memory while the holder's view is hidden (a reclaim's withdrawn release)
