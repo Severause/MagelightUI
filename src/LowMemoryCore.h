@@ -327,10 +327,16 @@ namespace Magelight::LowMemory {
         std::uint64_t reloadedAtMs = 0;
         int reloadStrikes = 0;
 
-        // usage / budget in bytes; a budget of 0 (unread, or DXGI too old) changes nothing.
+        // usage / budget in bytes. A budget of 0 (unread, a failed read, or DXGI too old) raises nothing and lifts a
+        // guard that is up, which could not lift on a reading it no longer gets.
         Change Update(std::uint64_t usage, std::uint64_t budget, std::uint64_t nowMs)
         {
-            if (budget == 0) return Change::None;
+            if (budget == 0) {
+                if (!up) return Change::None;
+                up = false;
+                downSinceMs = nowMs;
+                return Change::Lifted;
+            }
             if (!up) {
                 if (usage < budget) return Change::None;
                 if (reloadedAtMs && nowMs - reloadedAtMs < kReloadSettleMs) ++reloadStrikes;

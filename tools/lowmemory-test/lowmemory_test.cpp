@@ -259,6 +259,8 @@ int main()
         Check(v.Update(MB(8100), budget, lift + LM::kReloadAfterLiftMs + 1000) == LM::Change::Raised &&
                   v.ReloadDelayMs() == LM::kReloadAfterLiftMs * 2,
               "video: rising again soon after a reload doubles the wait");
+        Check(v.Update(0, 0, lift + LM::kReloadAfterLiftMs + 2000) == LM::Change::Lifted && !v.up,
+              "video: a reading lost while up lifts the guard");
 
         LM::Guard c;
         LM::VideoGuard w;

@@ -76,23 +76,27 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 - **Less video memory and RAM held for pages nobody is looking at.** Magelight now reads how much video memory
   Windows gives the game (its DXGI budget). While the game is over that budget, Windows starts moving its textures
   out to system RAM and the game stutters; Magelight then releases its hidden pages the way it already did when
-  Windows ran short of RAM, and loads them again, hidden, a minute after the game is back under 85% of the budget.
+  Windows ran short of RAM, and loads them again, hidden, about a minute after the game is back under 85% of the
+  budget (longer each time a reload brought it straight back, and only once the low-memory guard allows it too).
   A page a mod is showing, or about to show, is never released for this and never refused. `Magelight.json`
   `"videoMemoryGuard": false` turns it off.
-- **Idle memory given back.** When either guard rises, Ultralight is asked to free its caches once
-  (`Renderer::PurgeMemory`), and with nothing shown for 30 s the page thread's recorded-frame pool and upload buffers
+- **Idle memory given back.** When either guard rises, Ultralight is asked to free its caches
+  (`Renderer::PurgeMemory`, at most every 5 minutes), and with nothing shown for 30 s the page thread's recorded-frame pool and upload buffers
   are handed back (`pageGpu` async). The memory line in `Magelight.log` now also shows the video memory against its
   budget, and says which guard is up.
-- **Painting uses 4 threads instead of 8** (`Magelight.json` `"rendererThreads"`, 1 to 8): Ultralight's own default
-  is 8 on any PC, which competes with the game's threads for no gain on pages this small.
-- **Hidden pages' timers slow down.** A hidden page's `setInterval` / `setTimeout` loops run throttled, so hidden
+- **Painting uses 4 threads instead of up to 8** (`Magelight.json` `"rendererThreads"`, 1 to 8): Ultralight's own
+  default takes up to 8, which competes with the game's threads for no gain on pages this small.
+- **Hidden pages' timers slow down.** A hidden page's repeating timers (`setInterval`) run throttled, so hidden
   pages cost less CPU (`Magelight.json` `"throttleHiddenTimers": false` restores the full rate for every view).
 
 ### For mod authors
 
 - **Manifest `"hiddenTimers": "full"`** on a view keeps its timers at their rate while hidden, for a page that
   must poll in the background (`"throttled"`, the default, is the other value). It is read when the view's page is
-  created. `requestAnimationFrame` and CSS animations already stop while hidden (1.5.0), throttled or not.
+  created. `requestAnimationFrame` and CSS animations already stop while hidden (1.5.0), throttled or not. Views
+  made with `CreateView` have no switch of their own yet; the player's `throttleHiddenTimers: false` covers them.
+- **A hidden view can be released for video memory** (`videoMemoryGuard`), as for low memory: one you never set to
+  hibernate comes back with `ViewReloaded`, so send its state again.
 - **`PurgeMemory` on a guard rise drops compiled scripts** (Ultralight Free): a live page keeps working, and its next
   script runs a little slower while it compiles again. Nothing calls it otherwise.
 - `MagelightGPU.dll` contract 5: `MgGpu_AsyncPurge(handle)`, called on the recorder's thread.

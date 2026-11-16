@@ -80,4 +80,7 @@ Modifications vs the SDK reference driver (marked `// MG:` in source):
   recorder writes ranges into them; `DrawCommands`; `RegisterExternalAt`). The budget is tested between operations and
   a frame's destroys are not metered. Readbacks are not offered. External textures on an async handle are queued under
   the recorder's id counter and applied once the frames recorded before them have run.
+- Contract 5: `MgGpu_AsyncPurge`, the recorder's `PurgeMemory` on the thread that owns Ultralight (its pooled frames,
+  idle upload chunks and readback block; queued frames keep theirs). The host calls it on a memory guard's rise and
+  after 30 s with nothing shown.
   `tools/deferred-test --mode async` checks it against the immediate context byte for byte.

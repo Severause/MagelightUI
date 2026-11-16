@@ -787,12 +787,12 @@ namespace Magelight {
             SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
                             "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={}, ulFiberMB={}, "
                             "pageThread={}, pageGpu={}, exceptionTelemetry={}, memoryLogMinutes={}, lowMemoryFloorMB={}, clipCursor={}, "
-                            "gamepad={})",
+                            "gamepad={}, videoMemoryGuard={}, rendererThreads={}, throttleHiddenTimers={})",
                 s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
                 s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa,
                 s_ulFiberMb, s_pageThreadMode.load() != PageThread::Mode::Off, s_pageAsyncWanted ? "async" : "deferred",
                 s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_lowMemoryFloorMb.load(), s_clipCursorCfg.load(),
-                s_gamepadTuning.enabled);
+                s_gamepadTuning.enabled, s_videoGuardOn.load(), s_rendererThreads.load(), s_throttleHiddenTimers.load());
             if (s_gamepadTuning.enabled) {
                 static constexpr const char* kGlyphNames[] = { "xbox", "playstation", "generic" };
                 const Gamepad::Tuning& t = s_gamepadTuning;
@@ -998,8 +998,8 @@ namespace Magelight {
         // whole page that frame.
         bool prepaint = false;
         bool prepainted = false;        // painted (shown, or prepainted) since paintableAt
-        // 1.9.3 manifest "hiddenTimers": "full": this view's repeating timers keep their rate while hidden (read when its
-        // View is created: a change applies at the next load).
+        // 1.9.3 manifest "hiddenTimers": "full": this view's repeating timers keep their rate while hidden. Read when its
+        // View is created (a first load, a wake, a rebuild); a Navigate or ReloadView keeps the View and the old value.
         bool fullHiddenTimers = false;
         // GetTickCount64 of the last DOM ready, resize, or host Navigate or Reload that kept its page (one that began no
         // load, or whose load failed); 0 = none since the last load or host request.
@@ -2747,7 +2747,7 @@ namespace Magelight {
 
     // Ultralight's thread only. s_lowMemoryWaited: the views whose load waited while the guard was up, each named once
     // in the log per time it comes up (NoteLowMemoryWait). s_lowMemoryReleased: the views it released that never
-    // hibernate, which load again hidden once memory has been back a while (TickLowMemoryGuard). s_guardSample: the
+    // hibernate, which load again hidden once memory has been back a while (TickReleasedReload). s_guardSample: the
     // guard's last reading, at most LowMemory::kSampleMs old. s_guardBudget: its free commit, held to what should be
     // left once the loads in s_startedLoads have landed (LowMemory::SettledFree; JudgeLoad, PublishBudget).
     // s_rebuiltShown: the shown views ApplyPendingRebuilds released this frame, whose new View MaterializeViews makes
@@ -7058,8 +7058,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         // (FrameWork pumps it).
         cfg.memory_profile = ultralight::MemoryProfile::Balanced;
         cfg.idle_gc_enabled = true;
-        // Honoured since 2.0.0-beta.3 (beta.2 always ran 8): fewer painting threads beside the game's, with no page
-        // measured slower at 1, 2 or 4 (tools/bench-test --threads).
+        // Fewer painting threads beside the game's (the SDK's 0 means up to 8), with no page measured slower at 1, 2
+        // or 4 (tools/bench-test --threads).
         cfg.num_renderer_threads = static_cast<std::uint32_t>(s_rendererThreads.load());
         ultralight::Platform::instance().set_config(cfg);
         SKSE::log::info("Magelight: memory - profile balanced, idle GC after {:.1f} s without input, recycler every "
@@ -7411,11 +7411,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     // everything the page needs to come back (path, listeners, session,
     // layer, cutout) is on it. Never a view UI mode needs or an entry is deciding on (s_openingView), never an
     // inspector.
-    // While the low-memory guard is up, every hidden view whose page reached DOM ready goes once hidden
+    // While a memory guard is up (low memory or video memory), every hidden view whose page reached DOM ready goes once hidden
     // kReleaseHiddenAfterMs (a view never shown at once), whatever its budget, but not a page an inspector is bound to
     // nor the view that last held UI mode (s_lastUIModeView).
     // A release that drops a pending reload or rebuild, or of a view that never hibernates, wakes with a ViewReloaded:
-    // its page was replaced. Released views that never hibernate load again hidden later (TickLowMemoryGuard).
+    // its page was replaced. Released views that never hibernate load again hidden later (TickReleasedReload).
     static void HibernateIdleViews()
     {
         const bool lowMemory = s_lowMemory.load() || s_vramPressure.load();
@@ -9433,31 +9433,41 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     }
 
-    // Ultralight's thread, in PageWorkBegin before hibernation and materialization: free commit once a second
-    // (kSampleMs), the guard raised below what loading the largest view needs (s_guardFloorBytes) and lifted with
-    // hysteresis (LowMemoryCore.h), one line each way;
-    // then, once the guard has been down long enough (Guard::ReloadDue, a minute that grows each time the reload
-    // brought it back) and a hidden load fits the budget, the views it released that never hibernate load again,
-    // hidden, through the load queue (MaterializeViews), as they would have stayed loaded without it.
     static LowMemory::Guard      s_commitGuard;   // TickLowMemoryGuard's, read by TickReleasedReload (Ultralight's thread)
     static LowMemory::VideoGuard s_videoGuard;    // TickVideoMemoryGuard's, the same
+    // Set by a guard's rise, purged by PageWorkBegin after HibernateIdleViews (Ultralight's thread).
+    static const char*           s_purgeReason = nullptr;
 
     // Ultralight's thread, outside Update and Render, when a memory guard rises: give back what Ultralight and the async
     // recorder hold idle. Renderer::PurgeMemory on Free drops every live page's compiled script, so it is called only
     // here (invariant 22): a page that runs its script again once is cheaper than one refused or released.
     static void PurgeForGuard(const char* why)
     {
+        // Renderer::PurgeMemory at most every kRendererPurgeGap: video memory can cross its budget at every cell change,
+        // and each purge recompiles every live page's script, a shown HUD's included. The recorder's purge is cheap.
+        static constexpr std::uint64_t kRendererPurgeGap = 5 * 60 * 1000;
+        static std::uint64_t s_lastRendererPurge = 0;
+        const std::uint64_t now = GetTickCount64();
+        const bool renderer = s_lastRendererPurge == 0 || now - s_lastRendererPurge >= kRendererPurgeGap;
         const auto t0 = std::chrono::steady_clock::now();
-        s_ulRenderer->PurgeMemory();
-        const bool recorder = s_pageAsync.load() && s_gpuAsyncPurge && s_gpuAsyncPurge(s_gpu);
-        SKSE::log::info("Magelight: {} - Ultralight's idle memory given back{} in {:.1f} ms", why,
-                        recorder ? " (the async recorder's too)" : "",
+        if (renderer) {
+            s_lastRendererPurge = now;
+            s_ulRenderer->PurgeMemory();
+        }
+        const bool recorder = s_pageAsync.load() && s_gpuAsyncPurge(s_gpu);
+        if (!renderer && !recorder) return;
+        SKSE::log::info("Magelight: {} - {} idle memory given back in {:.1f} ms", why,
+                        renderer && recorder ? "Ultralight's and the async recorder's"
+                        : renderer           ? "Ultralight's"
+                                             : "the async recorder's (Ultralight's was purged under 5 minutes ago)",
                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 
+    // Ultralight's thread, in PageWorkBegin before hibernation and materialization: free commit once a second
+    // (kSampleMs), the guard raised below what loading the largest view needs (s_guardFloorBytes) and lifted with
+    // hysteresis (LowMemoryCore.h), one line each way. The reload of what it released is TickReleasedReload's.
     static void TickLowMemoryGuard()
     {
-        auto& s_guard = s_commitGuard;
         static std::uint64_t s_nextSample = 0;
         const int floorMb = s_lowMemoryFloorMb.load();
         if (floorMb <= 0) return;
@@ -9477,14 +9487,14 @@ float4 ps_straight(VSOut i) : SV_Target {
         LowMemory::DropSettled(s_startedLoads, now);
         PublishBudget(mem.freeCommit);
         if (!mem.read) return;
-        switch (s_guard.Update(mem.freeCommit, now, floorBytes)) {
+        switch (s_commitGuard.Update(mem.freeCommit, now, floorBytes)) {
         case LowMemory::Change::Raised:
             s_lowMemory.store(true);
             SKSE::log::warn("Magelight: low memory - {} (under the {} MB the largest page needs to load). Until it "
                             "recovers hidden views are released and nothing loads or prepaints in the background; a "
                             "page that is asked for still opens while its own need fits, and pages already shown stay up",
                             MemoryText(mem), floorBytes / LowMemory::kMiB);
-            PurgeForGuard("low memory");
+            s_purgeReason = "low memory";
             break;
         case LowMemory::Change::Lifted:
             s_lowMemory.store(false);
@@ -9515,7 +9525,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                             "it. Until it is under {:.0f}% again hidden views are released and nothing loads or prepaints "
                             "in the background; pages that are asked for still open", usage / kGB, budget / kGB,
                             LowMemory::kVideoLiftShare * 100.0);
-            PurgeForGuard("over the video-memory budget");
+            s_purgeReason = "over the video-memory budget";
             break;
         case LowMemory::Change::Lifted:
             s_vramPressure.store(false);
@@ -9531,8 +9541,11 @@ float4 ps_straight(VSOut i) : SV_Target {
     // through the load queue (MaterializeViews), as they would have stayed loaded without the guards.
     static void TickReleasedReload()
     {
+        static std::uint64_t s_nextTry = 0;
         const std::uint64_t now = GetTickCount64();
-        if (s_lowMemoryReleased.empty() || !LowMemory::ReleasedMayReload(s_commitGuard, s_videoGuard, now)) return;
+        if (s_lowMemoryReleased.empty() || now < s_nextTry) return;
+        s_nextTry = now + LowMemory::kSampleMs;   // the guards and s_guardBudget change at most once a sample
+        if (!LowMemory::ReleasedMayReload(s_commitGuard, s_videoGuard, now)) return;
         const int floorMb = s_lowMemoryFloorMb.load();
         if (floorMb > 0) {
             std::uint64_t largest = 0;
@@ -9604,6 +9617,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         TickVideoMemoryGuard();
         TickReleasedReload();
         HibernateIdleViews();
+        if (s_purgeReason) {   // after the release, so the purge can reach what the released views held
+            PurgeForGuard(s_purgeReason);
+            s_purgeReason = nullptr;
+        }
         ApplyPendingRebuilds();
         MaterializeViews();
         ApplyPendingResizes();
@@ -9637,9 +9654,6 @@ float4 ps_straight(VSOut i) : SV_Target {
         DrainBridgeQueues();
     }
 
-    // The game thread's bookkeeping each frame: the cursor confine, the focus menu's close check, the cursor re-hides
-    // and samples, the world-freeze reconcile, the controls hold's release and the page-cursor reset. Engine state is
-    // read on the game thread or reached through GameTask::Post.
     // Game thread, once a second: the process's video memory against DXGI's budget for it (IDXGIAdapter3, Windows 10;
     // older DXGI leaves both 0 and the video guard idle). An adapter call, never the device's or the context's.
     static void SampleVideoMemory()
@@ -9662,11 +9676,14 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         if (!s_adapter) return;
         DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-        if (FAILED(s_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) return;
+        if (FAILED(s_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) info = {};
         s_vramUsage.store(info.CurrentUsage);
         s_vramBudget.store(info.Budget);
     }
 
+    // The game thread's bookkeeping each frame: the video-memory sample, the cursor confine, the focus menu's close
+    // check, the cursor re-hides and samples, the world-freeze reconcile, the controls hold's release and the page-cursor
+    // reset. Engine state is read on the game thread or reached through GameTask::Post.
     static void GameBookkeeping()
     {
         SampleVideoMemory();
