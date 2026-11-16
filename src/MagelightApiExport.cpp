@@ -161,6 +161,8 @@ namespace {
         &Magelight::Api4::SetViewFocusSharing,
         // 1.9.1 appendix
         &Magelight::Api4::SetViewHitTest,
+        // 1.10.0 appendix
+        &Magelight::Api4::AddPageRoot,
     };
 
 }  // namespace

@@ -173,7 +173,12 @@ Seven behavioral differences to design around:
 
 Your FOMOD's dependency line changes from PrismaUI to Magelight; pages move from
 `Data/PrismaUI/views/...` to `Data/Magelight/<modId>/views/...` (the folder is your
-namespace — see [MANIFEST.md](MANIFEST.md)). Declare `minHost` and the host itself renders
+namespace — see [MANIFEST.md](MANIFEST.md)). To support both hosts from one copy of the files, leave them under
+`Data/PrismaUI/views/<yours>/`, pass Magelight absolute paths to them, and name that folder once with
+`AddPageRoot` (1.10.0; [CPP.md](CPP.md), "Pages that share files above their own folder"): without it a page there
+reads only its own folder, so its `../Scripts/...` and `../Styles/...` loads are refused. Keep those loads relative:
+a URL starting with `/` names a file under PrismaUI's views folder on PrismaUI, but does not resolve against the
+folder on Magelight. Declare `minHost` and the host itself renders
 the "needs Magelight a.b.c" panel for users on an older host. Bundle-versus-require and the
 licensing your mod inherits are covered in [DISTRIBUTION.md](DISTRIBUTION.md). Both hosts ship
 Ultralight's free tier, but not the same build: PrismaUI ships 1.4.1-dev, Magelight 2.0.0-beta.2

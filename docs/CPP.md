@@ -138,7 +138,9 @@ with `v4()->RegisterJSListenerEx(view, "name", cb, user)`.
   elsewhere (a page laid out under another UI mod's own folder, e.g.
   `Data\<OtherUI>\views\...`; pages outside `Data\Magelight` load as of
   0.28.1). The file system cannot tell which page asks, so every page reads
-  that whole union.
+  that whole union. Such a page reads only its own folder: pages that share
+  files above it need `AddPageRoot` (1.10.0, "Pages that share files above
+  their own folder" below).
   Resolve the path from `GetModuleFileNameW`, not the working directory.
 - **Network.** Since 0.30.0 every mod's pages are file-only by default
   (`NetworkPolicy::FileOnly`): they read their own files (see the previous
@@ -931,6 +933,43 @@ so about once a frame), and in VR when the laser moves or five times a second. G
 if (api->hostVersionNumber >= 10901 && api->QueryCapability("hitTest") == 1)
     api->SetViewHitTest(overlay, MAGELIGHT_API::kHitTestContent);
 ```
+
+## Pages that share files above their own folder (1.10.0)
+
+Pages under `Data\Magelight\<modId>\` read anything in that folder. A page anywhere else (an absolute
+`htmlPath`, such as a page set laid out for another UI host under `Data\<OtherUI>\views\MyMod\`) reads only its
+own folder and what lies under it, so this layout loses its shared files:
+
+```
+Data\<OtherUI>\views\MyMod\Hud\Hud.html              <script src="../Scripts/Global.js">
+Data\<OtherUI>\views\MyMod\Minigames\Lock\index.html  <script src="../../Scripts/Global.js">
+Data\<OtherUI>\views\MyMod\Scripts\Global.js
+```
+
+The page loads, but each `..` load is refused (`Magelight.log`: `file read outside Data\Magelight or any page
+root refused`). Name the shared folder once, before you create the views:
+
+```cpp
+const auto views = GameDir() / L"Data" / L"OtherUI" / L"views" / L"MyMod";   // GameDir: from GetModuleFileNameW
+if (api->hostVersionNumber >= 11000 && api->QueryCapability("pageRoot") == 1)
+    api->AddPageRoot(mod, ToUtf8(views).c_str());
+// then CreateViewEx with absolute paths under `views`
+```
+
+`MagelightMod::addPageRoot(folder)` does the same and returns false on an older host. What it does:
+
+- Every page reads every file under the folder, as every page reads every registered folder (the file system
+  cannot tell which page asks; see the Trust model). Your pages keep your mod's `SetNetworkPolicy`, as any page
+  does, whoever else adds the same folder.
+- A view created afterwards whose page lies under the folder takes it as its own: a relative `SetViewCursor` image
+  resolves against it, and devMode watches the whole folder. A view created before still reads the folder.
+- The folder must exist and lie inside the game's `Data` folder, below it, outside `Data\Magelight` (served
+  already) and outside Magelight's own folder and the folders that hold it (`Data\SKSE`, `Data\SKSE\Plugins`).
+  Anything else is `InvalidArgument`, with the reason in `GetLastErrorMessage`. UTF-8, absolute.
+- Adding a folder twice does nothing; you may add several. A folder stays readable for the session, after
+  `UnregisterMod` too.
+- A URL that starts with `/` (`/MyMod/Scripts/Global.js`) does not resolve against the folder. Keep shared files on
+  relative paths.
 
 ## When the game runs low on memory (1.8.0)
 

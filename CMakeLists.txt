@@ -10,7 +10,7 @@ endif()
 
 project(
     Magelight
-    VERSION 1.9.1
+    VERSION 1.10.0
     LANGUAGES CXX
 )
 
@@ -235,3 +235,9 @@ foreach(_mgl_target ${PROJECT_NAME} MagelightGPU)
         $<$<CONFIG:Release>:/OPT:ICF>
     )
 endforeach()
+
+# In-game test plugins (tools/*/ingame): off by default, never staged or packaged.
+option(MG_TEST_PLUGINS "Build the in-game test plugins under tools/*/ingame" OFF)
+if(MG_TEST_PLUGINS)
+    add_subdirectory(tools/pageroot-test/ingame)
+endif()

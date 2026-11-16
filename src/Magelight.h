@@ -123,14 +123,17 @@ namespace Magelight {
     // sessionName: nullptr/"" = the shared default jar, else a persistent jar
     // at cache_path/<name> (a filesystem-safe name). It and netLevel are set
     // before the render thread can see the view, so a page never loads in
-    // the wrong jar or at the wrong reach.
+    // the wrong jar or at the wrong reach. pageRoot (UTF-8, 1.10.0): the
+    // folder the view reads from instead of PageRootFor's (MlView::root), the
+    // mod's AddPageRoot folder that holds the page; nullptr or "" = none.
     ViewId CreateView(const char* htmlPath,
                       int x, int y, int w, int h,
                       DomReadyFn onDomReady = nullptr,
                       bool clickThrough = false,
                       bool startVisible = false,
                       const char* sessionName = nullptr,
-                      NetLevel netLevel = NetLevel::File);
+                      NetLevel netLevel = NetLevel::File,
+                      const char* pageRoot = nullptr);
     bool IsViewValid(ViewId view);
     void ShowView(ViewId view, bool show);
     void SetViewBounds(ViewId view, int x, int y, int w, int h);
@@ -243,6 +246,9 @@ namespace Magelight {
     // 0.28.0
     void SetViewEscapeCapture(ViewId view, bool capture);   // the page owns Escape (no UI-mode exit)
     void SetViewNetworkLevel(ViewId view, NetLevel level);  // see NetLevel above
+    // 1.10.0: the file system serves `root` (a folder Api4::AddPageRoot checked) and gives its pages `level`'s CSP;
+    // called again with the new level on a policy change. Never removed. Any thread.
+    void ServePageRoot(const std::filesystem::path& root, NetLevel level);
     void ShowInspectorFor(ViewId page, bool show);
     bool IsInspectorVisibleFor(ViewId page);
     void SetViewOrder(ViewId view, std::uint64_t order);

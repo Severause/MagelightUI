@@ -18,6 +18,7 @@
 #include "LowMemoryCore.h"
 #include "FocusShareCore.h"
 #include "HitTestCore.h"
+#include "PageRootCore.h"
 #include "PageStackCore.h"
 
 #include <RE/Skyrim.h>
@@ -931,6 +932,10 @@ namespace Magelight {
         // page's CSP (RootNetLevel). WebKit asks for files with no View in
         // hand, so the file gate is the union of every root, not this one.
         std::filesystem::path root;
+        // PageRootFor's folder when `root` is a mod's AddPageRoot folder (1.10.0), else `root`. Also published at the
+        // view's level: as the deepest folder holding the page it decides the page's CSP, which a root another mod
+        // shares, or an entry left from an earlier view at an older level, must not.
+        std::filesystem::path ownRoot;
         int x = 0, y = 0;       // negative = anchored from right/bottom edge
         int w = 0, h = 0;
         bool visible = false;
@@ -5865,14 +5870,7 @@ namespace Magelight {
     // string work — safe on WebKit's thread, no filesystem calls.
     static bool PathIsUnder(const std::filesystem::path& p, const std::filesystem::path& base)
     {
-        if (p.empty() || base.empty()) return false;
-        std::wstring a = p.lexically_normal().native();
-        std::wstring b = base.lexically_normal().native();
-        while (!b.empty() && (b.back() == L'\\' || b.back() == L'/')) b.pop_back();
-        if (a.size() < b.size()) return false;
-        for (std::size_t i = 0; i < b.size(); ++i)
-            if (std::towlower(a[i]) != std::towlower(b[i])) return false;
-        return a.size() == b.size() || a[b.size()] == L'\\' || a[b.size()] == L'/';
+        return PageRootRules::Under(p, base);
     }
 
     // The folder a page may read from (MlView::root). A drive-letter page
@@ -12672,7 +12670,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     ViewId CreateView(const char* htmlPath, int x, int y, int w, int h,
                       DomReadyFn onDomReady, bool clickThrough, bool startVisible,
-                      const char* sessionName, NetLevel netLevel)
+                      const char* sessionName, NetLevel netLevel, const char* pageRoot)
     {
         // w == 0 && h == 0 = FULLSCREEN: the view tracks the backbuffer size
         // (sized on the render thread before materialization, for SA's
@@ -12682,8 +12680,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         auto v = std::make_unique<MlView>();
         v->id = s_nextViewId.fetch_add(1);
         v->htmlPath = htmlPath ? htmlPath : "";
-        v->root = PageRootFor(v->htmlPath);
+        v->ownRoot = PageRootFor(v->htmlPath);
+        v->root = (pageRoot && *pageRoot) ? PathText::FromUtf8(pageRoot) : v->ownRoot;
         NotePageRoot(v->root, netLevel);   // 0.28.1: MlFileSystem serves it too, and writes its CSP
+        if (v->ownRoot != v->root) NotePageRoot(v->ownRoot, netLevel);
         v->x = x; v->y = y; v->w = w; v->h = h;
         v->fullscreen = fullscreen;
         v->visible = startVisible;
@@ -13128,18 +13128,26 @@ float4 ps_straight(VSOut i) : SV_Target {
                             onShow ? "set - first load waits for a show" : "cleared");
         return true;
     }
+
+    void ServePageRoot(const std::filesystem::path& root, NetLevel level)
+    {
+        NotePageRoot(root, level);
+    }
+
     // The page's CSP follows on its next load (ReloadView): a loaded document keeps the policy it was served.
     void SetViewNetworkLevel(ViewId view, NetLevel level)
     {
-        std::filesystem::path root;
+        std::filesystem::path root, ownRoot;
         {
             std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             MlView* v = FindViewLocked(view);
             if (!v) return;
             v->netLevel = level;
             root = v->root;
+            ownRoot = v->ownRoot;
         }
         NotePageRoot(root, level);
+        if (!ownRoot.empty() && ownRoot != root) NotePageRoot(ownRoot, level);
     }
 
     void ShowInspectorFor(ViewId page, bool show)
