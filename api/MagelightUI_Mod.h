@@ -123,11 +123,11 @@ namespace MAGELIGHT_API {
         /// outside Data\Magelight that share files (Data\<YourUI>\views\MyMod\
         /// holding Hud\Hud.html and Scripts\Global.js). Absolute path inside the
         /// game's Data folder; call before createView. False when the host is
-        /// older than 1.10.0 or refuses the folder (v4()->GetLastErrorMessage
+        /// older than 1.9.2 or refuses the folder (v4()->GetLastErrorMessage
         /// says why).
         bool addPageRoot(const char* absFolder)
         {
-            if (!m_v4 || !m_mod || m_v4->hostVersionNumber < 11000 || m_v4->QueryCapability("pageRoot") != 1)
+            if (!m_v4 || !m_mod || m_v4->hostVersionNumber < 10902 || m_v4->QueryCapability("pageRoot") != 1)
                 return false;
             return m_v4->AddPageRoot(m_mod, absFolder) == Result::Ok;
         }

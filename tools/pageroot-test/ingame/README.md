@@ -1,4 +1,4 @@
-# MgPageRootTest: AddPageRoot in game (1.10.0)
+# MgPageRootTest: AddPageRoot in game (1.9.2)
 
 A test plugin that keeps its pages outside `Data\Magelight`, laid out the way a page set made for another UI host
 is: sibling page folders that load files from a shared folder above them.
@@ -23,7 +23,7 @@ cmake --build <build folder> --config Release --target MgPageRootTest
 ```
 
 The DLL lands in `<build folder>\tools\pageroot-test\ingame\`. Copy it to `Data\SKSE\Plugins\` and `data\*` to
-`Data\` (or make both one mod in a mod manager), beside a Magelight 1.10.0 or later.
+`Data\` (or make both one mod in a mod manager), beside a Magelight 1.9.2 or later.
 
 ## What to check
 

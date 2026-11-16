@@ -86,7 +86,7 @@ Magelight, current SKSE):
   click on the note moves typing there and a click on the panel moves it back (focus sharing, 1.9.0). With the
   panel closed and the note shown, Home opens the fullscreen drawer over it: the drawer's button works, and a click
   on the note still reaches it, hover and typing included; a click on the drawer takes the keyboard back and Home
-  then closes it (content hit testing, 1.9.1).
+  then closes it (content hit testing, 1.9.2).
 - `Magelight.ReactConfig` opens with F8: UI mode takes the cursor, typing lands in the
   page, Escape closes, game controls resume.
 - A `Magelight.json` override (`toggleKey`) applies.

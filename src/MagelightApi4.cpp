@@ -84,7 +84,7 @@ namespace Magelight::Api4 {
             bool scriptOwned = false;
             Magelight::NetLevel net = Magelight::NetLevel::File;   // NetworkPolicy, pushed to every view of the mod
             Magelight::CursorSet cursor;   // 0.31.0: the manifest's default cursor, pushed to every view of the mod
-            std::vector<std::filesystem::path> pageRoots;   // 1.10.0 AddPageRoot, Normalize'd; served at `net`
+            std::vector<std::filesystem::path> pageRoots;   // 1.9.2 AddPageRoot, Normalize'd; served at `net`
             std::map<ViewId, ViewRec> views;
             // Generation token: queued game-thread deliveries check it, so an
             // event queued just before UnregisterMod never reaches a freed user.
@@ -1224,8 +1224,8 @@ namespace Magelight::Api4 {
         if (n == "mainmenu") return Magelight::MainMenuPagesAvailable() ? 1 : 0;   // SetViewMainMenu / manifest "mainMenu" (1.7.1)
         if (n == "polledkeys") return 1;    // SetViewPolledKeys / kUIModeFlagPassPolledKeys / manifest "polledKeys" (1.8.0)
         if (n == "focusshare") return 1;    // SetViewFocusSharing / KeyFocusGained / KeyFocusLost / manifest "shareFocus", "acceptFocus" (1.9.0)
-        if (n == "hittest") return 1;       // SetViewHitTest / manifest "hitTest" / the page's '__hittest' (1.9.1)
-        if (n == "pageroot") return 1;      // AddPageRoot (1.10.0)
+        if (n == "hittest") return 1;       // SetViewHitTest / manifest "hitTest" / the page's '__hittest' (1.9.2)
+        if (n == "pageroot") return 1;      // AddPageRoot (1.9.2)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1897,7 +1897,7 @@ namespace Magelight::Api4 {
         return Result::Ok;
     }
 
-    // 1.9.1 (HitTestCore.h; the routing is DrainInputQueue's, CLAUDE.md invariant 31).
+    // 1.9.2 (HitTestCore.h; the routing is DrainInputQueue's, CLAUDE.md invariant 31).
     static_assert(HitTest::kRect == MAGELIGHT_API::kHitTestRect && HitTest::kContent == MAGELIGHT_API::kHitTestContent,
                   "HitTestCore's modes must be the API's");
     Result SetViewHitTest(ViewId view, std::uint32_t mode)
@@ -1911,7 +1911,7 @@ namespace Magelight::Api4 {
         return Result::Ok;
     }
 
-    // 1.10.0 (PageRootCore.h). The disk is asked once, here; the file system then serves the folder by name, so
+    // 1.9.2 (PageRootCore.h). The disk is asked once, here; the file system then serves the folder by name, so
     // whatever is put under it later is served too.
     Result AddPageRoot(ModId mod, const char* folder)
     {

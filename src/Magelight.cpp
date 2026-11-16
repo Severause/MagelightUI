@@ -932,7 +932,7 @@ namespace Magelight {
         // page's CSP (RootNetLevel). WebKit asks for files with no View in
         // hand, so the file gate is the union of every root, not this one.
         std::filesystem::path root;
-        // PageRootFor's folder when `root` is a mod's AddPageRoot folder (1.10.0), else `root`. Also published at the
+        // PageRootFor's folder when `root` is a mod's AddPageRoot folder (1.9.2), else `root`. Also published at the
         // view's level: as the deepest folder holding the page it decides the page's CSP, which a root another mod
         // shares, or an entry left from an earlier view at an older level, must not.
         std::filesystem::path ownRoot;
@@ -1007,7 +1007,7 @@ namespace Magelight {
         std::uint64_t order = 0;
         bool escapeCapture = false;   // 0.28.0: the page owns Escape (delivered as a key, no UI-mode exit)
         std::uint32_t focusShare = 0; // 1.9.0: FocusShare::kGive / kTake (SetViewFocusSharing, invariant 30)
-        std::uint32_t hitTest = HitTest::kRect;   // 1.9.1: HitTest::kRect / kContent (SetViewHitTest, invariant 31)
+        std::uint32_t hitTest = HitTest::kRect;   // 1.9.2: HitTest::kRect / kContent (SetViewHitTest, invariant 31)
         // Content mode: the page's last answer to the mouse was "nothing here" (the cursor's pick reads it).
         bool hitEmpty = false;
         bool freezeWorld = false;     // 0.31.0: freeze the world behind this view while it holds UI mode paused
@@ -1494,7 +1494,7 @@ namespace Magelight {
             SetViewPrepaint(id, arg == "1");
             return JSValueMakeUndefined(ctx);
         }
-        if (name == "__hittest") {   // 1.9.1: SetViewHitTest from the page itself ('content' / 'rect'); other text is dropped
+        if (name == "__hittest") {   // 1.9.2: SetViewHitTest from the page itself ('content' / 'rect'); other text is dropped
             std::uint32_t mode = HitTest::kRect;
             if (HitTest::ParseMode(arg, mode)) SetViewHitTest(id, mode);
             return JSValueMakeUndefined(ctx);

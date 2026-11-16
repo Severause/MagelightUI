@@ -1,5 +1,5 @@
 #pragma once
-// Page roots (1.10.0): the folders the file system serves pages from, and the rules for a folder a plugin adds with
+// Page roots (1.9.2): the folders the file system serves pages from, and the rules for a folder a plugin adds with
 // AddPageRoot. Lexical and case-insensitive (Windows paths), std only: no filesystem calls, so it is safe on WebKit's
 // worker threads and testable off the game (tools/pageroot-test).
 

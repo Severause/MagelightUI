@@ -29,8 +29,8 @@ src/GamepadScript.h         the page core's gamepad helper, window.magelight.gam
 src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
 src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): what a page needs to open, the guard's floor and hysteresis, the page files' growth, the setting's clamp
 src/FocusShareCore.h        focus sharing's rules (1.9.0): which view a press moves the keyboard to, when it goes back
-src/HitTestCore.h           content hit testing's rules (1.9.1): which view under the pointer takes it, which pages are asked, the cursor's rule, the page function
-src/PageRootCore.h          page roots (1.10.0): the file system's containment test, the folders AddPageRoot takes, which root a page reads from
+src/HitTestCore.h           content hit testing's rules (1.9.2): which view under the pointer takes it, which pages are asked, the cursor's rule, the page function
+src/PageRootCore.h          page roots (1.9.2): the file system's containment test, the folders AddPageRoot takes, which root a page reads from
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -567,7 +567,7 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     reader of "the page the player types into" calls `KeyViewNow()`, never `s_uiModeView`. While the keyboard is
     shared no hotkey fires: the key may be going into another mod's field (invariant 15).
 31. **The pointer goes to the view that takes it, and a content-mode view takes it only where its page says so**
-    (1.9.1, `SetViewHitTest`, `src/HitTestCore.h`). `DrainInputQueue`'s `hitTest` reads the views containing the
+    (1.9.2, `SetViewHitTest`, `src/HitTestCore.h`). `DrainInputQueue`'s `hitTest` reads the views containing the
     point under `s_viewsMutex`, topmost first, down to the first that is not asked (a rectangle view, or a page that
     has not reached DOM ready), then asks each content-mode page outside the lock (`PageHasElementAt`: a script, so
     invariant 16 applies, and a mod the page reaches can create, destroy or reorder views meanwhile: no `s_views`

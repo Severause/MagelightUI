@@ -367,7 +367,7 @@ namespace MAGELIGHT_API {
     inline constexpr std::uint32_t kFocusShareTake = 2;   // a click on this view takes the keyboard from a view
                                                             // that holds UI mode and gives
 
-    // Modes for SetViewHitTest (1.9.1).
+    // Modes for SetViewHitTest (1.9.2).
     inline constexpr std::uint32_t kHitTestRect = 0;      // the view's whole rectangle takes the pointer (the default)
     inline constexpr std::uint32_t kHitTestContent = 1;   // only where its page has an element; elsewhere the pointer
                                                             // goes to the view below
@@ -653,7 +653,7 @@ namespace MAGELIGHT_API {
                                                             // never back; see the threading contract; 0 in VR),
                                                             // "mainMenu" (1.7.1: follows "pageThread"),
                                                             // "polledKeys" (1.8.0), "focusShare" (1.9.0),
-                                                            // "hitTest" (1.9.1), "pageRoot" (1.10.0). The
+                                                            // "hitTest" (1.9.2), "pageRoot" (1.9.2). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -997,7 +997,7 @@ namespace MAGELIGHT_API {
         // view that is gone or an inspector; InvalidArgument for another bit.
         Result (*SetViewFocusSharing)(ViewId view, std::uint32_t flags);
 
-        // ── appended in 1.9.1 — gate on hostVersionNumber >= 10901 and QueryCapability("hitTest") ──
+        // ── appended in 1.9.2 — gate on hostVersionNumber >= 10902 and QueryCapability("hitTest") ──
         // Where the pointer takes this view. kHitTestRect (the default): anywhere in its rectangle, so a fullscreen
         // view covers every view below it. kHitTestContent: only where its page has an element, so its empty parts
         // let the pointer through to the next view down (a drawer or a few panels on a fullscreen page). The host
@@ -1013,7 +1013,7 @@ namespace MAGELIGHT_API {
         // InvalidView for a view that is gone or an inspector; InvalidArgument for another mode.
         Result (*SetViewHitTest)(ViewId view, std::uint32_t mode);
 
-        // ── appended in 1.10.0 — gate on hostVersionNumber >= 11000 and QueryCapability("pageRoot") ──
+        // ── also 1.9.2 — gate on hostVersionNumber >= 10902 and QueryCapability("pageRoot") ──
         // A folder this mod's pages may read from, for pages that share files above their own folder (a page in
         // views\Hud\ that loads ../Scripts/Global.js). An absolute page outside Data\Magelight otherwise reads
         // only its own folder and what lies under it. Call it before CreateViewEx: a view whose page lies under the

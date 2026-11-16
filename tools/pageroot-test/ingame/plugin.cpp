@@ -1,4 +1,4 @@
-// MgPageRootTest: AddPageRoot (1.10.0) in game. Pages kept outside Data\Magelight, laid out the way a page set made
+// MgPageRootTest: AddPageRoot (1.9.2) in game. Pages kept outside Data\Magelight, laid out the way a page set made
 // for another UI host is (sibling page folders sharing ../Shared), are shown as three HUD boxes at the top right:
 //   Data\MgPageRootTest\views\Hud\index.html             loads ../Shared/*     (under the root: must load)
 //   Data\MgPageRootTest\views\Minigames\Lock\index.html  loads ../../Shared/*  (under the root: must load)
@@ -80,8 +80,8 @@ namespace {
 
     void OnDataLoaded()
     {
-        if (!g_mod.acquire("MgPageRootTest", "Page root test", 1, 10, 0)) {
-            SKSE::log::error("[MgPageRootTest] Magelight UI 1.10.0+ not present");
+        if (!g_mod.acquire("MgPageRootTest", "Page root test", 1, 9, 2)) {
+            SKSE::log::error("[MgPageRootTest] Magelight UI 1.9.2+ not present");
             return;
         }
         auto* api = g_mod.v4();

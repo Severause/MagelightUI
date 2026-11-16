@@ -123,7 +123,7 @@ namespace Magelight {
     // sessionName: nullptr/"" = the shared default jar, else a persistent jar
     // at cache_path/<name> (a filesystem-safe name). It and netLevel are set
     // before the render thread can see the view, so a page never loads in
-    // the wrong jar or at the wrong reach. pageRoot (UTF-8, 1.10.0): the
+    // the wrong jar or at the wrong reach. pageRoot (UTF-8, 1.9.2): the
     // folder the view reads from instead of PageRootFor's (MlView::root), the
     // mod's AddPageRoot folder that holds the page; nullptr or "" = none.
     ViewId CreateView(const char* htmlPath,
@@ -246,7 +246,7 @@ namespace Magelight {
     // 0.28.0
     void SetViewEscapeCapture(ViewId view, bool capture);   // the page owns Escape (no UI-mode exit)
     void SetViewNetworkLevel(ViewId view, NetLevel level);  // see NetLevel above
-    // 1.10.0: the file system serves `root` (a folder Api4::AddPageRoot checked) and gives its pages `level`'s CSP;
+    // 1.9.2: the file system serves `root` (a folder Api4::AddPageRoot checked) and gives its pages `level`'s CSP;
     // called again with the new level on a policy change. Never removed. Any thread.
     void ServePageRoot(const std::filesystem::path& root, NetLevel level);
     void ShowInspectorFor(ViewId page, bool show);
@@ -372,7 +372,7 @@ namespace Magelight {
     bool SetViewFocusSharing(ViewId view, std::uint32_t flags);
     // The view a click shared the keyboard with while UI mode is on; 0 while the UI-mode view has it. Any thread.
     ViewId GetSharedKeyView();
-    // 1.9.1 (invariant 31): HitTest::kRect / kContent on a view. false: the view is gone or an inspector. Any thread.
+    // 1.9.2 (invariant 31): HitTest::kRect / kContent on a view. false: the view is gone or an inspector. Any thread.
     bool SetViewHitTest(ViewId view, std::uint32_t mode);
     bool ViewOpensAtMainMenu(ViewId view);        // 1.7.1 the main menu is open and this view may show over it
     bool MainMenuPagesAvailable();                // 1.7.1 the "mainMenu" capability: the page thread is on or wanted

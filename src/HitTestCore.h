@@ -1,5 +1,5 @@
 #pragma once
-// Content hit testing (1.9.1, SetViewHitTest; CLAUDE.md invariant 31): a view in content mode takes the pointer only
+// Content hit testing (1.9.2, SetViewHitTest; CLAUDE.md invariant 31): a view in content mode takes the pointer only
 // where its page has an element, so the empty parts of a fullscreen view let it through to the view below. The page
 // answers (document.elementFromPoint, which leaves out pointer-events:none elements): pixels are on the GPU, and a
 // transparent drag handle or a dim backdrop is the page's to decide.

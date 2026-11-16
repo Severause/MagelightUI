@@ -175,7 +175,7 @@ Your FOMOD's dependency line changes from PrismaUI to Magelight; pages move from
 `Data/PrismaUI/views/...` to `Data/Magelight/<modId>/views/...` (the folder is your
 namespace — see [MANIFEST.md](MANIFEST.md)). To support both hosts from one copy of the files, leave them under
 `Data/PrismaUI/views/<yours>/`, pass Magelight absolute paths to them, and name that folder once with
-`AddPageRoot` (1.10.0; [CPP.md](CPP.md), "Pages that share files above their own folder"): without it a page there
+`AddPageRoot` (1.9.2; [CPP.md](CPP.md), "Pages that share files above their own folder"): without it a page there
 reads only its own folder, so its `../Scripts/...` and `../Styles/...` loads are refused. Keep those loads relative:
 a URL starting with `/` names a file under PrismaUI's views folder on PrismaUI, but does not resolve against the
 folder on Magelight. Declare `minHost` and the host itself renders
