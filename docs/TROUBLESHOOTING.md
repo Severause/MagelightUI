@@ -29,6 +29,12 @@ letter (`I`, `W`, `E`) and the thread id.
 - **`Ultralight runtime not found — overlay disabled this session`**: the runtime folder is
   missing or incomplete. Reinstall Magelight UI, and if another mod also ships Magelight, see
   "Two copies of Magelight" below.
+- **Pages open (the game pauses, the sound plays) but nothing shows, with an HDR back buffer** (1.9.2): Community
+  Shaders' HDR keeps the game's UI in a buffer of its own and copies its finished HDR picture over the whole back
+  buffer at Present, which erased pages drawn there. Pages drawn at Present now go into that buffer, with the game's
+  menus: `the back buffer is HDR (format 24) and the game's UI draws into a separate ... target`. The warning
+  `the back buffer is HDR ... views are drawn as SDR into it, so their colours are wrong` means another HDR mod has
+  no such buffer; send the log.
 - **No `Magelight.log` at all**: SKSE did not load the plugin. Check the requirements for your
   runtime (SKSE64 or SKSEVR, and the matching Address Library) and SKSE's own log.
 

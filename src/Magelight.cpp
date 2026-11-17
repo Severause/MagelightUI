@@ -392,6 +392,7 @@ namespace Magelight {
     static std::atomic<bool> s_untrustedChain{ false };
     static std::atomic<bool> s_deviceFromEngine{ false };   // s_device came from the engine, not the swapchain
     static std::atomic<bool> s_lateComposite{ false };       // composite inside dxgi's own Present (InstallLatePresent)
+    static bool              s_hdrUiFrame = false;           // this composite draws into the HDR UI buffer (ComposeOnce, game thread)
     static std::atomic<bool> s_deadNoticePending{ false };   // the render-death HUD notice waits for the HUD
     static std::atomic<bool> s_uiPassBroken{ false };        // the UI pass had nothing to draw on: Present draws (latched)
 
@@ -8725,7 +8726,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // The engine's framebuffer render target and its size, or null when it is missing or not on our device.
     // Engine-owned: never Released.
-    static ID3D11RenderTargetView* EngineFramebufferRtv(float& w, float& h)
+    static ID3D11RenderTargetView* EngineFramebufferRtv(float& w, float& h, DXGI_FORMAT* format = nullptr)
     {
         auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!data) return nullptr;
@@ -8745,7 +8746,63 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!td.Width || !td.Height) return nullptr;
         w = static_cast<float>(td.Width);
         h = static_cast<float>(td.Height);
+        if (format) *format = td.Format;
         return rtv;
+    }
+
+    static bool IsHdrFormat(DXGI_FORMAT f)
+    {
+        return f == DXGI_FORMAT_R10G10B10A2_UNORM || f == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    }
+
+    static bool IsSdr8Format(DXGI_FORMAT f)
+    {
+        return f == DXGI_FORMAT_R8G8B8A8_UNORM || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+               f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    }
+
+    // The game's UI buffer, when the back buffer is HDR and the engine's framebuffer view points at a separate
+    // 8-bit target: the game's menus draw there, so whatever presents takes its UI from that target. Community
+    // Shaders' HDR does this, then in its Present hook composites the buffer over the scene in PQ and copies the
+    // result over the whole back buffer, so a page drawn into the back buffer before it is erased and one drawn
+    // after it is sRGB read as PQ. Valid only before that hook runs (it clears the buffer after its Present). Null
+    // otherwise. Engine-owned: never Released. Game thread, flat only.
+    static ID3D11RenderTargetView* HdrUiBufferRtv(IDXGISwapChain* sc, float& w, float& h, DXGI_FORMAT& backFormat,
+                                                  DXGI_FORMAT& uiFormat)
+    {
+        backFormat = uiFormat = DXGI_FORMAT_UNKNOWN;
+        if (REL::Module::IsVR() || s_untrustedChain.load() || !sc) return nullptr;
+        DXGI_SWAP_CHAIN_DESC scd{};
+        if (FAILED(sc->GetDesc(&scd))) return nullptr;
+        backFormat = scd.BufferDesc.Format;
+        if (!IsHdrFormat(backFormat)) return nullptr;
+        ID3D11RenderTargetView* rtv = EngineFramebufferRtv(w, h, &uiFormat);
+        return rtv && IsSdr8Format(uiFormat) ? rtv : nullptr;
+    }
+
+    // Logs when the HDR UI buffer is first used, and when an HDR back buffer has none for a while (pages then draw
+    // as SDR into an HDR buffer, so their colours are wrong). Game thread, once per composite.
+    static void NoteHdrUiBuffer(bool found, DXGI_FORMAT backFormat, DXGI_FORMAT uiFormat, float w, float h)
+    {
+        static bool s_using = false;
+        static int  s_missing = 0, s_lines = 0;
+        if (!IsHdrFormat(backFormat)) { s_missing = 0; return; }
+        if (found) {
+            s_missing = 0;
+            if (s_using || s_lines >= 10) return;
+            s_using = true;
+            ++s_lines;
+            SKSE::log::info("Magelight: the back buffer is HDR (format {}) and the game's UI draws into a separate "
+                            "{}x{} target (format {}, e.g. Community Shaders' HDR) - views drawn at Present go into it",
+                static_cast<int>(backFormat), w, h, static_cast<int>(uiFormat));
+            return;
+        }
+        if (++s_missing != 120 || s_lines >= 10) return;
+        ++s_lines;
+        s_using = false;
+        SKSE::log::warn("Magelight: the back buffer is HDR (format {}) and the game's framebuffer is not a separate "
+                        "8-bit UI target (format {}) - views are drawn as SDR into it, so their colours are wrong",
+            static_cast<int>(backFormat), static_cast<int>(uiFormat));
     }
 
     // Whether GetBuffer added a reference to `first`: a second GetBuffer that raises the count by one did.
@@ -8801,6 +8858,15 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (ID3D11RenderTargetView* engineRtv = EngineFramebufferRtv(tw, th)) {
                 const float sx = tw / bw, sy = th / bh;
                 DrawQuadTo(engineRtv, tw, th, srv, u0, v0, u1, v1, dx * sx, dy * sy, dw * sx, dh * sy, cutUV);
+                return;
+            }
+        }
+        if (s_hdrUiFrame) {
+            float tw = 0.0f, th = 0.0f;
+            DXGI_FORMAT backFormat, uiFormat;
+            if (ID3D11RenderTargetView* uiRtv = HdrUiBufferRtv(sc, tw, th, backFormat, uiFormat)) {
+                const float sx = tw / bw, sy = th / bh;
+                DrawQuadTo(uiRtv, tw, th, srv, u0, v0, u1, v1, dx * sx, dy * sy, dw * sx, dh * sy, cutUV);
                 return;
             }
         }
@@ -10990,10 +11056,22 @@ float4 ps_straight(VSOut i) : SV_Target {
     // game's object, which may be a wrapper, so it is compared, never asked.
     static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour, bool inDetour)
     {
-        if (t_composited || fromLateDetour != s_lateComposite.load()) return;
+        if (t_composited) return;
+        // The HDR UI buffer is read from the vtable hook only: the late detour runs after the hook that composites
+        // and clears it. Found there, it takes the frame from late mode too, since late would draw after it.
+        bool hdrUi = false;
+        if (!inDetour && sc == s_gameSwapChain && GetCurrentThreadId() == s_mainThreadId) {
+            float w = 0.0f, h = 0.0f;
+            DXGI_FORMAT backFormat, uiFormat;
+            hdrUi = HdrUiBufferRtv(sc, w, h, backFormat, uiFormat) != nullptr;
+            NoteHdrUiBuffer(hdrUi, backFormat, uiFormat, w, h);
+        }
+        if (fromLateDetour != s_lateComposite.load() && !hdrUi) return;
         if (inDetour ? !OnOurDevice(sc) : sc != s_gameSwapChain) return;
         t_composited = true;
+        s_hdrUiFrame = hdrUi;
         if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
+        s_hdrUiFrame = false;
     }
 
     static void AfterCompose()

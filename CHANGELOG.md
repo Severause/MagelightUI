@@ -87,6 +87,12 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   the keys from every game menu under it, and for a second after the last page hid: with another mod's page up, the
   Tween, Stats and Level Up menus could not be clicked, moved through or closed. It now passes them on. Pages are
   unchanged: they take the mouse and keys only in UI mode, as before. Flat only; VR never opens that menu.
+- **Pages show with Community Shaders' HDR on.** Its HDR keeps the game's UI in a buffer of its own and copies
+  its finished picture over the whole screen at Present, so pages drawn there were erased: they opened (the game
+  paused) but nothing showed. Where Magelight draws at Present (a plain swapchain, no upscaler or wrapper, and
+  click-through HUD pages everywhere) it now draws into that buffer, so pages show with the game's menus, at the
+  UI brightness Community Shaders sets. With the UI pass (Streamline or another wrapper) pages already showed, and
+  still do the same way. Flat only. Not yet checked in game on a plain swapchain.
 - Nothing on its own. A mod whose pages live outside `Data\Magelight` (a mod that also supports another UI host
   from the same files) can now show them with their scripts and styles, where before the page came up bare.
 
