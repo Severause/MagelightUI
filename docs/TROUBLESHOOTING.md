@@ -33,7 +33,7 @@ letter (`I`, `W`, `E`) and the thread id.
   Shaders' HDR keeps the game's UI in a buffer of its own and copies its finished HDR picture over the whole back
   buffer at Present, which erased pages drawn there. Pages drawn at Present now go into that buffer, with the game's
   menus: `the back buffer is HDR (format 24) and the game's UI draws into a separate ... target`. The warning
-  `the back buffer is HDR ... views are drawn as SDR into it, so their colours are wrong` means another HDR mod has
+  `the back buffer is 10-bit or float ... views draw into the back buffer` with an HDR mod on means it has
   no such buffer; send the log.
 - **No `Magelight.log` at all**: SKSE did not load the plugin. Check the requirements for your
   runtime (SKSE64 or SKSEVR, and the matching Address Library) and SKSE's own log.
