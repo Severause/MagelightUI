@@ -87,6 +87,9 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   the keys from every game menu under it, and for a second after the last page hid: with another mod's page up, the
   Tween, Stats and Level Up menus could not be clicked, moved through or closed. It now passes them on. Pages are
   unchanged: they take the mouse and keys only in UI mode, as before. Flat only; VR never opens that menu.
+- **A control another mod turned off stays off after a page closes.** A page in UI mode turns off moving, looking,
+  activating, the menus, the POV switch and the zoom, and its close turned all of them back on, even one another mod
+  had already turned off before the page opened. It now turns back on only the ones it turned off.
 - Nothing on its own. A mod whose pages live outside `Data\Magelight` (a mod that also supports another UI host
   from the same files) can now show them with their scripts and styles, where before the page came up bare.
 

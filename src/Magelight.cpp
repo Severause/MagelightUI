@@ -4026,22 +4026,25 @@ namespace Magelight {
     // that can never bake into a save; Console stays reachable as an escape hatch. Fighting is suspended only
     // without the focus menu: the engine sheathes drawn weapons and puts readied spells away the moment
     // fighting goes off, and the focus menu's menu context already keeps attack and block from the game. The
-    // give-back restores exactly the set the suspend took (s_suspendedControls).
+    // suspend takes only the controls that are on, and the give-back turns on only what it took
+    // (s_suspendedControls), so a control another mod switched off before UI mode stays off after it. An entry
+    // while a controls hold still has them adds to the set rather than replacing it: they are off by then.
     static std::atomic<std::underlying_type_t<RE::ControlMap::UEFlag>> s_suspendedControls{ 0 };
     static void SetGameControlsSuspended(RE::ControlMap* cm, bool suspend)
     {
         using UEFlag = RE::ControlMap::UEFlag;
-        // Scoped enum without a free operator| — combine the bits directly.
-        auto bits = std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
-                    std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
-                    std::to_underlying(UEFlag::kPOVSwitch) | std::to_underlying(UEFlag::kWheelZoom);
         if (suspend) {
+            // Scoped enum without a free operator| — combine the bits directly.
+            auto bits = std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
+                        std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
+                        std::to_underlying(UEFlag::kPOVSwitch) | std::to_underlying(UEFlag::kWheelZoom);
             if (!s_focusMenuRegistered) bits |= std::to_underlying(UEFlag::kFighting);
-            s_suspendedControls.store(bits);
+            const auto take = bits & cm->GetRuntimeData().enabledControls.underlying();
+            s_suspendedControls.fetch_or(take);
+            if (take) cm->ToggleControls(static_cast<UEFlag>(take), false, false);
         } else if (const auto taken = s_suspendedControls.exchange(0)) {
-            bits = taken;
+            cm->ToggleControls(static_cast<UEFlag>(taken), true, false);
         }
-        cm->ToggleControls(static_cast<UEFlag>(bits), !suspend, false);
     }
 
     // VR: UI mode closes on a controller button's PRESS (a chord, the B/Y Cancel), and the game acts on that
