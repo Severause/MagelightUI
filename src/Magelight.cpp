@@ -10592,11 +10592,50 @@ float4 ps_straight(VSOut i) : SV_Target {
         return out;
     }
 
+    // Game thread. True when the immediate context does not keep a blend state it is given: another mod's
+    // OMSetBlendState hook binds one of its own (Community Shaders with HDR or D3D12 frame generation rewrites the alpha
+    // factors of every blend). Page frames replayed on that context then get the wrong alpha, and their dark
+    // translucent parts show black; a deferred context's calls do not pass the hook. The context's own state is put back.
+    static bool ImmediateBlendRewritten()
+    {
+        if (!s_device || !s_context) return false;
+        D3D11_BLEND_DESC desc{};
+        auto& rt = desc.RenderTarget[0];
+        rt.BlendEnable = TRUE;
+        rt.SrcBlend = rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+        rt.DestBlend = rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+        rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        ID3D11BlendState* probe = nullptr;
+        if (FAILED(s_device->CreateBlendState(&desc, &probe)) || !probe) return false;
+        ID3D11BlendState* saved = nullptr;
+        FLOAT factor[4]{};
+        UINT mask = 0;
+        s_context->OMGetBlendState(&saved, factor, &mask);
+        s_context->OMSetBlendState(probe, factor, mask);
+        ID3D11BlendState* bound = nullptr;
+        FLOAT boundFactor[4]{};
+        UINT boundMask = 0;
+        s_context->OMGetBlendState(&bound, boundFactor, &boundMask);
+        s_context->OMSetBlendState(saved, factor, mask);
+        const bool rewritten = bound != probe;
+        if (bound) bound->Release();
+        if (saved) saved->Release();
+        probe->Release();
+        return rewritten;
+    }
+
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
     // so, its async driver or deferred context, its handoff and the thread. False: the mode is Off (the log line says
     // why) and render init runs again next frame, as without the setting.
     static bool StartPageThread()
     {
+        // Read only until the page thread starts: a hook switched on later (Community Shaders' HDR toggled in game) is not seen.
+        const bool blendRewritten = ImmediateBlendRewritten();
+        static bool s_blendNoted = false;   // a refusal runs render init again next frame
+        if (blendRewritten && !std::exchange(s_blendNoted, true))
+            SKSE::log::info("Magelight: the game's context replaces the blend states it is given (another mod hooks "
+                            "OMSetBlendState, e.g. Community Shaders' HDR or frame generation)");
         // pageGpu async: the driver is made here, on the game thread that replays on it. The page thread then makes no
         // device or context call, so it needs no deferred context, and of the device refusals below only the
         // single-threaded one applies (that thread still takes and drops references on a mod's image SRVs). When async
@@ -10608,6 +10647,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 else SKSE::log::info("Magelight: pageGpu async needs {} - using a deferred context", why);
             };
             if (s_forceCpu.load()) stepAside("the GPU driver (forceCpu is set)");
+            else if (blendRewritten) stepAside("a game context that keeps its blend states (dark parts of pages would show black)");
             else if (!s_gpuCreate || !s_gpuCreateAsync || !s_gpuAsyncDrain || !s_gpuAsyncState || !s_context)
                 stepAside("MagelightGPU.dll");
             else if ((s_gpu = s_gpuCreateAsync(s_device, s_context, s_msaa, &GpuLogBridge)) == nullptr)
@@ -10647,7 +10687,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_gpu = nullptr;
             }
             s_pageThreadMode.store(PageThread::Mode::Off);
-            SKSE::log::warn("Magelight: the page thread is off - {}; pages run in the game's frame", refused);
+            SKSE::log::warn("Magelight: the page thread is off - {}; pages run in the game's frame{}", refused,
+                            blendRewritten ? ", where the blend hook above can show dark parts of pages black" : "");
             return false;
         }
         s_ulThreadId = GetThreadId(thread);

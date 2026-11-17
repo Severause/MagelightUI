@@ -92,7 +92,12 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   paused) but nothing showed. Where Magelight draws at Present (a plain swapchain, no upscaler or wrapper, and
   click-through HUD pages everywhere) it now draws into that buffer, so pages show with the game's menus, at the
   UI brightness Community Shaders sets. With the UI pass (Streamline or another wrapper) pages already showed, and
-  still do the same way. Flat only. Not yet checked in game on a plain swapchain.
+  still do the same way. Flat only.
+- **No black page parts with Community Shaders' HDR or frame generation.** Both make the game's graphics context
+  swap every blend state it is given for one of their own, so pages replayed there (`pageGpu` `"async"`, the
+  default) drew some dark, see-through rows and panels solid black. Magelight now checks this when the page thread
+  starts and uses a deferred context instead, which the swap does not reach (the log says `the game's context
+  replaces the blend states it is given`). Turning HDR on in game needs a restart for this.
 - Nothing on its own. A mod whose pages live outside `Data\Magelight` (a mod that also supports another UI host
   from the same files) can now show them with their scripts and styles, where before the page came up bare.
 
