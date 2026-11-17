@@ -10606,8 +10606,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         rt.DestBlend = rt.DestBlendAlpha = D3D11_BLEND_ZERO;
         rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
         rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        ID3D11BlendState* probe = nullptr;
-        if (FAILED(s_device->CreateBlendState(&desc, &probe)) || !probe) return false;
+        // Never released: a hook may key a cache by the state's address without holding it (older Community Shaders
+        // builds do), and a later state made at a freed probe's address would then be swapped for the probe's patch.
+        static ID3D11BlendState* probe = nullptr;
+        if (!probe && (FAILED(s_device->CreateBlendState(&desc, &probe)) || !probe)) return false;
         ID3D11BlendState* saved = nullptr;
         FLOAT factor[4]{};
         UINT mask = 0;
@@ -10621,7 +10623,6 @@ float4 ps_straight(VSOut i) : SV_Target {
         const bool rewritten = bound != probe;
         if (bound) bound->Release();
         if (saved) saved->Release();
-        probe->Release();
         return rewritten;
     }
 
@@ -10630,10 +10631,10 @@ float4 ps_straight(VSOut i) : SV_Target {
     // why) and render init runs again next frame, as without the setting.
     static bool StartPageThread()
     {
-        // Read only until the page thread starts: a hook switched on later (Community Shaders' HDR toggled in game) is not seen.
+        // Read once a session (the mode leaves Wanted here): a hook switched on later (Community Shaders' HDR toggled in
+        // game) is not seen.
         const bool blendRewritten = ImmediateBlendRewritten();
-        static bool s_blendNoted = false;   // a refusal runs render init again next frame
-        if (blendRewritten && !std::exchange(s_blendNoted, true))
+        if (blendRewritten)
             SKSE::log::info("Magelight: the game's context replaces the blend states it is given (another mod hooks "
                             "OMSetBlendState, e.g. Community Shaders' HDR or frame generation)");
         // pageGpu async: the driver is made here, on the game thread that replays on it. The page thread then makes no
