@@ -146,6 +146,8 @@ the controller buttons are released`, then `controls restored (...)`, 1.5 s at m
 closing press never reaches the game. Leaving UI mode does not hide
 a page by itself (a mod may want it visible, HUD-style); a hotkey close does hide. If controls
 stay suspended after a crash-to-menu, load again: the host resets UI mode on every load.
+Leaving UI mode turns back on only the controls entering it turned off: a control another mod had
+already turned off stays off until that mod turns it back on.
 
 ## Two mods fight over the screen
 
