@@ -155,7 +155,8 @@ Seven behavioral differences to design around:
    `resize` and `scroll` events, `matchMedia` `change` events and `ResizeObserver` /
    `IntersectionObserver` callbacks wait for the next show or prepaint and arrive once (a panel
    that relayouts after a debounced `resize` opens at its old layout until the timer fires: do
-   that work in the handler). Timers, messages, `InteropCall` and `InvokeJS` keep running.
+   that work in the handler). Timers, messages, `InteropCall` and `InvokeJS` keep running (a
+   `setInterval` about once a second from 1.9.3, unless the manifest says `"hiddenTimers": "full"`).
    `capabilities.pageVisibility` in the page, or `QueryCapability("pagevisibility")` in C++, says
    the host does this ([CPP.md](CPP.md), "Hidden pages").
 7. **Key events carry `code` and the layout's `key`** (1.5.0, Ultralight 2.0). On PrismaUI, and on

@@ -279,7 +279,7 @@ namespace Magelight::Manifest {
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
                                          "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad", "mainMenu",
-                                         "polledKeys", "shareFocus", "acceptFocus", "hitTest" }, vctx);
+                                         "polledKeys", "shareFocus", "acceptFocus", "hitTest", "hiddenTimers" }, vctx);
                     const std::string path = MJStr(v, "path", "", vctx);
                     if (!SafeRelative(path)) {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
@@ -318,6 +318,13 @@ namespace Magelight::Manifest {
                     // 0.31.0: manifest views exist before the world loads, so this always lands before the first load.
                     if (MJBool(v, "loadOnShow", false, vctx)) Api4::SetViewLoadOnShow(id, true);
                     if (MJBool(v, "prepaint", false, vctx)) Api4::SetViewPrepaint(id, true);   // 0.31.11
+                    // 1.9.3: "full" keeps this view's repeating timers at their rate while hidden.
+                    if (const std::string timers = MJStr(v, "hiddenTimers", "", vctx); timers == "full") {
+                        Magelight::SetViewHiddenTimers(id, true);
+                    } else if (!timers.empty() && timers != "throttled") {
+                        SKSE::log::warn("Magelight[manifest]: {}\"hiddenTimers\" is \"full\" or \"throttled\", not \"{}\"",
+                                        vctx, timers);
+                    }
                     if (MJBool(v, "mainMenu", false, vctx)) Api4::SetViewMainMenu(id, true);   // 1.7.1
                     // 1.9.0: the keyboard shared on a click (SetViewFocusSharing).
                     const std::uint32_t share = (MJBool(v, "shareFocus", false, vctx) ? MAGELIGHT_API::kFocusShareGive : 0u) |

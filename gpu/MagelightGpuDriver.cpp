@@ -1758,6 +1758,9 @@ namespace mggpu {
             return stats_;
         }
 
+        // The recorder's thread (Ultralight's): MgGpu_AsyncPurge.
+        void Purge() { recorder_->PurgeMemory(); }
+
         // Any thread (the thread that owns Ultralight registers a mod's images): the id now, the entry once every
         // frame queued before this call has run, so no frame meets an SRV that came after it.
         uint32_t RegisterExternal(ID3D11ShaderResourceView* srv)
@@ -2109,6 +2112,14 @@ extern "C" {
         const std::uint32_t n = (std::min)(out->size, static_cast<std::uint32_t>(sizeof(MgGpuAsyncState)));
         s.size = n;
         std::memcpy(out, &s, n);
+        return 1;
+    }
+
+    int MgGpu_AsyncPurge(void* handle)
+    {
+        auto* h = static_cast<MgGpuHandle*>(handle);
+        if (!h || !h->async) return 0;
+        h->async->Purge();
         return 1;
     }
 
