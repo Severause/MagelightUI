@@ -50,7 +50,8 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
   shown (or prepainted), before it is painted, so a page that fits its layout to the window should do it
   in the handler rather than after a timer. What a script reads itself (`innerWidth`, `scrollY`, sizes, a
   new `matchMedia(q)`) is current while hidden; a kept `MediaQueryList`'s `matches` changes only with its
-  `change` event. Timers, `MessageChannel`, promises and `magelight.on` messages keep running,
+  `change` event. Timers, `MessageChannel`, promises and `magelight.on` messages keep running (from 1.9.3 a
+  `setInterval` about once a second, unless the view's manifest says `"hiddenTimers": "full"`),
   and what the page changed while hidden is on screen in its first frame shown. A prepainted view's page is
   painted as shown for one frame per prepaint paint, usually twice a load from 1.5.0 (after it loads and when
   it settles, about 120-150 ms apart): its `requestAnimationFrame` callbacks and the held callbacks above run

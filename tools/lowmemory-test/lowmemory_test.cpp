@@ -242,6 +242,40 @@ int main()
               "events: the maximum wins over high");
     }
 
+    // The video-memory guard (1.9.3).
+    {
+        LM::VideoGuard v;
+        const std::uint64_t budget = MB(8000);
+        Check(v.Update(MB(7999), budget, 1000) == LM::Change::None, "video: under the budget stays down");
+        Check(v.Update(MB(100), 0, 1000) == LM::Change::None, "video: an unread budget changes nothing");
+        Check(v.Update(MB(8000), budget, 2000) == LM::Change::Raised && v.up, "video: at the budget it rises");
+        Check(v.Update(MB(1000), budget, 2000 + LM::kMinUpMs - 1) == LM::Change::None, "video: up for kMinUpMs first");
+        Check(v.Update(MB(6900), budget, 2000 + LM::kMinUpMs) == LM::Change::None, "video: above 85% it stays up");
+        Check(v.Update(MB(6800), budget, 2000 + LM::kMinUpMs) == LM::Change::Lifted && !v.up, "video: at 85% it lifts");
+        const std::uint64_t lift = 2000 + LM::kMinUpMs;
+        Check(!v.ReloadDue(lift + LM::kReloadAfterLiftMs - 1) && v.ReloadDue(lift + LM::kReloadAfterLiftMs),
+              "video: released views reload a minute after the lift");
+        v.NoteReload(lift + LM::kReloadAfterLiftMs);
+        Check(v.Update(MB(8100), budget, lift + LM::kReloadAfterLiftMs + 1000) == LM::Change::Raised &&
+                  v.ReloadDelayMs() == LM::kReloadAfterLiftMs * 2,
+              "video: rising again soon after a reload doubles the wait");
+        Check(v.Update(0, 0, lift + LM::kReloadAfterLiftMs + 2000) == LM::Change::Lifted && !v.up,
+              "video: a reading lost while up lifts the guard");
+
+        LM::Guard c;
+        LM::VideoGuard w;
+        Check(!LM::ReleasedMayReload(c, w, 1000000), "reload: neither guard ever raised, nothing to reload");
+        w.Update(MB(9000), budget, 1000);
+        Check(!LM::ReleasedMayReload(c, w, 1000000), "reload: a guard that is up holds them");
+        w.Update(MB(100), budget, 1000 + LM::kMinUpMs);
+        Check(!LM::ReleasedMayReload(c, w, 1000 + LM::kMinUpMs + 1) &&
+                  LM::ReleasedMayReload(c, w, 1000 + LM::kMinUpMs + LM::kReloadAfterLiftMs),
+              "reload: the video guard alone, once due");
+        c.Update(MB(10), 1000 + LM::kMinUpMs + LM::kReloadAfterLiftMs, MB(320));
+        Check(!LM::ReleasedMayReload(c, w, 1000 + LM::kMinUpMs + LM::kReloadAfterLiftMs + 1),
+              "reload: the commit guard up holds them though the video guard is due");
+    }
+
     std::printf("%s (%d failed)\n", g_fails ? "FAILED" : "ALL PASSED", g_fails);
     return g_fails ? 1 : 0;
 }

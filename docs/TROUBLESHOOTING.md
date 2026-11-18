@@ -251,8 +251,9 @@ rate. `Magelight.log` states the cap at startup (`pages animate and repaint at m
 `animationTimerDelay` no longer changes anything.
 
 Since 1.5.0 a hidden page runs no `requestAnimationFrame` or CSS animation and is never painted, so
-a closed panel's spinner costs nothing; its timers still run at full rate, so a closed page that polls
-with `setInterval` costs script time until it hibernates. A page that finishes closing on
+a closed panel's spinner costs nothing; its timers still run, so a closed page that polls with
+`setInterval` costs script time until it hibernates (from 1.9.3 about once a second, unless its view's manifest says
+`"hiddenTimers": "full"` or `Magelight.json` says `"throttleHiddenTimers": false`). A page that finishes closing on
 `transitionend` or `animationend` after its view is hidden does that at its next open instead. Its
 `resize` and `scroll` events, `matchMedia` `change` events and `ResizeObserver` /
 `IntersectionObserver` callbacks wait for the next open too and arrive once in its first frame, so a
@@ -316,10 +317,13 @@ its tiles). `game process private` is the whole game, not Magelight. A `?` is a 
 Ultralight version no longer reports. A view that hibernates (`SetViewHibernate`) gives its script
 heap, caches and process memory back within a few seconds, and its share of Ultralight's video memory
 (`page tiles`, `GPU textures`, `render targets`) within about 20 s, whether or not another view is
-shown: a memory line taken in between still counts that video memory, which is not a leak. Magelight never forces a
-collection, because on Ultralight 2.0 that throws away the compiled script of every page. A line that ends in
-`; low-memory guard up` was taken while Magelight was holding pages back for lack of memory (see "Pages stop opening:
-the game is low on memory").
+shown: a memory line taken in between still counts that video memory, which is not a leak. Magelight forces a
+collection (`PurgeMemory`) only when a memory guard comes up, at most every 5 minutes, because on Ultralight 2.0 that
+throws away the compiled script of every page. From 1.9.3 the line also gives `video memory X of Y GB budget`: what
+the whole game uses of the video memory Windows gives it. A line that ends in `; low-memory guard up` was taken while
+Magelight was holding pages back for lack of memory (see "Pages stop opening: the game is low on memory"), and one
+that ends in `; video-memory guard up` while the game was over its video-memory budget, when hidden pages are
+released the same way.
 
 ## A page's console lines are missing from the log
 
@@ -470,6 +474,9 @@ it read, or says that defaults are in effect.
 | `freezeWorldSkipCapture` | `true` | In UI-pass composite (`composite` `ui`, or `auto` behind an upscaler or a swapchain wrapper), keeps pages out of the frame the game freezes as the background. `false` if a page flickers when the freeze starts. No effect with composite `present` or `engine`, or with `freezeWorld` `false` |
 | `msaa` | `4` | 0.31.0: MSAA samples for the page targets Ultralight asks to antialias on the GPU path. `1` turns it off, `2`, `4` or `8`; a count the graphics card cannot do steps down, any other number rounds down to one of these. On Ultralight 2.0 (1.5.0) pages draw their shapes analytically and no page target measured has asked for it, so it costs nothing unless one does; the memory line says (see "Memory"). A target that takes it holds that many more copies of itself in video memory (about 15 MB each at 2560x1440) |
 | `memoryLogMinutes` | `10` | 1.5.0: minutes between the periodic memory lines (0-1440; `0` = none). The lines after UI mode and on request stay. See "Memory" |
+| `videoMemoryGuard` | `true` | 1.9.3: while the game uses all the video memory Windows gives it (its DXGI budget), hidden pages are released and nothing loads in the background, as with low memory; they load again once it is under 85%. Never refuses a page. See "Memory" |
+| `rendererThreads` | `4` | 1.9.3: Ultralight's painting threads (1-8). Ultralight's own default is up to 8 |
+| `throttleHiddenTimers` | `true` | 1.9.3: a hidden page's `setInterval` runs about once a second; `false` keeps every page's rate (a view's manifest `"hiddenTimers": "full"` keeps its own) |
 | `lowMemoryFloorMB` | `320` | 1.8.0. From 1.8.1: the free commit a page on a 1920x1080 screen needs before it loads (in 1.8.0 the default was 768 and no page opened below it). A page already loaded needs two fifths of it, a larger screen more; below what the largest page needs, hidden pages are released (0-16384; `0` = off). See "Pages stop opening: the game is low on memory" |
 | `ulFiberMB` | `8` | 1.3.0: the stack pages run on, in MB (8-64; since 1.5.0 a smaller number is raised to 8, with a line in the log, because on Ultralight 2.0 a page's first uncaught error overflows a page stack under about 6 MB): a fiber on the game's main thread, so a page that recurses or nests deeply, or leaves an error uncaught, cannot run out the game's own stack. `0` runs pages on the game's stack, as Magelight 1.2 did; since 1.5.0 the engine's stack reserve is then set past the main thread's stack guarantee. See "A page error ends the UI or the game". With `pageThread` it sizes the page thread's stack instead (`0` = 8) |
 | `keyFallback` | `true` | 1.7.0, flat only: while UI mode is on the game's keyboard is muted and pages get keys from the window. If a key reaches DirectInput and no key press has reached the window this session, the key is passed to the page anyway (`key scan 0x.. reached DirectInput but not the window - passed on`), without auto-repeat. Set it to `false` if a page gets a key twice, and report it with the log |

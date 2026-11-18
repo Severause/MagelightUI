@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.9.3 | 10903 | Manifest `"hiddenTimers": "full"`: a view's repeating timers keep their rate while it is hidden (hidden pages' timers are throttled by default from 1.9.3) |
 | 1.9.2 | 10902 | `AddPageRoot(mod, folder)`: a folder inside the game's Data folder that the mod's pages read from, for pages kept outside `Data\Magelight` that share files above their own folder (a page set laid out for another UI host); `QueryCapability("pageRoot")` |
 | 1.9.2 | 10902 | Content hit testing: a view takes the pointer only where its page has an element, so the empty parts of a fullscreen view let it through to the view below: `SetViewHitTest` with `kHitTestRect` / `kHitTestContent`, manifest `"hitTest"`, the page's `'__hittest'` message, `QueryCapability("hitTest")` |
 | 1.9.0 | 10900 | The keyboard shared on a click while one view holds UI mode: `SetViewFocusSharing` with `kFocusShareGive` / `kFocusShareTake`, the `KeyFocusGained` / `KeyFocusLost` events, manifest `"shareFocus"` / `"acceptFocus"`, `QueryCapability("focusShare")` |
@@ -67,6 +68,38 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.9.3 - Unreleased
+
+### What players notice
+
+- **Less video memory and RAM held for pages nobody is looking at.** Magelight now reads how much video memory
+  Windows gives the game (its DXGI budget). While the game is over that budget, Windows starts moving its textures
+  out to system RAM and the game stutters; Magelight then releases its hidden pages the way it already did when
+  Windows ran short of RAM, and loads them again, hidden, about a minute after the game is back under 85% of the
+  budget (longer each time a reload brought it straight back, and only once the low-memory guard allows it too).
+  A page a mod is showing, or about to show, is never released for this and never refused. `Magelight.json`
+  `"videoMemoryGuard": false` turns it off.
+- **Idle memory given back.** When either guard rises, Ultralight is asked to free its caches
+  (`Renderer::PurgeMemory`, at most every 5 minutes), and with nothing shown for 30 s the page thread's recorded-frame pool and upload buffers
+  are handed back (`pageGpu` async). The memory line in `Magelight.log` now also shows the video memory against its
+  budget, and says which guard is up.
+- **Painting uses 4 threads instead of up to 8** (`Magelight.json` `"rendererThreads"`, 1 to 8): Ultralight's own
+  default takes up to 8, which competes with the game's threads for no gain on pages this small.
+- **Hidden pages' timers slow down.** A hidden page's repeating timers (`setInterval`) run throttled, so hidden
+  pages cost less CPU (`Magelight.json` `"throttleHiddenTimers": false` restores the full rate for every view).
+
+### For mod authors
+
+- **Manifest `"hiddenTimers": "full"`** on a view keeps its timers at their rate while hidden, for a page that
+  must poll in the background (`"throttled"`, the default, is the other value). It is read when the view's page is
+  created. `requestAnimationFrame` and CSS animations already stop while hidden (1.5.0), throttled or not. Views
+  made with `CreateView` have no switch of their own yet; the player's `throttleHiddenTimers: false` covers them.
+- **A hidden view can be released for video memory** (`videoMemoryGuard`), as for low memory: one you never set to
+  hibernate comes back with `ViewReloaded`, so send its state again.
+- **`PurgeMemory` on a guard rise drops compiled scripts** (Ultralight Free): a live page keeps working, and its next
+  script runs a little slower while it compiles again. Nothing calls it otherwise.
+- `MagelightGPU.dll` contract 5: `MgGpu_AsyncPurge(handle)`, called on the recorder's thread.
 
 ## 1.9.2 - Unreleased
 
