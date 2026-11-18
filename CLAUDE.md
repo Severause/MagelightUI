@@ -142,7 +142,9 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    `src/PageRootCore.h`), and the Content-Security-Policy injected into
    every page. `resources/` must resolve.
 6. **Mouse rides the SKSE input sink + MenuCursor**; the window never gets WM mouse messages.
-   `ToggleControls(..., storeState=false)`; `ForceExitUIMode` on every load boundary. The Windows cursor is
+   `ToggleControls(..., storeState=false)`, turning off only the controls that are on and giving back only
+   those (`s_suspendedControls`), so a control another mod turned off stays off; `ForceExitUIMode` on every
+   load boundary. The Windows cursor is
    not what a page follows, so while a page holds the mouse it is clipped to the game window (`ConfineCursor`,
    flat only) and let go on exit and on focus loss, or a freed one clicks on another monitor too.
 7. **Own engine menu** (`MagelightFocus`, kUsesCursor) on UI-mode entry — the engine drives
