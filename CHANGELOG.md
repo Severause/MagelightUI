@@ -71,6 +71,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ## 1.9.3 - Unreleased
 
+1.9.2 was never released: its changes ship here.
+
 ### What players notice
 
 - **Less video memory and RAM held for pages nobody is looking at.** Magelight now reads how much video memory
@@ -88,6 +90,17 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   default takes up to 8, which competes with the game's threads for no gain on pages this small.
 - **Hidden pages' timers slow down.** A hidden page's repeating timers (`setInterval`) run throttled, so hidden
   pages cost less CPU (`Magelight.json` `"throttleHiddenTimers": false` restores the full rate for every view).
+- **Pages show with Community Shaders' HDR on.** Its HDR keeps the game's UI in a buffer of its own and copies
+  its finished picture over the whole screen at Present, so pages drawn there were erased: they opened (the game
+  paused) but nothing showed. Where Magelight draws at Present (a plain swapchain, no upscaler or wrapper, and
+  click-through HUD pages everywhere) it now draws into that buffer, so pages show with the game's menus, at the
+  UI brightness Community Shaders sets. With the UI pass (Streamline or another wrapper) pages already showed, and
+  still do the same way. Flat only.
+- **No black page parts with Community Shaders' HDR or frame generation.** Both make the game's graphics context
+  swap every blend state it is given for one of their own, so pages replayed there (`pageGpu` `"async"`, the
+  default) drew some dark, see-through rows and panels solid black. Magelight now checks this when the page thread
+  starts and uses a deferred context instead, which the swap does not reach (the log says `the game's context
+  replaces the blend states it is given`). Turning HDR on in game needs a restart for this.
 
 ### For mod authors
 
@@ -120,17 +133,6 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   the keys from every game menu under it, and for a second after the last page hid: with another mod's page up, the
   Tween, Stats and Level Up menus could not be clicked, moved through or closed. It now passes them on. Pages are
   unchanged: they take the mouse and keys only in UI mode, as before. Flat only; VR never opens that menu.
-- **Pages show with Community Shaders' HDR on.** Its HDR keeps the game's UI in a buffer of its own and copies
-  its finished picture over the whole screen at Present, so pages drawn there were erased: they opened (the game
-  paused) but nothing showed. Where Magelight draws at Present (a plain swapchain, no upscaler or wrapper, and
-  click-through HUD pages everywhere) it now draws into that buffer, so pages show with the game's menus, at the
-  UI brightness Community Shaders sets. With the UI pass (Streamline or another wrapper) pages already showed, and
-  still do the same way. Flat only.
-- **No black page parts with Community Shaders' HDR or frame generation.** Both make the game's graphics context
-  swap every blend state it is given for one of their own, so pages replayed there (`pageGpu` `"async"`, the
-  default) drew some dark, see-through rows and panels solid black. Magelight now checks this when the page thread
-  starts and uses a deferred context instead, which the swap does not reach (the log says `the game's context
-  replaces the blend states it is given`). Turning HDR on in game needs a restart for this.
 - Nothing on its own. A mod whose pages live outside `Data\Magelight` (a mod that also supports another UI host
   from the same files) can now show them with their scripts and styles, where before the page came up bare.
 
