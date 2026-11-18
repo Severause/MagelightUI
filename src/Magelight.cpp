@@ -411,6 +411,9 @@ namespace Magelight {
     static std::atomic<bool> s_untrustedChain{ false };
     static std::atomic<bool> s_deviceFromEngine{ false };   // s_device came from the engine, not the swapchain
     static std::atomic<bool> s_lateComposite{ false };       // composite inside dxgi's own Present (InstallLatePresent)
+    // The HDR UI buffer this composite draws into (HdrUiBufferRtv), or null; set by ComposeOnce for its frame.
+    static thread_local ID3D11RenderTargetView* t_hdrUiRtv = nullptr;
+    static thread_local float                   t_hdrUiW = 0.0f, t_hdrUiH = 0.0f;
     static std::atomic<bool> s_deadNoticePending{ false };   // the render-death HUD notice waits for the HUD
     static std::atomic<bool> s_uiPassBroken{ false };        // the UI pass had nothing to draw on: Present draws (latched)
 
@@ -8767,7 +8770,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // The engine's framebuffer render target and its size, or null when it is missing or not on our device.
     // Engine-owned: never Released.
-    static ID3D11RenderTargetView* EngineFramebufferRtv(float& w, float& h)
+    static ID3D11RenderTargetView* EngineFramebufferRtv(float& w, float& h, DXGI_FORMAT* format = nullptr)
     {
         auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!data) return nullptr;
@@ -8787,7 +8790,67 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!td.Width || !td.Height) return nullptr;
         w = static_cast<float>(td.Width);
         h = static_cast<float>(td.Height);
+        if (format) *format = td.Format;
         return rtv;
+    }
+
+    static bool IsHdrFormat(DXGI_FORMAT f)
+    {
+        return f == DXGI_FORMAT_R10G10B10A2_UNORM || f == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    }
+
+    static bool IsSdr8Format(DXGI_FORMAT f)
+    {
+        return f == DXGI_FORMAT_R8G8B8A8_UNORM || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+               f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    }
+
+    // The game's UI buffer, when the back buffer is HDR and the engine's framebuffer view points at a separate
+    // 8-bit target: the game's menus draw there, so whatever presents takes its UI from that target. Community
+    // Shaders' HDR does this, then in its Present hook composites the buffer over the scene in PQ and copies the
+    // result over the whole back buffer, erasing a page drawn into the back buffer before it. Read only from our
+    // vtable hook, which wraps that hook (installed at Init3D); the buffer is cleared after its Present. Null
+    // otherwise. Engine-owned: never Released. Game thread, flat only.
+    static ID3D11RenderTargetView* HdrUiBufferRtv(IDXGISwapChain* sc, float& w, float& h, DXGI_FORMAT& backFormat,
+                                                  DXGI_FORMAT& uiFormat)
+    {
+        backFormat = uiFormat = DXGI_FORMAT_UNKNOWN;
+        if (REL::Module::IsVR() || s_untrustedChain.load() || !sc) return nullptr;
+        DXGI_SWAP_CHAIN_DESC scd{};
+        if (FAILED(sc->GetDesc(&scd))) return nullptr;
+        backFormat = scd.BufferDesc.Format;
+        if (!IsHdrFormat(backFormat)) return nullptr;
+        ID3D11RenderTargetView* rtv = EngineFramebufferRtv(w, h, &uiFormat);
+        return rtv && IsSdr8Format(uiFormat) ? rtv : nullptr;
+    }
+
+    // Logs when the HDR UI buffer is first used, and when an HDR back buffer has none for a while (pages then draw
+    // into the back buffer, where a later composite may erase them, or SDR may be read as HDR). Game thread, once
+    // per composite.
+    static void NoteHdrUiBuffer(bool found, DXGI_FORMAT backFormat, DXGI_FORMAT uiFormat, float w, float h)
+    {
+        static bool s_using = false;
+        static int  s_missing = 0, s_lines = 0;
+        if (!IsHdrFormat(backFormat)) { s_missing = 0; return; }
+        if (found) {
+            s_missing = 0;
+            if (s_using || s_lines >= 10) return;
+            s_using = true;
+            ++s_lines;
+            SKSE::log::info("Magelight: the back buffer is HDR (format {}) and the game's UI draws into a separate "
+                            "{}x{} target (format {}, e.g. Community Shaders' HDR) - views drawn at Present go into it",
+                static_cast<int>(backFormat), w, h, static_cast<int>(uiFormat));
+            return;
+        }
+        if (++s_missing != 120 || s_lines >= 10) return;
+        ++s_lines;
+        s_using = false;
+        SKSE::log::warn("Magelight: the back buffer is 10-bit or float (format {}) and the game's framebuffer is not "
+                        "a separate 8-bit UI target ({}) - views draw into the back buffer; if an HDR mod is on and "
+                        "they do not show or look washed out, send this log",
+            static_cast<int>(backFormat),
+            uiFormat == DXGI_FORMAT_UNKNOWN ? std::string("none on Magelight's device")
+                                            : fmt::format("format {}", static_cast<int>(uiFormat)));
     }
 
     // Whether GetBuffer added a reference to `first`: a second GetBuffer that raises the count by one did.
@@ -8845,6 +8908,11 @@ float4 ps_straight(VSOut i) : SV_Target {
                 DrawQuadTo(engineRtv, tw, th, srv, u0, v0, u1, v1, dx * sx, dy * sy, dw * sx, dh * sy, cutUV);
                 return;
             }
+        }
+        if (t_hdrUiRtv) {
+            const float sx = t_hdrUiW / bw, sy = t_hdrUiH / bh;
+            DrawQuadTo(t_hdrUiRtv, t_hdrUiW, t_hdrUiH, srv, u0, v0, u1, v1, dx * sx, dy * sy, dw * sx, dh * sy, cutUV);
+            return;
         }
         ID3D11Texture2D* back = nullptr;
         if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))) || !back) {
@@ -10702,11 +10770,51 @@ float4 ps_straight(VSOut i) : SV_Target {
         return out;
     }
 
+    // Game thread. True when the immediate context does not keep a blend state it is given: another mod's
+    // OMSetBlendState hook binds one of its own (Community Shaders with HDR or D3D12 frame generation rewrites the alpha
+    // factors of every blend). Page frames replayed on that context then get the wrong alpha, and their dark
+    // translucent parts show black; a deferred context's calls do not pass the hook. The context's own state is put back.
+    static bool ImmediateBlendRewritten()
+    {
+        if (!s_device || !s_context) return false;
+        D3D11_BLEND_DESC desc{};
+        auto& rt = desc.RenderTarget[0];
+        rt.BlendEnable = TRUE;
+        rt.SrcBlend = rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+        rt.DestBlend = rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+        rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        // Never released: a hook may key a cache by the state's address without holding it (older Community Shaders
+        // builds do), and a later state made at a freed probe's address would then be swapped for the probe's patch.
+        static ID3D11BlendState* probe = nullptr;
+        if (!probe && (FAILED(s_device->CreateBlendState(&desc, &probe)) || !probe)) return false;
+        ID3D11BlendState* saved = nullptr;
+        FLOAT factor[4]{};
+        UINT mask = 0;
+        s_context->OMGetBlendState(&saved, factor, &mask);
+        s_context->OMSetBlendState(probe, factor, mask);
+        ID3D11BlendState* bound = nullptr;
+        FLOAT boundFactor[4]{};
+        UINT boundMask = 0;
+        s_context->OMGetBlendState(&bound, boundFactor, &boundMask);
+        s_context->OMSetBlendState(saved, factor, mask);
+        const bool rewritten = bound != probe;
+        if (bound) bound->Release();
+        if (saved) saved->Release();
+        return rewritten;
+    }
+
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
     // so, its async driver or deferred context, its handoff and the thread. False: the mode is Off (the log line says
     // why) and render init runs again next frame, as without the setting.
     static bool StartPageThread()
     {
+        // Read once a session (the mode leaves Wanted here): a hook switched on later (Community Shaders' HDR toggled in
+        // game) is not seen.
+        const bool blendRewritten = ImmediateBlendRewritten();
+        if (blendRewritten)
+            SKSE::log::info("Magelight: the game's context replaces the blend states it is given (another mod hooks "
+                            "OMSetBlendState, e.g. Community Shaders' HDR or frame generation)");
         // pageGpu async: the driver is made here, on the game thread that replays on it. The page thread then makes no
         // device or context call, so it needs no deferred context, and of the device refusals below only the
         // single-threaded one applies (that thread still takes and drops references on a mod's image SRVs). When async
@@ -10718,6 +10826,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 else SKSE::log::info("Magelight: pageGpu async needs {} - using a deferred context", why);
             };
             if (s_forceCpu.load()) stepAside("the GPU driver (forceCpu is set)");
+            else if (blendRewritten) stepAside("a game context that keeps its blend states (dark parts of pages would show black)");
             else if (!s_gpuCreate || !s_gpuCreateAsync || !s_gpuAsyncDrain || !s_gpuAsyncState || !s_context)
                 stepAside("MagelightGPU.dll");
             else if ((s_gpu = s_gpuCreateAsync(s_device, s_context, s_msaa, &GpuLogBridge)) == nullptr)
@@ -10757,7 +10866,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_gpu = nullptr;
             }
             s_pageThreadMode.store(PageThread::Mode::Off);
-            SKSE::log::warn("Magelight: the page thread is off - {}; pages run in the game's frame", refused);
+            SKSE::log::warn("Magelight: the page thread is off - {}; pages run in the game's frame{}", refused,
+                            blendRewritten ? ", where the blend hook above can show dark parts of pages black" : "");
             return false;
         }
         s_ulThreadId = GetThreadId(thread);
@@ -11168,10 +11278,25 @@ float4 ps_straight(VSOut i) : SV_Target {
     // game's object, which may be a wrapper, so it is compared, never asked.
     static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour, bool inDetour)
     {
-        if (t_composited || fromLateDetour != s_lateComposite.load()) return;
+        if (t_composited) return;
+        // The HDR UI buffer is read from the vtable hook only (see HdrUiBufferRtv). Found there, it takes the frame
+        // from late mode too: whether dxgi's own Present runs before or after the hook that composites the buffer
+        // depends on how that hook was installed.
+        ID3D11RenderTargetView* hdrUi = nullptr;
+        float hdrW = 0.0f, hdrH = 0.0f;
+        if (!inDetour && sc == s_gameSwapChain && GetCurrentThreadId() == s_mainThreadId) {
+            DXGI_FORMAT backFormat, uiFormat;
+            hdrUi = HdrUiBufferRtv(sc, hdrW, hdrH, backFormat, uiFormat);
+            NoteHdrUiBuffer(hdrUi != nullptr, backFormat, uiFormat, hdrW, hdrH);
+        }
+        if (fromLateDetour != s_lateComposite.load() && !hdrUi) return;
         if (inDetour ? !OnOurDevice(sc) : sc != s_gameSwapChain) return;
         t_composited = true;
+        t_hdrUiRtv = hdrUi;
+        t_hdrUiW = hdrW;
+        t_hdrUiH = hdrH;
         if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
+        t_hdrUiRtv = nullptr;
     }
 
     static void AfterCompose()
