@@ -695,15 +695,18 @@ pauses a background tab:
   one that defers its work (a debounce timer) lands that much later, so a page
   that fits its layout to the window shows its old layout for that long after
   it opens.
-- Timers, messages and calls run at full rate: `setTimeout`, `setInterval`,
-  `MessageChannel` (React's scheduler), promises, `fetch`, `InteropCall`,
-  `InvokeJS`, `EvalJS` and `magelight.send`. What a page changes while hidden,
+- Messages and calls run at full rate: `setTimeout`, `MessageChannel` (React's
+  scheduler), promises, `fetch`, `InteropCall`, `InvokeJS`, `EvalJS` and
+  `magelight.send`. Repeating timers (`setInterval`) are throttled to about
+  once a second while hidden (1.9.3; manifest `"hiddenTimers": "full"` keeps
+  their rate, and the player's `throttleHiddenTimers: false` keeps every
+  page's). What a page changes while hidden,
   directly or in a `requestAnimationFrame` callback it asked for while hidden,
   is on screen in the first frame it is shown. A callback that asks for
   another, or hands its update to a scheduler (React state set outside an
   event), lands a frame or two later, as in a browser.
 - A hidden page is never painted, so it costs no render time; its timers still
-  cost script time, so pause polling on `visibilitychange`. A hidden view keeps
+  cost some script time, so pause polling on `visibilitychange`. A hidden view keeps
   its texture: hibernation (`SetViewHibernate`) is still what frees it, its
   video memory within about 20 s, whether or not another view is shown (and,
   from 1.8.0, the low-memory guard: "When the game runs low on memory").
@@ -1020,6 +1023,14 @@ while it is up:
 
 The guard lifts once free commit is back at twice its floor (at least 256 MB above it) and it has been up 10 s. The
 log has a line each way. `lowMemoryFloorMB` `0` turns both off.
+
+**Video memory (1.9.3).** A second guard reads the video memory Windows gives the game (its DXGI budget). While the
+game uses all of it, hidden views are released and background loads and prepaints wait exactly as above, for the same
+views; it never refuses a page that is asked for. It lifts once the game is back under 85% of the budget and it has
+been up 10 s, and released views load again only once neither guard holds them. So a view you keep hidden can come
+back with `ViewReloaded` on a PC that has plenty of RAM: send its state again. The player's `videoMemoryGuard: false`
+turns it off. When either guard comes up, Ultralight is also asked to free its caches (`PurgeMemory`, at most every 5
+minutes), which on the Free edition drops every page's compiled script: pages keep working and recompile as they run.
 
 ## A gamepad (1.6.0)
 

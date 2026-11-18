@@ -31,6 +31,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <windows.h>
 #include <intrin.h>
 #include <MinHook.h>
@@ -101,6 +102,10 @@ namespace Magelight {
     //   "msaa": 4             // GPU path: MSAA samples for page targets Ultralight antialiases (1 = off, 2, 4, 8)
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "lowMemoryFloorMB": 320  // 1.8.0: the free commit a 1920x1080 page needs before it loads (0 = off; LowMemoryCore.h)
+    //   "videoMemoryGuard": true // 1.9.3: release hidden views while the game is over its video-memory budget
+    //   "rendererThreads": 4     // 1.9.3: Ultralight's painting threads (1..8)
+    //   "throttleHiddenTimers": true // 1.9.3: a hidden page's repeating timers run about once a second (a view's
+    //                                // manifest "hiddenTimers": "full" keeps its own at full rate)
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
     //                         // (and no main-menu pages, 1.7.1)
@@ -204,6 +209,8 @@ namespace Magelight {
     static std::uint64_t     s_asyncBudgetBytes = 8ull << 20;
     // With this many recorded frames waiting for the game thread, a page frame records no more (PageThreadFrame).
     static constexpr std::uint32_t kAsyncBacklogFrames = 8;
+    // With nothing shown this long, the async recorder gives back its idle memory once (PageThreadFrame, 1.9.3).
+    static constexpr std::chrono::seconds kAsyncIdlePurge{ 30 };
     // Main-menu pages (1.7.1, page thread only). A view is one once a mod asks for UI mode on it at the main menu, or
     // calls SetViewMainMenu; that also starts Ultralight there. All of it runs on the main thread's Presents, which take
     // over from the engine's own thread after the Main Menu opens; s_mainPresenting says they have. The carrier menu
@@ -354,6 +361,18 @@ namespace Magelight {
     // largest view needs: the same tick keeps it, and until its first sample it is a 1080p view's.
     static std::atomic<int>       s_lowMemoryFloorMb{ LowMemory::kDefaultFloorMb };
     static std::atomic<bool>      s_lowMemory{ false };
+    // Magelight.json "videoMemoryGuard" (1.9.3, LowMemoryCore.h VideoGuard). The game thread samples the process's video
+    // memory against DXGI's budget once a second (SampleVideoMemory: s_vramUsage / s_vramBudget, 0 = unread); Ultralight's
+    // thread raises and lifts s_vramPressure from them (TickVideoMemoryGuard), and any thread reads it.
+    static std::atomic<bool>          s_videoGuardOn{ true };
+    static std::atomic<std::uint64_t> s_vramUsage{ 0 };
+    static std::atomic<std::uint64_t> s_vramBudget{ 0 };
+    static std::atomic<bool>          s_vramPressure{ false };
+    // Magelight.json "rendererThreads" (1.9.3): Config::num_renderer_threads, read at render init.
+    static std::atomic<int>           s_rendererThreads{ 4 };
+    // Magelight.json "throttleHiddenTimers" (1.9.3): ViewConfig::enable_hidden_timer_throttling for every View created
+    // after it is read, but a view whose manifest asks for "hiddenTimers": "full" (MlView::fullHiddenTimers).
+    static std::atomic<bool>          s_throttleHiddenTimers{ true };
     static std::atomic<std::uint64_t> s_guardFloorBytes{ LowMemory::LoadNeedBytes(LowMemory::kDefaultFloorMb, 0) };
     // Magelight.json "gamepad" (1.6.0): the gamepad layer's tuning (GamepadCore.h), read before the first input batch.
     static Gamepad::Tuning        s_gamepadTuning;
@@ -392,6 +411,9 @@ namespace Magelight {
     static std::atomic<bool> s_untrustedChain{ false };
     static std::atomic<bool> s_deviceFromEngine{ false };   // s_device came from the engine, not the swapchain
     static std::atomic<bool> s_lateComposite{ false };       // composite inside dxgi's own Present (InstallLatePresent)
+    // The HDR UI buffer this composite draws into (HdrUiBufferRtv), or null; set by ComposeOnce for its frame.
+    static thread_local ID3D11RenderTargetView* t_hdrUiRtv = nullptr;
+    static thread_local float                   t_hdrUiW = 0.0f, t_hdrUiH = 0.0f;
     static std::atomic<bool> s_deadNoticePending{ false };   // the render-death HUD notice waits for the HUD
     static std::atomic<bool> s_uiPassBroken{ false };        // the UI pass had nothing to draw on: Present draws (latched)
 
@@ -726,6 +748,12 @@ namespace Magelight {
                 s_lowMemoryFloorMb.store(LowMemory::ClampFloorMb(it->get<double>()));
                 s_guardFloorBytes.store(LowMemory::LoadNeedBytes(s_lowMemoryFloorMb.load(), 0));
             }
+            if (auto it = j.find("videoMemoryGuard"); it != j.end() && it->is_boolean())
+                s_videoGuardOn.store(it->get<bool>());
+            if (auto it = j.find("rendererThreads"); it != j.end() && it->is_number())
+                s_rendererThreads.store(static_cast<int>(std::clamp(it->get<double>(), 1.0, 8.0)));
+            if (auto it = j.find("throttleHiddenTimers"); it != j.end() && it->is_boolean())
+                s_throttleHiddenTimers.store(it->get<bool>());
             if (auto it = j.find("cursorFile"); it != j.end() && it->is_string())
                 s_cursorFile = it->get<std::string>();
             if (auto it = j.find("cursorHeight"); it != j.end() && it->is_number())
@@ -762,12 +790,12 @@ namespace Magelight {
             SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
                             "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={}, ulFiberMB={}, "
                             "pageThread={}, pageGpu={}, exceptionTelemetry={}, memoryLogMinutes={}, lowMemoryFloorMB={}, clipCursor={}, "
-                            "gamepad={})",
+                            "gamepad={}, videoMemoryGuard={}, rendererThreads={}, throttleHiddenTimers={})",
                 s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
                 s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa,
                 s_ulFiberMb, s_pageThreadMode.load() != PageThread::Mode::Off, s_pageAsyncWanted ? "async" : "deferred",
                 s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_lowMemoryFloorMb.load(), s_clipCursorCfg.load(),
-                s_gamepadTuning.enabled);
+                s_gamepadTuning.enabled, s_videoGuardOn.load(), s_rendererThreads.load(), s_throttleHiddenTimers.load());
             if (s_gamepadTuning.enabled) {
                 static constexpr const char* kGlyphNames[] = { "xbox", "playstation", "generic" };
                 const Gamepad::Tuning& t = s_gamepadTuning;
@@ -809,6 +837,7 @@ namespace Magelight {
     using MgGpuCreateAsyncFn = void* (*)(ID3D11Device*, ID3D11DeviceContext*, int, void (*)(const char*));
     using MgGpuAsyncDrainFn  = std::uint64_t (*)(void*, double, std::uint64_t);
     using MgGpuAsyncStateFn  = int (*)(void*, MgGpuAsyncState*);
+    using MgGpuAsyncPurgeFn  = int (*)(void*);   // contract 5
 
     static MgGpuCreateFn  s_gpuCreate = nullptr;
     static MgGpuDestroyFn s_gpuDestroy = nullptr;
@@ -825,6 +854,7 @@ namespace Magelight {
     static MgGpuCreateAsyncFn s_gpuCreateAsync = nullptr;
     static MgGpuAsyncDrainFn  s_gpuAsyncDrain = nullptr;   // game thread only
     static MgGpuAsyncStateFn  s_gpuAsyncState = nullptr;   // any thread
+    static MgGpuAsyncPurgeFn  s_gpuAsyncPurge = nullptr;   // Ultralight's thread (the recorder's)
     static void*          s_gpu = nullptr;       // backend handle (Ultralight's thread; pageGpu async: the game thread's)
     static std::atomic<bool> s_gpuActive{ false };   // accelerated path in use (set by Ultralight's thread at its start)
 
@@ -971,6 +1001,9 @@ namespace Magelight {
         // whole page that frame.
         bool prepaint = false;
         bool prepainted = false;        // painted (shown, or prepainted) since paintableAt
+        // 1.9.3 manifest "hiddenTimers": "full": this view's repeating timers keep their rate while hidden. Read when its
+        // View is created (a first load, a wake, a rebuild); a Navigate or ReloadView keeps the View and the old value.
+        bool fullHiddenTimers = false;
         // GetTickCount64 of the last DOM ready, resize, or host Navigate or Reload that kept its page (one that began no
         // load, or whose load failed); 0 = none since the last load or host request.
         std::uint64_t paintableAt = 0;
@@ -2717,7 +2750,7 @@ namespace Magelight {
 
     // Ultralight's thread only. s_lowMemoryWaited: the views whose load waited while the guard was up, each named once
     // in the log per time it comes up (NoteLowMemoryWait). s_lowMemoryReleased: the views it released that never
-    // hibernate, which load again hidden once memory has been back a while (TickLowMemoryGuard). s_guardSample: the
+    // hibernate, which load again hidden once memory has been back a while (TickReleasedReload). s_guardSample: the
     // guard's last reading, at most LowMemory::kSampleMs old. s_guardBudget: its free commit, held to what should be
     // left once the loads in s_startedLoads have landed (LowMemory::SettledFree; JudgeLoad, PublishBudget).
     // s_rebuiltShown: the shown views ApplyPendingRebuilds released this frame, whose new View MaterializeViews makes
@@ -5518,10 +5551,11 @@ namespace Magelight {
             s_gpuCreateAsync = reinterpret_cast<MgGpuCreateAsyncFn>(GetProcAddress(gpu, "MgGpu_CreateAsync"));
             s_gpuAsyncDrain  = reinterpret_cast<MgGpuAsyncDrainFn>(GetProcAddress(gpu, "MgGpu_AsyncDrain"));
             s_gpuAsyncState  = reinterpret_cast<MgGpuAsyncStateFn>(GetProcAddress(gpu, "MgGpu_AsyncGetState"));
+            s_gpuAsyncPurge  = reinterpret_cast<MgGpuAsyncPurgeFn>(GetProcAddress(gpu, "MgGpu_AsyncPurge"));
             // A backend of this contract exports all of them; one that does not is a broken build.
             if (s_gpuCreate && s_gpuDestroy && s_gpuGetDriver && s_gpuHas && s_gpuDraw && s_gpuSrv && s_gpuSamples
                 && s_gpuRegExt && s_gpuSetExtSrv && s_gpuUnregExt && s_gpuStats && s_gpuTakeList && s_gpuCreateAsync
-                && s_gpuAsyncDrain && s_gpuAsyncState) {
+                && s_gpuAsyncDrain && s_gpuAsyncState && s_gpuAsyncPurge) {
                 SKSE::log::info("Magelight: GPU backend loaded (MagelightGPU.dll, contract {}, Ultralight {})",
                                 MGGPU_CONTRACT, ULTRALIGHT_VERSION);
             } else {
@@ -7020,8 +7054,9 @@ float4 ps_straight(VSOut i) : SV_Target {
             SKSE::log::info("Magelight: pages animate and repaint at most {} times a second (Ultralight edition cap)",
                 ULTRALIGHT_EDITION_MAX_FPS);
         // The SDK's defaults, pinned so a later SDK changing them is a decision here. The host never calls
-        // Renderer::Recycle(Full) or PurgeMemory: on Free both drop the compiled script of every live page (its next
-        // run costs about as much as the first) and stall this thread, and the automatic reclaim (the recycler,
+        // Renderer::Recycle(Full), and PurgeMemory only on a memory guard's rise (PurgeForGuard): on Free both drop the
+        // compiled script of every live page (its next run costs about as much as the first) and stall this thread,
+        // and otherwise the automatic reclaim (the recycler,
         // idle GC, the compositor's pool sweep) reaches the same footprint after a View's release: its script heap
         // and process memory within seconds, its video memory (tiles, textures, targets) within about 20 s (freed
         // inside Render, which FrameWork runs at least once a second, a view shown or not).
@@ -7029,11 +7064,16 @@ float4 ps_straight(VSOut i) : SV_Target {
         // (FrameWork pumps it).
         cfg.memory_profile = ultralight::MemoryProfile::Balanced;
         cfg.idle_gc_enabled = true;
+        // Fewer painting threads beside the game's (the SDK's 0 means up to 8), with no page measured slower at 1, 2
+        // or 4 (tools/bench-test --threads).
+        cfg.num_renderer_threads = static_cast<std::uint32_t>(s_rendererThreads.load());
         ultralight::Platform::instance().set_config(cfg);
         SKSE::log::info("Magelight: memory - profile balanced, idle GC after {:.1f} s without input, recycler every "
-                        "{:.2f} s, resource cache {} MB, compositor {}; the host never calls Recycle or PurgeMemory",
+                        "{:.2f} s, resource cache {} MB, compositor {}, {} painting threads, hidden pages' timers {}; "
+                        "PurgeMemory only when a memory guard rises",
                         cfg.idle_gc_idle_time, cfg.recycle_delay, cfg.memory_cache_size >> 20,
-                        kEnableCompositor ? "on" : "off");
+                        kEnableCompositor ? "on" : "off", cfg.num_renderer_threads,
+                        s_throttleHiddenTimers.load() ? "throttled" : "at full rate");
         // The SDK's Windows loader (compiled in, so no AppCore.dll) with a last resort that always loads
         // (MagelightFonts.h): with Arial missing or unreadable, the bare loader takes down the first page that needs
         // it (invariant 19). Built here, never at namespace scope: its base constructor is a delay-loaded runtime
@@ -7134,6 +7174,8 @@ float4 ps_straight(VSOut i) : SV_Target {
         // field never reports that it wants a keyboard or the IME. Unfocused, a page still animates and runs its
         // timers, and its focused field still takes keys (tools/editor-test).
         vc.initial_focus = false;
+        // A hidden page's repeating timers aligned to about a second (1.9.3): its rAF and CSS animations already stop.
+        vc.enable_hidden_timer_throttling = s_throttleHiddenTimers.load() && !v.fullHiddenTimers;
         v.pageCursor = 0;   // a new View has reported nothing yet
         v.edit = {};
         v.ul = s_ulRenderer->CreateView(
@@ -7228,7 +7270,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         // player sees, which the first open (a menu the player chose to raise) hides better.
         if (VR::IsLive()) return nullptr;
         if (updateMs > static_cast<double>(s_loadBudgetMs.load())) return nullptr;
-        if (s_lowMemory.load()) return nullptr;   // a hidden page's paint allocates its target and tiles
+        if (s_lowMemory.load() || s_vramPressure.load()) return nullptr;   // a hidden page's paint allocates its target and tiles
         const std::uint64_t now = GetTickCount64();
         std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
         for (auto& vp : s_views) {
@@ -7275,6 +7317,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             // Any other load comes out of the guard's budget (JudgeLoad); the record stays and loads once it fits.
             const bool exempt = NeededByUIMode(v) ||
                                 std::find(s_rebuiltShown.begin(), s_rebuiltShown.end(), v.id) != s_rebuiltShown.end();
+            // Over the video-memory budget a hidden view does not load in the background (VideoGuard).
+            if (!exempt && !v.visible && s_vramPressure.load()) continue;
             if (!exempt) {
                 const LoadVerdict verdict = JudgeLoad(v, lowMemory);
                 if (verdict == LoadVerdict::Short) NoteLowMemoryWait(v.id, v.dormant ? "wake" : "first load");
@@ -7373,14 +7417,14 @@ float4 ps_straight(VSOut i) : SV_Target {
     // everything the page needs to come back (path, listeners, session,
     // layer, cutout) is on it. Never a view UI mode needs or an entry is deciding on (s_openingView), never an
     // inspector.
-    // While the low-memory guard is up, every hidden view whose page reached DOM ready goes once hidden
+    // While a memory guard is up (low memory or video memory), every hidden view whose page reached DOM ready goes once hidden
     // kReleaseHiddenAfterMs (a view never shown at once), whatever its budget, but not a page an inspector is bound to
     // nor the view that last held UI mode (s_lastUIModeView).
     // A release that drops a pending reload or rebuild, or of a view that never hibernates, wakes with a ViewReloaded:
-    // its page was replaced. Released views that never hibernate load again hidden later (TickLowMemoryGuard).
+    // its page was replaced. Released views that never hibernate load again hidden later (TickReleasedReload).
     static void HibernateIdleViews()
     {
-        const bool lowMemory = s_lowMemory.load();
+        const bool lowMemory = s_lowMemory.load() || s_vramPressure.load();
         std::vector<ultralight::RefPtr<ultralight::View>> released;
         std::string forMemory;
         {
@@ -7410,8 +7454,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         released.clear();   // WebKit teardown outside the lock, like a destroy
         if (!forMemory.empty())
-            SKSE::log::info("Magelight: low memory - hidden views released: {} (each loads its page again when shown, or "
-                            "once memory has been back a while when it never hibernates)", forMemory);
+            SKSE::log::info("Magelight: {} - hidden views released: {} (each loads its page again when shown, or once "
+                            "memory has been back a while when it never hibernates)",
+                            s_lowMemory.load() ? "low memory" : "over the video-memory budget", forMemory);
     }
 
     // Render thread, after HibernateIdleViews and before MaterializeViews: RebuildViewAtScale. The View is released
@@ -8728,7 +8773,7 @@ float4 ps_straight(VSOut i) : SV_Target {
 
     // The engine's framebuffer render target and its size, or null when it is missing or not on our device.
     // Engine-owned: never Released.
-    static ID3D11RenderTargetView* EngineFramebufferRtv(float& w, float& h)
+    static ID3D11RenderTargetView* EngineFramebufferRtv(float& w, float& h, DXGI_FORMAT* format = nullptr)
     {
         auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         if (!data) return nullptr;
@@ -8748,7 +8793,67 @@ float4 ps_straight(VSOut i) : SV_Target {
         if (!td.Width || !td.Height) return nullptr;
         w = static_cast<float>(td.Width);
         h = static_cast<float>(td.Height);
+        if (format) *format = td.Format;
         return rtv;
+    }
+
+    static bool IsHdrFormat(DXGI_FORMAT f)
+    {
+        return f == DXGI_FORMAT_R10G10B10A2_UNORM || f == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    }
+
+    static bool IsSdr8Format(DXGI_FORMAT f)
+    {
+        return f == DXGI_FORMAT_R8G8B8A8_UNORM || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+               f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    }
+
+    // The game's UI buffer, when the back buffer is HDR and the engine's framebuffer view points at a separate
+    // 8-bit target: the game's menus draw there, so whatever presents takes its UI from that target. Community
+    // Shaders' HDR does this, then in its Present hook composites the buffer over the scene in PQ and copies the
+    // result over the whole back buffer, erasing a page drawn into the back buffer before it. Read only from our
+    // vtable hook, which wraps that hook (installed at Init3D); the buffer is cleared after its Present. Null
+    // otherwise. Engine-owned: never Released. Game thread, flat only.
+    static ID3D11RenderTargetView* HdrUiBufferRtv(IDXGISwapChain* sc, float& w, float& h, DXGI_FORMAT& backFormat,
+                                                  DXGI_FORMAT& uiFormat)
+    {
+        backFormat = uiFormat = DXGI_FORMAT_UNKNOWN;
+        if (REL::Module::IsVR() || s_untrustedChain.load() || !sc) return nullptr;
+        DXGI_SWAP_CHAIN_DESC scd{};
+        if (FAILED(sc->GetDesc(&scd))) return nullptr;
+        backFormat = scd.BufferDesc.Format;
+        if (!IsHdrFormat(backFormat)) return nullptr;
+        ID3D11RenderTargetView* rtv = EngineFramebufferRtv(w, h, &uiFormat);
+        return rtv && IsSdr8Format(uiFormat) ? rtv : nullptr;
+    }
+
+    // Logs when the HDR UI buffer is first used, and when an HDR back buffer has none for a while (pages then draw
+    // into the back buffer, where a later composite may erase them, or SDR may be read as HDR). Game thread, once
+    // per composite.
+    static void NoteHdrUiBuffer(bool found, DXGI_FORMAT backFormat, DXGI_FORMAT uiFormat, float w, float h)
+    {
+        static bool s_using = false;
+        static int  s_missing = 0, s_lines = 0;
+        if (!IsHdrFormat(backFormat)) { s_missing = 0; return; }
+        if (found) {
+            s_missing = 0;
+            if (s_using || s_lines >= 10) return;
+            s_using = true;
+            ++s_lines;
+            SKSE::log::info("Magelight: the back buffer is HDR (format {}) and the game's UI draws into a separate "
+                            "{}x{} target (format {}, e.g. Community Shaders' HDR) - views drawn at Present go into it",
+                static_cast<int>(backFormat), w, h, static_cast<int>(uiFormat));
+            return;
+        }
+        if (++s_missing != 120 || s_lines >= 10) return;
+        ++s_lines;
+        s_using = false;
+        SKSE::log::warn("Magelight: the back buffer is 10-bit or float (format {}) and the game's framebuffer is not "
+                        "a separate 8-bit UI target ({}) - views draw into the back buffer; if an HDR mod is on and "
+                        "they do not show or look washed out, send this log",
+            static_cast<int>(backFormat),
+            uiFormat == DXGI_FORMAT_UNKNOWN ? std::string("none on Magelight's device")
+                                            : fmt::format("format {}", static_cast<int>(uiFormat)));
     }
 
     // Whether GetBuffer added a reference to `first`: a second GetBuffer that raises the count by one did.
@@ -8806,6 +8911,11 @@ float4 ps_straight(VSOut i) : SV_Target {
                 DrawQuadTo(engineRtv, tw, th, srv, u0, v0, u1, v1, dx * sx, dy * sy, dw * sx, dh * sy, cutUV);
                 return;
             }
+        }
+        if (t_hdrUiRtv) {
+            const float sx = t_hdrUiW / bw, sy = t_hdrUiH / bh;
+            DrawQuadTo(t_hdrUiRtv, t_hdrUiW, t_hdrUiH, srv, u0, v0, u1, v1, dx * sx, dy * sy, dw * sx, dh * sy, cutUV);
+            return;
         }
         ID3D11Texture2D* back = nullptr;
         if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))) || !back) {
@@ -9380,7 +9490,12 @@ float4 ps_straight(VSOut i) : SV_Target {
                                               ms.ullAvailPhys / kGB, ms.ullTotalPhys / kGB, ms.ullAvailPageFile / kGB,
                                               ms.ullTotalPageFile / kGB, LowMemory::CommitEventsText(CommitEventsNow()))
                                 : std::string(),
-                        s_lowMemory.load() ? "; low-memory guard up" : "", reportMs);
+                        fmt::format("{}{}{}", s_vramBudget.load() ? fmt::format("; video memory {:.2f} of {:.2f} GB budget",
+                                                                               s_vramUsage.load() / kGB, s_vramBudget.load() / kGB)
+                                                                 : std::string(),
+                                    s_lowMemory.load() ? "; low-memory guard up" : "",
+                                    s_vramPressure.load() ? "; video-memory guard up" : ""),
+                        reportMs);
         // A later SDK that reshaped the report gets the raw text once, so the parser can follow it.
         const bool reshaped = !rawLogged && MemoryReport::Missing(f) >= 5;
         if (full || reshaped) {
@@ -9389,15 +9504,41 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
     }
 
+    static LowMemory::Guard      s_commitGuard;   // TickLowMemoryGuard's, read by TickReleasedReload (Ultralight's thread)
+    static LowMemory::VideoGuard s_videoGuard;    // TickVideoMemoryGuard's, the same
+    // Set by a guard's rise, purged by PageWorkBegin after HibernateIdleViews (Ultralight's thread).
+    static const char*           s_purgeReason = nullptr;
+
+    // Ultralight's thread, outside Update and Render, when a memory guard rises: give back what Ultralight and the async
+    // recorder hold idle. Renderer::PurgeMemory on Free drops every live page's compiled script, so it is called only
+    // here (invariant 22): a page that runs its script again once is cheaper than one refused or released.
+    static void PurgeForGuard(const char* why)
+    {
+        // Renderer::PurgeMemory at most every kRendererPurgeGap: video memory can cross its budget at every cell change,
+        // and each purge recompiles every live page's script, a shown HUD's included. The recorder's purge is cheap.
+        static constexpr std::uint64_t kRendererPurgeGap = 5 * 60 * 1000;
+        static std::uint64_t s_lastRendererPurge = 0;
+        const std::uint64_t now = GetTickCount64();
+        const bool renderer = s_lastRendererPurge == 0 || now - s_lastRendererPurge >= kRendererPurgeGap;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (renderer) {
+            s_lastRendererPurge = now;
+            s_ulRenderer->PurgeMemory();
+        }
+        const bool recorder = s_pageAsync.load() && s_gpuAsyncPurge(s_gpu);
+        if (!renderer && !recorder) return;
+        SKSE::log::info("Magelight: {} - {} idle memory given back in {:.1f} ms", why,
+                        renderer && recorder ? "Ultralight's and the async recorder's"
+                        : renderer           ? "Ultralight's"
+                                             : "the async recorder's (Ultralight's was purged under 5 minutes ago)",
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    }
+
     // Ultralight's thread, in PageWorkBegin before hibernation and materialization: free commit once a second
     // (kSampleMs), the guard raised below what loading the largest view needs (s_guardFloorBytes) and lifted with
-    // hysteresis (LowMemoryCore.h), one line each way;
-    // then, once the guard has been down long enough (Guard::ReloadDue, a minute that grows each time the reload
-    // brought it back) and a hidden load fits the budget, the views it released that never hibernate load again,
-    // hidden, through the load queue (MaterializeViews), as they would have stayed loaded without it.
+    // hysteresis (LowMemoryCore.h), one line each way. The reload of what it released is TickReleasedReload's.
     static void TickLowMemoryGuard()
     {
-        static LowMemory::Guard s_guard;
         static std::uint64_t s_nextSample = 0;
         const int floorMb = s_lowMemoryFloorMb.load();
         if (floorMb <= 0) return;
@@ -9417,13 +9558,14 @@ float4 ps_straight(VSOut i) : SV_Target {
         LowMemory::DropSettled(s_startedLoads, now);
         PublishBudget(mem.freeCommit);
         if (!mem.read) return;
-        switch (s_guard.Update(mem.freeCommit, now, floorBytes)) {
+        switch (s_commitGuard.Update(mem.freeCommit, now, floorBytes)) {
         case LowMemory::Change::Raised:
             s_lowMemory.store(true);
             SKSE::log::warn("Magelight: low memory - {} (under the {} MB the largest page needs to load). Until it "
                             "recovers hidden views are released and nothing loads or prepaints in the background; a "
                             "page that is asked for still opens while its own need fits, and pages already shown stay up",
                             MemoryText(mem), floorBytes / LowMemory::kMiB);
+            s_purgeReason = "low memory";
             break;
         case LowMemory::Change::Lifted:
             s_lowMemory.store(false);
@@ -9434,9 +9576,58 @@ float4 ps_straight(VSOut i) : SV_Target {
         case LowMemory::Change::None:
             break;
         }
-        if (s_lowMemoryReleased.empty() || !s_guard.ReloadDue(now)) return;
-        // Not before one of them would load (JudgeLoad's rule for a hidden view): the reload is noted when it starts.
-        if (!LowMemory::LoadFits(s_guardBudget, floorMb, largest, floorBytes)) return;
+    }
+
+    // Ultralight's thread, beside TickLowMemoryGuard: the video-memory guard from the game thread's last sample, one line
+    // each way and PurgeForGuard on a raise. Its release and hold sites read s_vramPressure.
+    static void TickVideoMemoryGuard()
+    {
+        if (!s_videoGuardOn.load()) return;
+        static std::uint64_t s_nextSample = 0;
+        const std::uint64_t now = GetTickCount64();
+        if (now < s_nextSample) return;
+        s_nextSample = now + LowMemory::kSampleMs;
+        const std::uint64_t usage = s_vramUsage.load(), budget = s_vramBudget.load();
+        constexpr double kGB = 1073741824.0;
+        switch (s_videoGuard.Update(usage, budget, now)) {
+        case LowMemory::Change::Raised:
+            s_vramPressure.store(true);
+            SKSE::log::warn("Magelight: over the video-memory budget - the game uses {:.2f} of the {:.2f} GB Windows gives "
+                            "it. Until it is under {:.0f}% again hidden views are released and nothing loads or prepaints "
+                            "in the background; pages that are asked for still open", usage / kGB, budget / kGB,
+                            LowMemory::kVideoLiftShare * 100.0);
+            s_purgeReason = "over the video-memory budget";
+            break;
+        case LowMemory::Change::Lifted:
+            s_vramPressure.store(false);
+            SKSE::log::info("Magelight: video memory back under the budget - {:.2f} of {:.2f} GB", usage / kGB, budget / kGB);
+            break;
+        case LowMemory::Change::None:
+            break;
+        }
+    }
+
+    // Ultralight's thread, after both guards: once neither holds them (LowMemory::ReleasedMayReload) and, with the commit
+    // guard on, a hidden load fits the budget, the views released for memory that never hibernate load again, hidden,
+    // through the load queue (MaterializeViews), as they would have stayed loaded without the guards.
+    static void TickReleasedReload()
+    {
+        static std::uint64_t s_nextTry = 0;
+        const std::uint64_t now = GetTickCount64();
+        if (s_lowMemoryReleased.empty() || now < s_nextTry) return;
+        s_nextTry = now + LowMemory::kSampleMs;   // the guards and s_guardBudget change at most once a sample
+        if (!LowMemory::ReleasedMayReload(s_commitGuard, s_videoGuard, now)) return;
+        const int floorMb = s_lowMemoryFloorMb.load();
+        if (floorMb > 0) {
+            std::uint64_t largest = 0;
+            {
+                std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+                for (const auto& vp : s_views)
+                    if (!vp->destroyPending) largest = std::max(largest, ViewPixels(*vp));
+            }
+            // Not before one of them would load (JudgeLoad's rule for a hidden view): the reload is noted when it starts.
+            if (!LowMemory::LoadFits(s_guardBudget, floorMb, largest, s_guardFloorBytes.load())) return;
+        }
         std::string ids;
         {
             std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
@@ -9451,8 +9642,9 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         s_lowMemoryReleased.clear();
         if (ids.empty()) return;
-        s_guard.NoteReload(now);
-        SKSE::log::info("Magelight: views released for low memory load again, hidden: {}", ids);
+        s_commitGuard.NoteReload(now);
+        s_videoGuard.NoteReload(now);
+        SKSE::log::info("Magelight: views released for memory load again, hidden: {}", ids);
     }
 
     // ── FrameWork in parts ───────────────────────────────────────────────────
@@ -9493,7 +9685,13 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
 
         TickLowMemoryGuard();
+        TickVideoMemoryGuard();
+        TickReleasedReload();
         HibernateIdleViews();
+        if (s_purgeReason) {   // after the release, so the purge can reach what the released views held
+            PurgeForGuard(s_purgeReason);
+            s_purgeReason = nullptr;
+        }
         ApplyPendingRebuilds();
         MaterializeViews();
         ApplyPendingResizes();
@@ -9527,11 +9725,39 @@ float4 ps_straight(VSOut i) : SV_Target {
         DrainBridgeQueues();
     }
 
-    // The game thread's bookkeeping each frame: the cursor confine, the focus menu's close check, the cursor re-hides
-    // and samples, the world-freeze reconcile, the controls hold's release and the page-cursor reset. Engine state is
-    // read on the game thread or reached through GameTask::Post.
+    // Game thread, once a second: the process's video memory against DXGI's budget for it (IDXGIAdapter3, Windows 10;
+    // older DXGI leaves both 0 and the video guard idle). An adapter call, never the device's or the context's.
+    static void SampleVideoMemory()
+    {
+        static std::uint64_t s_next = 0;
+        static Microsoft::WRL::ComPtr<IDXGIAdapter3> s_adapter;
+        static bool s_tried = false;
+        if (!s_videoGuardOn.load() || !s_device) return;
+        const std::uint64_t now = GetTickCount64();
+        if (now < s_next) return;
+        s_next = now + LowMemory::kSampleMs;
+        if (!s_tried) {
+            s_tried = true;
+            Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
+            Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+            if (SUCCEEDED(s_device->QueryInterface(IID_PPV_ARGS(&dxgi))) && SUCCEEDED(dxgi->GetAdapter(&adapter)))
+                adapter.As(&s_adapter);
+            SKSE::log::info("Magelight: video-memory guard {}", s_adapter ? "reads DXGI's budget once a second"
+                                                                           : "off - DXGI 1.4 is not there to read the budget");
+        }
+        if (!s_adapter) return;
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (FAILED(s_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) info = {};
+        s_vramUsage.store(info.CurrentUsage);
+        s_vramBudget.store(info.Budget);
+    }
+
+    // The game thread's bookkeeping each frame: the video-memory sample, the cursor confine, the focus menu's close
+    // check, the cursor re-hides and samples, the world-freeze reconcile, the controls hold's release and the page-cursor
+    // reset. Engine state is read on the game thread or reached through GameTask::Post.
     static void GameBookkeeping()
     {
+        SampleVideoMemory();
         // The CursorMenu's kShow processes a frame or two after SetUIMode, and its movie only exists once it has:
         // hide the vanilla cursor again just after and once the menu has settled.
         // About 30 frames after an entry or exit, sample the Windows cursor (SampleCursorState).
@@ -10335,9 +10561,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         recorder.size = sizeof(recorder);
         const bool backlog = async && !pre && s_gpuAsyncState(s_gpu, &recorder) && recorder.framesInFlight >= kAsyncBacklogFrames;
         s_pageStage.store("Renderer::Render");
+        bool anyShown = false;
         if (backlog) {
             packet.reset();
-        } else if (AnyViewVisible() || pre) {
+        } else if ((anyShown = AnyViewVisible()) || pre) {
             SampleDrawnViews();
             s_ulRenderer->Render();
             rendered = true;
@@ -10357,6 +10584,25 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_ulRenderer->Render();
                 rendered = true;
                 if (s_gpuActive && s_gpuHas(s_gpu)) s_gpuDraw(s_gpu);
+            }
+        }
+        // pageGpu async: with nothing shown for kAsyncIdlePurge the recorder gives back its pooled frames and idle upload
+        // chunks, once until a view is shown again (what a burst of uploads took would stay for the session otherwise).
+        {
+            static ClockT::time_point s_shownAt = ClockT::now();
+            static bool s_purgedIdle = false;
+            if (anyShown || backlog) {
+                s_shownAt = tUpdated;
+                s_purgedIdle = false;
+            } else if (async && !s_purgedIdle && tUpdated - s_shownAt >= kAsyncIdlePurge) {
+                s_purgedIdle = true;
+                MgGpuAsyncState before{};
+                before.size = sizeof(before);
+                s_gpuAsyncState(s_gpu, &before);
+                if (s_gpuAsyncPurge(s_gpu))
+                    SKSE::log::info("Magelight: nothing shown for {} s - the async recorder's idle memory given back ({:.1f} MB "
+                                    "held by queued frames)", std::chrono::duration_cast<std::chrono::seconds>(kAsyncIdlePurge).count(),
+                                    before.memoryInUse / 1048576.0);
             }
         }
         // pageGpu async: the packet names the last frame the recorder queued. Otherwise only Render, the driver's draws
@@ -10527,11 +10773,51 @@ float4 ps_straight(VSOut i) : SV_Target {
         return out;
     }
 
+    // Game thread. True when the immediate context does not keep a blend state it is given: another mod's
+    // OMSetBlendState hook binds one of its own (Community Shaders with HDR or D3D12 frame generation rewrites the alpha
+    // factors of every blend). Page frames replayed on that context then get the wrong alpha, and their dark
+    // translucent parts show black; a deferred context's calls do not pass the hook. The context's own state is put back.
+    static bool ImmediateBlendRewritten()
+    {
+        if (!s_device || !s_context) return false;
+        D3D11_BLEND_DESC desc{};
+        auto& rt = desc.RenderTarget[0];
+        rt.BlendEnable = TRUE;
+        rt.SrcBlend = rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+        rt.DestBlend = rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+        rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        // Never released: a hook may key a cache by the state's address without holding it (older Community Shaders
+        // builds do), and a later state made at a freed probe's address would then be swapped for the probe's patch.
+        static ID3D11BlendState* probe = nullptr;
+        if (!probe && (FAILED(s_device->CreateBlendState(&desc, &probe)) || !probe)) return false;
+        ID3D11BlendState* saved = nullptr;
+        FLOAT factor[4]{};
+        UINT mask = 0;
+        s_context->OMGetBlendState(&saved, factor, &mask);
+        s_context->OMSetBlendState(probe, factor, mask);
+        ID3D11BlendState* bound = nullptr;
+        FLOAT boundFactor[4]{};
+        UINT boundMask = 0;
+        s_context->OMGetBlendState(&bound, boundFactor, &boundMask);
+        s_context->OMSetBlendState(saved, factor, mask);
+        const bool rewritten = bound != probe;
+        if (bound) bound->Release();
+        if (saved) saved->Release();
+        return rewritten;
+    }
+
     // Render init, game thread, with the device resources made: whether this device can carry the page thread and, if
     // so, its async driver or deferred context, its handoff and the thread. False: the mode is Off (the log line says
     // why) and render init runs again next frame, as without the setting.
     static bool StartPageThread()
     {
+        // Read once a session (the mode leaves Wanted here): a hook switched on later (Community Shaders' HDR toggled in
+        // game) is not seen.
+        const bool blendRewritten = ImmediateBlendRewritten();
+        if (blendRewritten)
+            SKSE::log::info("Magelight: the game's context replaces the blend states it is given (another mod hooks "
+                            "OMSetBlendState, e.g. Community Shaders' HDR or frame generation)");
         // pageGpu async: the driver is made here, on the game thread that replays on it. The page thread then makes no
         // device or context call, so it needs no deferred context, and of the device refusals below only the
         // single-threaded one applies (that thread still takes and drops references on a mod's image SRVs). When async
@@ -10543,6 +10829,7 @@ float4 ps_straight(VSOut i) : SV_Target {
                 else SKSE::log::info("Magelight: pageGpu async needs {} - using a deferred context", why);
             };
             if (s_forceCpu.load()) stepAside("the GPU driver (forceCpu is set)");
+            else if (blendRewritten) stepAside("a game context that keeps its blend states (dark parts of pages would show black)");
             else if (!s_gpuCreate || !s_gpuCreateAsync || !s_gpuAsyncDrain || !s_gpuAsyncState || !s_context)
                 stepAside("MagelightGPU.dll");
             else if ((s_gpu = s_gpuCreateAsync(s_device, s_context, s_msaa, &GpuLogBridge)) == nullptr)
@@ -10582,7 +10869,8 @@ float4 ps_straight(VSOut i) : SV_Target {
                 s_gpu = nullptr;
             }
             s_pageThreadMode.store(PageThread::Mode::Off);
-            SKSE::log::warn("Magelight: the page thread is off - {}; pages run in the game's frame", refused);
+            SKSE::log::warn("Magelight: the page thread is off - {}; pages run in the game's frame{}", refused,
+                            blendRewritten ? ", where the blend hook above can show dark parts of pages black" : "");
             return false;
         }
         s_ulThreadId = GetThreadId(thread);
@@ -10993,10 +11281,25 @@ float4 ps_straight(VSOut i) : SV_Target {
     // game's object, which may be a wrapper, so it is compared, never asked.
     static void ComposeOnce(IDXGISwapChain* sc, bool fromLateDetour, bool inDetour)
     {
-        if (t_composited || fromLateDetour != s_lateComposite.load()) return;
+        if (t_composited) return;
+        // The HDR UI buffer is read from the vtable hook only (see HdrUiBufferRtv). Found there, it takes the frame
+        // from late mode too: whether dxgi's own Present runs before or after the hook that composites the buffer
+        // depends on how that hook was installed.
+        ID3D11RenderTargetView* hdrUi = nullptr;
+        float hdrW = 0.0f, hdrH = 0.0f;
+        if (!inDetour && sc == s_gameSwapChain && GetCurrentThreadId() == s_mainThreadId) {
+            DXGI_FORMAT backFormat, uiFormat;
+            hdrUi = HdrUiBufferRtv(sc, hdrW, hdrH, backFormat, uiFormat);
+            NoteHdrUiBuffer(hdrUi != nullptr, backFormat, uiFormat, hdrW, hdrH);
+        }
+        if (fromLateDetour != s_lateComposite.load() && !hdrUi) return;
         if (inDetour ? !OnOurDevice(sc) : sc != s_gameSwapChain) return;
         t_composited = true;
+        t_hdrUiRtv = hdrUi;
+        t_hdrUiW = hdrW;
+        t_hdrUiH = hdrH;
         if (s_runtimeReady.load() && !s_renderDead.load()) GuardedFrameWork(sc);
+        t_hdrUiRtv = nullptr;
     }
 
     static void AfterCompose()
@@ -13060,6 +13363,19 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         SKSE::log::info("Magelight: view {} prepaint {}", view,
                         on ? "on - painted while hidden after it loads, and once more when its page settles" : "off");
+        return true;
+    }
+
+    bool SetViewHiddenTimers(ViewId view, bool full)
+    {
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending || v->isInspector) return false;
+            if (v->fullHiddenTimers == full) return true;
+            v->fullHiddenTimers = full;
+        }
+        SKSE::log::info("Magelight: view {} hidden timers {}", view, full ? "at full rate" : "throttled while hidden");
         return true;
     }
 

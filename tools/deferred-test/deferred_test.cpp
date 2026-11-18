@@ -67,7 +67,9 @@ namespace
     using MgCreateAsyncFn = void* (*)(ID3D11Device*, ID3D11DeviceContext*, int, void (*)(const char*));
     using MgDrainFn = std::uint64_t (*)(void*, double, std::uint64_t);
     using MgAsyncStateFn = int (*)(void*, MgGpuAsyncState*);
+    using MgAsyncPurgeFn = int (*)(void*);
     MgCreateAsyncFn g_mgCreateAsync = nullptr;
+    MgAsyncPurgeFn  g_mgPurge = nullptr;   // contract 5
     MgDrainFn       g_mgDrain = nullptr;
     MgAsyncStateFn  g_mgAsyncState = nullptr;
     MgCreateFn  g_mgCreate = nullptr;
@@ -126,7 +128,8 @@ namespace
         g_mgCreateAsync = reinterpret_cast<MgCreateAsyncFn>(GetProcAddress(gpu, "MgGpu_CreateAsync"));
         g_mgDrain = reinterpret_cast<MgDrainFn>(GetProcAddress(gpu, "MgGpu_AsyncDrain"));
         g_mgAsyncState = reinterpret_cast<MgAsyncStateFn>(GetProcAddress(gpu, "MgGpu_AsyncGetState"));
-        if (!g_mgCreateAsync || !g_mgDrain || !g_mgAsyncState) {
+        g_mgPurge = reinterpret_cast<MgAsyncPurgeFn>(GetProcAddress(gpu, "MgGpu_AsyncPurge"));
+        if (!g_mgCreateAsync || !g_mgDrain || !g_mgAsyncState || !g_mgPurge) {
             std::printf("MagelightGPU.dll lacks the async path\n");
             return false;
         }
@@ -633,6 +636,9 @@ namespace
             // host renders regardless and stops only at a long backlog). The main thread keeps draining meanwhile.
             while (!AsyncState().ready) Sleep(0);
             g_renderer->Render();
+            // Halfway, the recorder gives back its idle memory while the main thread drains (the host's idle purge and
+            // a memory guard's rise): the frames after it must still match.
+            if (f == g_frames / 2 && !g_mgPurge(g_mg)) std::printf("  MgGpu_AsyncPurge refused an async handle\n");
             AsyncPacket p;
             p.frameId = AsyncState().lastQueued;
             p.textureId = g_view->render_target().texture_id;
