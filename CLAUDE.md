@@ -27,7 +27,7 @@ src/GamepadCore.h           the gamepad layer's rules (1.6.0): who holds the pad
 src/PathTextCore.h          paths as text: every std::string path is UTF-8 (FromUtf8 / ToUtf8, ToFileUrl, what the file system is asked for); never path(std::string) or path::string()
 src/GamepadScript.h         the page core's gamepad helper, window.magelight.gamepad (focus scopes, prompts)
 src/PageThreadCore.h        the page thread's rules (1.7.0): when it may run (Decide), the handoff of page frames to the game thread, OwnedMutex (a faulting page thread gives back its locks)
-src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): what a page needs to open, the guard's floor and hysteresis, the page files' growth, the setting's clamp
+src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): what a page needs to open, the guard's floor and hysteresis, the page files' growth, the setting's clamp; the clock a hibernate budget runs from (1.10.0: a view never shown counts from `MlView::paintableAt` unless it prepaints, one such release per frame in `HibernateIdleViews`)
 src/FocusShareCore.h        focus sharing's rules (1.9.0): which view a press moves the keyboard to, when it goes back
 src/HitTestCore.h           content hit testing's rules (1.9.2): which view under the pointer takes it, which pages are asked, the cursor's rule, the page function
 src/PageRootCore.h          page roots (1.9.2): the file system's containment test, the folders AddPageRoot takes, which root a page reads from
@@ -60,7 +60,7 @@ tools/stack-test/           MgStackTest (the in-game stack tests, package.ps1 zi
 tools/deferred-test/        the GPU driver on the page thread's deferred context against the immediate context, byte for byte, MSAA, WARP's emulated lists, a View freed while held; then the async path (`--mode async`, contract 4; a `MgGpu_AsyncPurge` halfway, contract 5) against the immediate context, with and without a budget (build.bat)
 tools/bench-test/            what a page costs per frame through MagelightGPU.dll, for comparing two SDK builds: bench.cpp, run.ps1 (both builds, alternating passes), compare.py
 tools/polledkeys-test/      src/PolledKeysCore.h's rule for the key reads a page lets through, its list checks and the manifest's key names (build.bat)
-tools/lowmemory-test/       src/LowMemoryCore.h's needs, floor, hysteresis, growth room and setting clamp, the video-memory guard and ReleasedMayReload (build.bat)
+tools/lowmemory-test/       src/LowMemoryCore.h's needs, floor, hysteresis, growth room and setting clamp, the video-memory guard, ReleasedMayReload and hibernation's clock (build.bat)
 tools/focusshare-test/      src/FocusShareCore.h's press and settle rules (build.bat)
 tools/hittest-test/         src/HitTestCore.h's walk, cursor, mode and answer rules (build.bat)
 tools/pageroot-test/        src/PageRootCore.h's containment, folder rules and deepest root (build.bat); ingame/ = MgPageRootTest, AddPageRoot in game (-DMG_TEST_PLUGINS=ON, README)
@@ -215,7 +215,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `videoMemoryGuard`, `rendererThreads`, `throttleHiddenTimers`, `ulFiberMB`, `pageThread`, `loadingScreenPages`, `pageGpu` / `asyncBudgetMs` / `asyncBudgetMB`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `videoMemoryGuard`, `hibernateNeverShown`, `rendererThreads`, `throttleHiddenTimers`, `ulFiberMB`, `pageThread`, `loadingScreenPages`, `pageGpu` / `asyncBudgetMs` / `asyncBudgetMB`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).

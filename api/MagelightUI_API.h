@@ -696,7 +696,10 @@ namespace MAGELIGHT_API {
         Result (*SetViewHibernate)(ViewId view, std::uint32_t idleMs);   // hidden this long -> the View and its
                                                             // texture are released; ShowView(true) reloads the page,
                                                             // calls sent meanwhile land after DOM ready, and your
-                                                            // onDomReady/ViewDomReady fire again. 0 = never, but
+                                                            // onDomReady/ViewDomReady fire again. From 1.10.0 a view
+                                                            // never shown is released too, idleMs after its page's
+                                                            // DOM ready, unless it prepaints (docs/CPP.md).
+                                                            // 0 = never, but
                                                             // while the game is low on memory (1.8.0) every hidden
                                                             // view is released whatever idleMs is (docs/CPP.md)
 

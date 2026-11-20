@@ -237,7 +237,9 @@ namespace Magelight {
     // Ultralight View and GPU texture (the record, listeners, geometry and
     // layer stay); ShowView(true) reloads the page and any InteropCall /
     // InvokeJS sent meanwhile is delivered after DOM ready. The page's own
-    // onDomReady fires again on wake. 0 = never (the default).
+    // onDomReady fires again on wake. A view never shown counts from its page's DOM ready (1.10.0), unless it
+    // prepaints.
+    // 0 = never (the default).
     void SetViewHibernate(ViewId view, std::uint32_t idleMs);
     void SetViewScale(ViewId view, float scale);   // Ultralight device scale (0.26.9)
     // 0.31.7: release the page's View and load the page again in a new View created at this device scale

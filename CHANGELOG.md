@@ -16,6 +16,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 1.10.0 | 11000 | Loading-screen pages: `SetViewLoadingScreen(view, on)` lets a view draw while the game's loading screen is up (opt-in per view, off by default), manifest `"loadingScreen"`, `QueryCapability("loadingScreen")` (flat, page thread); `Magelight.json` `"loadingScreenPages": false` turns it off |
 | 1.10.0 | 11000 | Screen readers: `SetAccessibilityListener(mod, fn, user)` hears what a screen reader would say about every mod's shown pages (focus, active items, states, edits, live regions, dialogs, the page on UI-mode entry), read by the page core while a listener exists; page `window.magelight.a11y.announce(text, { assertive })` and `data-ml-a11y="off"`; `QueryCapability("a11y")` |
 | 1.10.0 | 11000 | `GetUIModeView()`: the view that holds UI mode, any mod's (0 when none); `QueryCapability("uiModeView")` |
+| 1.10.0 | — | `SetViewHibernate` / manifest `hibernateMs` also release a view that was never shown, its budget counted from its page's DOM ready; the first show loads the page again (a second `ViewDomReady`); not a prepaint view; `Magelight.json` `hibernateNeverShown` |
 | 1.9.3 | 10903 | Manifest `"hiddenTimers": "full"`: a view's repeating timers keep their rate while it is hidden (hidden pages' timers are throttled by default from 1.9.3) |
 | 1.9.2 | 10902 | `AddPageRoot(mod, folder)`: a folder inside the game's Data folder that the mod's pages read from, for pages kept outside `Data\Magelight` that share files above their own folder (a page set laid out for another UI host); `QueryCapability("pageRoot")` |
 | 1.9.2 | 10902 | Content hit testing: a view takes the pointer only where its page has an element, so the empty parts of a fullscreen view let it through to the view below: `SetViewHitTest` with `kHitTestRect` / `kHitTestContent`, manifest `"hitTest"`, the page's `'__hittest'` message, `QueryCapability("hitTest")` |
@@ -96,6 +97,13 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   page's title as it opens. A password field's text is never passed on. Without such a plugin nothing changes and
   pages do no extra work.
 
+- **Pages you have not opened stop holding memory.** Every page loads when the game starts, and it kept its memory
+  and a full-screen texture until it was first opened and closed, however long that took. A page whose mod lets it
+  free its memory while closed now also frees it when it has not been opened yet, that long after it loaded,
+  and loads again when opened (unless its mod paints it ahead of its first open). With twenty or more pages installed that can be a few hundred MB of
+  video memory and some RAM back for the session; the first open of such a page takes the short load its later
+  opens already took. `Magelight.json` `"hibernateNeverShown": false` turns it off.
+
 ### For mod authors
 
 - **`SetViewLoadingScreen(view, on)`** (API v4, gate `hostVersionNumber >= 11000` and `QueryCapability("loadingScreen")`),
@@ -123,6 +131,13 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   make a page read well (docs/SDK.md "Screen readers").
 - Offline gate: `tools/a11y-test` (the rules, then the reader in Ultralight's WebKit). In game:
   `tools/a11y-test/ingame` (MgA11yTest, a listener that logs every message).
+- **`SetViewHibernate` / manifest `hibernateMs` now count a view that was never shown.** Its budget runs from
+  its page's DOM ready (again after a `Navigate`, a `ReloadView`, a resize or a scale change); past it the View is released and the
+  first show loads the page again, with a second `ViewDomReady`. Nothing changes for a view with no budget. If you
+  sent a hibernating view its state once at its first `ViewDomReady` and show it later, send it on every
+  `ViewDomReady` or when you show it, as a show after hibernation always needed. `Magelight.log` says
+  `view N hibernated after M ms loaded and never shown`. A view that also prepaints (`SetViewPrepaint`, manifest
+  `prepaint`) is not released before its first show: you asked for a painted first open.
 
 ### How it works
 

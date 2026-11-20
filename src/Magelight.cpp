@@ -105,6 +105,8 @@ namespace Magelight {
     //   "memoryLogMinutes": 10   // 1.5.0: minutes between the periodic memory lines (0 = none, max 1440)
     //   "lowMemoryFloorMB": 320  // 1.8.0: the free commit a 1920x1080 page needs before it loads (0 = off; LowMemoryCore.h)
     //   "videoMemoryGuard": true // 1.9.3: release hidden views while the game is over its video-memory budget
+    //   "hibernateNeverShown": true // 1.10.0: a view that hibernates also does so before its first show (not a
+    //                               // prepaint view)
     //   "rendererThreads": 4     // 1.9.3: Ultralight's painting threads (1..8)
     //   "throttleHiddenTimers": true // 1.9.3: a hidden page's repeating timers run about once a second (a view's
     //                                // manifest "hiddenTimers": "full" keeps its own at full rate)
@@ -381,6 +383,8 @@ namespace Magelight {
     static std::atomic<std::uint64_t> s_vramUsage{ 0 };
     static std::atomic<std::uint64_t> s_vramBudget{ 0 };
     static std::atomic<bool>          s_vramPressure{ false };
+    // Magelight.json "hibernateNeverShown" (1.10.0, HibernateIdleViews): false gives a view never shown no hibernate clock.
+    static std::atomic<bool>          s_hibernateNeverShown{ true };
     // Magelight.json "rendererThreads" (1.9.3): Config::num_renderer_threads, read at render init.
     static std::atomic<int>           s_rendererThreads{ 4 };
     // Magelight.json "throttleHiddenTimers" (1.9.3): ViewConfig::enable_hidden_timer_throttling for every View created
@@ -767,6 +771,8 @@ namespace Magelight {
             }
             if (auto it = j.find("videoMemoryGuard"); it != j.end() && it->is_boolean())
                 s_videoGuardOn.store(it->get<bool>());
+            if (auto it = j.find("hibernateNeverShown"); it != j.end() && it->is_boolean())
+                s_hibernateNeverShown.store(it->get<bool>());
             if (auto it = j.find("rendererThreads"); it != j.end() && it->is_number())
                 s_rendererThreads.store(static_cast<int>(std::clamp(it->get<double>(), 1.0, 8.0)));
             if (auto it = j.find("throttleHiddenTimers"); it != j.end() && it->is_boolean())
@@ -807,12 +813,14 @@ namespace Magelight {
             SKSE::log::info("Magelight: settings loaded (toggleKey={}, demoViews={}, imageProbe={}, devMode={}, consoleLog={}, "
                             "loadStagger={}, loadBudgetMs={}, cursorForce={}, modCursors={}, msaa={}, ulFiberMB={}, "
                             "pageThread={}, pageGpu={}, exceptionTelemetry={}, memoryLogMinutes={}, lowMemoryFloorMB={}, clipCursor={}, "
-                            "gamepad={}, videoMemoryGuard={}, rendererThreads={}, throttleHiddenTimers={})",
+                            "gamepad={}, videoMemoryGuard={}, rendererThreads={}, throttleHiddenTimers={}, "
+                            "hibernateNeverShown={})",
                 s_toggleKey.load(), s_demoViews, s_imageProbe, s_devMode.load(), kConsoleLogNames[ConsoleLogLevel()],
                 s_loadStagger.load(), s_loadBudgetMs.load(), s_cursorForce.load(), s_modCursors.load(), s_msaa,
                 s_ulFiberMb, s_pageThreadMode.load() != PageThread::Mode::Off, s_pageAsyncWanted ? "async" : "deferred",
                 s_exceptionTelemetry.load(), s_memLogMinutes.load(), s_lowMemoryFloorMb.load(), s_clipCursorCfg.load(),
-                s_gamepadTuning.enabled, s_videoGuardOn.load(), s_rendererThreads.load(), s_throttleHiddenTimers.load());
+                s_gamepadTuning.enabled, s_videoGuardOn.load(), s_rendererThreads.load(), s_throttleHiddenTimers.load(),
+                s_hibernateNeverShown.load());
             if (s_gamepadTuning.enabled) {
                 static constexpr const char* kGlyphNames[] = { "xbox", "playstation", "generic" };
                 const Gamepad::Tuning& t = s_gamepadTuning;
@@ -990,7 +998,9 @@ namespace Magelight {
         bool isInspector = false;   // a hosted Web Inspector: visible only while UI mode is active
         int pageCursor = 0;         // PageCursor: the CSS cursor under the pointer, as the page last reported it
         float cutX = 0, cutY = 0, cutW = 0, cutH = 0;   // compositor cutout, view pixels (w<=0 = none)
-        std::uint32_t hibernateMs = 0;  // 0 = never; else release the View after this long hidden
+        // 0 = never; else release the View after this long hidden (a view never shown: this long after paintableAt,
+        // unless it prepaints)
+        std::uint32_t hibernateMs = 0;
         std::uint64_t hiddenSince = 0;  // GetTickCount64 at the last hide (0 = visible / never hidden)
         bool dormant = false;           // hibernated: no View until shown again
         bool domReady = false;          // main frame reached DOM ready since its last load
@@ -1023,7 +1033,8 @@ namespace Magelight {
         // View is created (a first load, a wake, a rebuild); a Navigate or ReloadView keeps the View and the old value.
         bool fullHiddenTimers = false;
         // GetTickCount64 of the last DOM ready, resize, or host Navigate or Reload that kept its page (one that began no
-        // load, or whose load failed); 0 = none since the last load or host request.
+        // load, or whose load failed); 0 = none since the last load or host request. The prepaint's clock, and the
+        // hibernate clock of a view never shown (HibernateIdleViews).
         std::uint64_t paintableAt = 0;
         // OnPageSettled on a hidden prepaint view: TakePrepaintView paints it once more. Ultralight 2.0 decodes a
         // page's images only once it is painted, so the first prepaint has none and this paint is the one with them.
@@ -7600,6 +7611,10 @@ float4 ps_straight(VSOut i) : SV_Target {
     // everything the page needs to come back (path, listeners, session,
     // layer, cutout) is on it. Never a view UI mode needs or an entry is deciding on (s_openingView), never an
     // inspector.
+    // A view never shown has no hide to count from: its budget runs from paintableAt (LowMemory::HibernateClockMs),
+    // and at most one such view goes per frame, because views that loaded together come due together and each
+    // release is a WebKit teardown. A prepaint view is kept until its first hide: its mod asked for a painted first
+    // open. A page an inspector is bound to is kept too (s_inspectorOf would name a released View).
     // While a memory guard is up (low memory or video memory), every hidden view whose page reached DOM ready goes once hidden
     // kReleaseHiddenAfterMs (a view never shown at once), whatever its budget, but not a page an inspector is bound to
     // nor the view that last held UI mode (s_lastUIModeView).
@@ -7613,13 +7628,19 @@ float4 ps_straight(VSOut i) : SV_Target {
         {
             std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
             const std::uint64_t now = GetTickCount64();   // after the lock: a hide stamps hiddenSince under it
+            const bool countNeverShown = s_hibernateNeverShown.load();
+            bool neverShownGone = false;
             for (auto& vp : s_views) {
                 MlView& v = *vp;
                 if (!v.ul || v.visible || v.destroyPending || v.isInspector || NeededByUIMode(v) ||
                     v.id == static_cast<ViewId>(s_openingView.load()))
                     continue;
                 const std::uint64_t hiddenMs = (v.hiddenSince && now > v.hiddenSince) ? now - v.hiddenSince : 0;
-                const bool budget = v.hibernateMs && v.hiddenSince && hiddenMs >= v.hibernateMs;
+                const bool neverShown = !v.hiddenSince;
+                const bool budget = !(neverShown && neverShownGone) && !s_inspectorOf.count(v.id) &&
+                                    LowMemory::HibernateDue(v.hibernateMs,
+                                        LowMemory::HibernateClockMs(v.hiddenSince, v.paintableAt,
+                                                                    countNeverShown && !v.prepaint), now);
                 const bool memory = lowMemory && v.docDomReady && !s_inspectorOf.count(v.id) &&
                                     v.id != static_cast<ViewId>(s_lastUIModeView.load()) &&
                                     (!v.hiddenSince || hiddenMs >= LowMemory::kReleaseHiddenAfterMs);
@@ -7628,7 +7649,9 @@ float4 ps_straight(VSOut i) : SV_Target {
                 if (v.rebuildPending) v.rebuilt = true;
                 ReleaseViewKeepRecordLocked(v, released);
                 if (budget) {
-                    SKSE::log::info("Magelight: view {} hibernated after {} ms hidden (texture released)", v.id, v.hibernateMs);
+                    if (neverShown) neverShownGone = true;
+                    SKSE::log::info("Magelight: view {} hibernated after {} ms {} (texture released)", v.id, v.hibernateMs,
+                                    neverShown ? "loaded and never shown" : "hidden");
                     continue;
                 }
                 forMemory += (forMemory.empty() ? "" : ", ") + std::to_string(v.id);
