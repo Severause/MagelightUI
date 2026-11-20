@@ -79,6 +79,14 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
   model stay), so the loading screen can show what the mod puts there (the character, the date, the quest objective).
   Flat with the page thread only (the default). `Magelight.json` `"loadingScreenPages": false` keeps every page off
   loading screens.
+- **Controls come back after a scene that starts while a page is open.** The game keeps copies of the player's
+  controls and writes them back later: the free camera (which OStim turns on for its scenes) copies them when it
+  starts and restores them when it ends, and sitting down or a crafting menu does the same. A copy made while a page
+  held the controls had them off, so after the page closed and the scene ended, moving, looking and the rest stayed
+  off. Closing a page now also turns its controls on in the game's shared copy when that copy was made while the
+  page was open, and once a free camera that started during a page has ended, Magelight turns back on the controls
+  its copy had off only because of the page. A free camera that ends while a page is open no longer lets the player
+  move under the page either. The free camera parts are flat only; VR has no free camera.
 
 ### For mod authors
 

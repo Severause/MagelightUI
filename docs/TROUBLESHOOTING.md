@@ -159,7 +159,11 @@ closing press never reaches the game. Leaving UI mode does not hide
 a page by itself (a mod may want it visible, HUD-style); a hotkey close does hide. If controls
 stay suspended after a crash-to-menu, load again: the host resets UI mode on every load.
 Leaving UI mode turns back on only the controls entering it turned off: a control another mod had
-already turned off stays off until that mod turns it back on.
+already turned off stays off until that mod turns it back on. A mod that saves the controls itself
+while a page is open and restores them after the page closed restores them off: that mod has to
+save them before the page opens. The game's own copies (the free camera, sitting, crafting menus)
+are covered; when the free camera's exit turned them off and Magelight turned them on again,
+`Magelight.log` says `controls 0x... given back after the free camera's exit`.
 
 ## Two mods fight over the screen
 
