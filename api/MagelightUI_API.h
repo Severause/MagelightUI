@@ -297,6 +297,9 @@ namespace MAGELIGHT_API {
     using JsResultFn = void (*)(ViewId view, const char* result, const char* exception, void* user);
     // PostGameTask (0.30.1): runs once, on the game thread, with the user pointer it was posted with.
     using GameTaskFn = void (*)(void* user);
+    // SetAccessibilityListener (1.10.0): one message of the page core's accessibility reader, a JSON object (see the
+    // call); valid for the call only. Its text is the page's: parse it as untrusted input.
+    using AccessibilityFn = void (*)(ViewId view, const char* json, void* user);
 
     struct ModDesc {
         std::uint32_t size;              // = sizeof(ModDesc) — forward-compat
@@ -655,7 +658,8 @@ namespace MAGELIGHT_API {
                                                             // "polledKeys" (1.8.0), "focusShare" (1.9.0),
                                                             // "hitTest" (1.9.2), "pageRoot" (1.9.2),
                                                             // "loadingScreen" (1.10.0: follows "pageThread",
-                                                            // 0 with Magelight.json "loadingScreenPages" false). The
+                                                            // 0 with Magelight.json "loadingScreenPages" false), "a11y",
+                                                            // "uiModeView" (1.10.0). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -1048,6 +1052,32 @@ namespace MAGELIGHT_API {
         // swapchain that refused its device, where loading screens show no page.
         // Kept until DestroyView or a call with false. Any thread. InvalidView for a view that is gone or an inspector.
         Result (*SetViewLoadingScreen)(ViewId view, bool on);
+
+        // ── also 1.10.0 — gate on hostVersionNumber >= 11000 and QueryCapability("a11y") ──
+        // What a screen reader would say about every mod's pages, for an assistive plugin that speaks it (through
+        // NVDA or another screen reader). While at least one mod has a listener, the page core in every page reads
+        // its own page and sends one message per change: a JSON object {"v":1,"type":...} whose type is "focus" (the
+        // focused element: name, role, states, value, description, level, position, setSize, shortcut, active for
+        // its active descendant), "active" (a composite's active item changed: aria-activedescendant, aria-selected or
+        // aria-current), "state" (a state or value of the focused element changed), "edit" (a text field's value
+        // changed: name, value), "announce" (live-region text once the region settles, or the page's own
+        // magelight.a11y.announce: text, politeness "polite" or "assertive", role, name, source "page"), "dialog" (a
+        // dialog opened: name, role, description) or "page" (sent when UI mode enters a view, and when you register
+        // while a view holds it: title, focus, dialog). A password field's value is never sent, only secret: true
+        // and length. Fields may be absent; ignore keys you do not know, as later hosts add some. Only a shown
+        // page's messages are delivered, at most 20 a second per view after a burst of 40 (the rest are dropped).
+        // A page keeps an element and what it holds out with data-ml-a11y="off", the whole page on <html>.
+        // docs/CPP.md "Screen readers" has the details and docs/SDK.md the page side. fn runs on your
+        // ModDesc.callbackThread: GameThread as an SKSE task, RenderThread inline on Magelight's render thread
+        // inside the page's own script (the page thread with "pageThread"): no game state there, and never
+        // block. One listener per mod; nullptr removes it, as UnregisterMod does. Pages stop reading once the
+        // last listener goes. Any thread. InvalidMod for a mod that is not registered.
+        Result (*SetAccessibilityListener)(ModId mod, AccessibilityFn fn, void* user);
+
+        // ── also 1.10.0 — gate on hostVersionNumber >= 11000 and QueryCapability("uiModeView") ──
+        // The view that holds UI mode (the page the cursor and the pause belong to), any mod's; 0 when UI mode is
+        // off. GetUIModeOwner gives its mod. Any thread.
+        ViewId (*GetUIModeView)();
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)

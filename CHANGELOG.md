@@ -14,6 +14,8 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | Added | Gate | Feature |
 |---|---|---|
 | 1.10.0 | 11000 | Loading-screen pages: `SetViewLoadingScreen(view, on)` lets a view draw while the game's loading screen is up (opt-in per view, off by default), manifest `"loadingScreen"`, `QueryCapability("loadingScreen")` (flat, page thread); `Magelight.json` `"loadingScreenPages": false` turns it off |
+| 1.10.0 | 11000 | Screen readers: `SetAccessibilityListener(mod, fn, user)` hears what a screen reader would say about every mod's shown pages (focus, active items, states, edits, live regions, dialogs, the page on UI-mode entry), read by the page core while a listener exists; page `window.magelight.a11y.announce(text, { assertive })` and `data-ml-a11y="off"`; `QueryCapability("a11y")` |
+| 1.10.0 | 11000 | `GetUIModeView()`: the view that holds UI mode, any mod's (0 when none); `QueryCapability("uiModeView")` |
 | 1.9.3 | 10903 | Manifest `"hiddenTimers": "full"`: a view's repeating timers keep their rate while it is hidden (hidden pages' timers are throttled by default from 1.9.3) |
 | 1.9.2 | 10902 | `AddPageRoot(mod, folder)`: a folder inside the game's Data folder that the mod's pages read from, for pages kept outside `Data\Magelight` that share files above their own folder (a page set laid out for another UI host); `QueryCapability("pageRoot")` |
 | 1.9.2 | 10902 | Content hit testing: a view takes the pointer only where its page has an element, so the empty parts of a fullscreen view let it through to the view below: `SetViewHitTest` with `kHitTestRect` / `kHitTestContent`, manifest `"hitTest"`, the page's `'__hittest'` message, `QueryCapability("hitTest")` |
@@ -74,11 +76,17 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 ### What players notice
 
-- **Nothing, unless a mod asks for it.** Loading screens look as they did: no page draws on them. A mod can now make
+- **Loading screens: nothing changes unless a mod asks for it.** No page draws on them. A mod can now make
   one of its views a loading-screen page, which then draws over the loading screen the game draws (its art and 3D
   model stay), so the loading screen can show what the mod puts there (the character, the date, the quest objective).
   Flat with the page thread only (the default). `Magelight.json` `"loadingScreenPages": false` keeps every page off
   loading screens.
+
+- **Pages can be read by a screen reader.** With an assistive plugin that speaks through NVDA or another screen
+  reader, every Magelight page can be heard: the control that has focus, the item selected in a list or a row of
+  tabs, a field's text as it is typed, chat lines and notifications once they settle, dialogs as they open, and the
+  page's title as it opens. A password field's text is never passed on. Without such a plugin nothing changes and
+  pages do no extra work.
 
 ### For mod authors
 
@@ -95,6 +103,18 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 - While a loading-screen view is shown during a load, the page thread runs every page, not only that one: other
   mods' pages run their timers and scripts through the load too, and their render-thread callbacks may be called
   then (none of them can reach the game's main thread until the load ends).
+- **`SetAccessibilityListener(mod, fn, user)`** (gate `hostVersionNumber >= 11000` and `QueryCapability("a11y")`;
+  `MagelightMod::setAccessibilityListener`): for an assistive plugin. While any mod has one, the page core in every
+  page reads its page and sends JSON messages `focus`, `active`, `state`, `edit`, `announce`, `dialog` and `page`
+  (docs/CPP.md "Screen readers" lists their fields). Only shown views' messages are delivered, at most 20 a second
+  per view after a burst of 40; the listener runs on the mod's callback thread.
+- **`GetUIModeView()`** (`QueryCapability("uiModeView")`, `MagelightMod::uiModeView`): the view holding UI mode.
+- **The page side:** `window.magelight.a11y.announce(text, { assertive })` for a line that is nowhere on the page,
+  and `data-ml-a11y="off"` on an element (or `<html>`) to keep it out. Real controls, labels,
+  `aria-activedescendant` / `aria-selected` for selection and `aria-live` regions for chat and notifications are what
+  make a page read well (docs/SDK.md "Screen readers").
+- Offline gate: `tools/a11y-test` (the rules, then the reader in Ultralight's WebKit). In game:
+  `tools/a11y-test/ingame` (MgA11yTest, a listener that logs every message).
 
 ### How it works
 

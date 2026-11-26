@@ -149,6 +149,12 @@ namespace Magelight::Api4 {
     Result SetViewHitTest(ViewId view, std::uint32_t mode);                                 // 1.9.2 the pointer only where the page has an element
     Result AddPageRoot(ModId mod, const char* folder);                                      // 1.9.2 a folder the mod's pages read from
     Result SetViewLoadingScreen(ViewId view, bool on);                                      // 1.10.0 load ahead of the world, draw on loading screens
+    Result SetAccessibilityListener(ModId mod, MAGELIGHT_API::AccessibilityFn fn, void* user); // 1.10.0 the page core's reader
+    ViewId GetUIModeView();                                                                 // 1.10.0 the view that holds UI mode, 0 = none
+    // 1.10.0: one reader message from a shown view (Magelight.cpp checked it), to every listener. Render thread, no
+    // lock held.
+    void DeliverAccessibility(ViewId view, const std::string& message);
+    bool AccessibilityWanted();   // some mod has a listener
     // 0.31.0: a manifest's top-level "cursor", the default for every view of the mod without a cursor of its own
     // (existing views now, later ones at CreateViewEx).
     void SetModCursor(ModId mod, const Magelight::CursorSet& set);

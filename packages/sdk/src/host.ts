@@ -79,6 +79,15 @@ export const host = {
     // No '__hosttheme' send fallback: hosts before 0.31.9 have no such channel and log a warning per call.
     core?.hostTheme?.(theme);
   },
+  /**
+   * Read a line that is nowhere on the page to the player's screen reader (host 1.10.0), such as a canvas game's
+   * events; `assertive` interrupts what it is saying. Does nothing with no host, an older one, or while no screen
+   * reader listens, so call it freely. Text in the page reads by itself: see the SDK's Screen readers section.
+   */
+  announce(text: string, opts?: { assertive?: boolean }): void {
+    const core = typeof window !== 'undefined' ? window.magelight : undefined;
+    core?.a11y?.announce(text, opts);
+  },
   /** URL of a host-registered texture image (`RegisterTextureImage` name) */
   imageUrl(name: string): string {
     return this.info.runtimeUrl ? `${this.info.runtimeUrl}images/${name}.imgsrc` : '';

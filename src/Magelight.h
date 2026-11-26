@@ -399,6 +399,10 @@ namespace Magelight {
     // page thread. True from the settings' load until a refusal or a failed start turns it false for the session (1.7.0).
     bool PageThreadActive();
     ViewId GetUIModeView();                // the current/last UI-mode target (0 = none)
+    // 1.10.0: turns every page's accessibility reader on or off to match Api4::AccessibilityWanted, and asks the view
+    // holding UI mode for its page when it turns on, or with askPage while it is on (a listener added). Any thread,
+    // no lock held.
+    void SyncAccessibility(bool askPage = false);
     std::uint32_t GetToggleKey();          // the host's own UI-mode toggle scancode (Magelight.json)
     bool IsUIModeActive();
 

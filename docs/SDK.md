@@ -6,7 +6,7 @@ repo root builds them). They are the field-hardened seed of SeverActions' `skse-
 
 | Package | What |
 |---|---|
-| `@magelight/sdk` | `host` (presence, version, ids, capabilities, image URLs, `host.sound`, `host.hostTheme`), `bridge.on/send`, `channel<T>()`, pre-mount replay, browser mock with a floating panel |
+| `@magelight/sdk` | `host` (presence, version, ids, capabilities, image URLs, `host.sound`, `host.hostTheme`, `host.announce`), `bridge.on/send`, `channel<T>()`, pre-mount replay, browser mock with a floating panel |
 | `@magelight/react` | `useChannel`, `useChannelEvent`, `useUIMode`, `useCapability`, `useHost`, `useSend`, `useSound`, `<HostGate>` |
 | `@magelight/vite-plugin` | file:// safe output (`base './'`, es2022, no `crossorigin`), per-entry pruned `views/<name>/` folders |
 | `create-magelight-view` | `npm create magelight-view MyMod` → manifest mod + React config page |
@@ -18,7 +18,7 @@ At window-object-ready, before any page script, the host installs:
 ```js
 window.__MAGELIGHT__ = { version, versionNumber, viewId, modId, viewName, capabilities, dev, runtimeUrl }
 window.magelight     = { send(channel, payload), on(channel, fn) → off, off(channel, fn), pending(channel), sound(name),
-                         hostTheme(theme) }
+                         hostTheme(theme), gamepad, a11y }
 ```
 
 - **Host → page**: `InteropCall(view, channel, text)` calls `window.<channel>(text)` if the page
@@ -42,6 +42,8 @@ window.magelight     = { send(channel, payload), on(channel, fn) → off, off(ch
   hides an element from the test, so a wrapper that fills the window (a framework's `#root`) takes
   `pointer-events: none` and the panels in it `pointer-events: auto` ([CPP.md](CPP.md), "Letting the pointer
   through a view's empty parts"). `capabilities.hitTest` says the host has it.
+- **`__a11y`** (host 1.10.0): the page core's accessibility reader. Reserved: what a page sends there never reaches
+  its mod's listeners. Use `magelight.a11y.announce` (see "Screen readers").
 - **Page visibility** (host 1.5.0): `document.visibilityState` and `visibilitychange` follow the host's
   `ShowView`: `'hidden'` while the view is hidden (from the first script if it loads hidden), and the
   event fires within a frame of each hide and show. While hidden, `requestAnimationFrame` and CSS
@@ -246,6 +248,29 @@ if (pad && window.__MAGELIGHT__?.capabilities?.gamepad) {   // the helper is in 
   arrive with action `none`, and a stick at rest can get a zero `change` while the other moves.
 - **Cursor mode.** Where the view allows it, a right-stick click (or `setMode('cursor')`) switches to a cursor the
   left stick moves; A clicks there. A direction press, or `setMode('navigation')`, goes back.
+
+## Screen readers (1.10.0)
+
+When the player has a screen reader bridge installed, the page core reads your page to it: what has focus, a list's
+active item, live-region text and dialogs ([CPP.md](CPP.md#screen-readers-1100) has the plugin's side). It reads the
+page the way a browser's accessibility tree would, so a page built for the web reads well here too:
+
+- **Use real controls.** `<button>`, `<input>`, `<select>`, `<a href>`, or a `tabindex` and a `role` on a custom
+  one. A clickable `<div>` with neither is never focused, so it is never read.
+- **Name what has no text.** An icon-only button gets an `aria-label`; a field gets a `<label for>` (or
+  `aria-label`, or `aria-labelledby`). `title` is read as a description.
+- **Keyboard and gamepad selection.** Move DOM focus (the gamepad helper does), or keep focus on the list and set
+  `aria-activedescendant` to the item's id, or set `aria-selected="true"` on the selected item of a `role="tablist"`,
+  `"listbox"`, `"menu"` or `"grid"`. A highlight that is only a CSS class is not seen.
+- **Say what changes.** Chat, notifications and toasts go in an `aria-live="polite"` region (`role="log"` or
+  `"status"`); an error the player must hear at once, `role="alert"`. Text added there is read once it settles.
+- **Dialogs.** `role="dialog"` (or `<dialog>`) with `aria-labelledby` on its heading, and focus moved into it.
+- **Your own announcement.** `window.magelight.a11y.announce(text, { assertive })` (`host.announce` in
+  `@magelight/sdk`) reads a line that is nowhere on the page (a canvas game's events). It does nothing while no
+  screen reader listens, so call it freely.
+- **Opting out.** `data-ml-a11y="off"` on an element keeps it and what it holds out; on `<html>`, the whole page.
+- Hidden content (`display: none`, `visibility: hidden`, `hidden`, `aria-hidden="true"`) is never read, and a hidden
+  view's messages are not delivered.
 
 ## What a page can reach
 

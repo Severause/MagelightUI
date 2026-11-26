@@ -40,7 +40,7 @@ export function installMock(opts: MockOptions = {}): PageCore {
                     loadStagger: 0, loadOnShow: 0, cursor: 0, cursorTint: 0, rebuildScale: 0, keyboardTheme: 0, prepaint: 0,
                     uiModeCancel: 0, hostThemeReply: 0, tooltips: 0, scriptErrors: 0, pageVisibility: 0, keyboardCode: 0,
                     auxButtons: 0, imeCandidates: 0, gamepad: 0, pageThread: 0, vrGaze: 0, mainMenu: 0,
-                    polledKeys: 0, focusShare: 0, hitTest: 0, pageRoot: 0, loadingScreen: 0, mock: 1 },
+                    polledKeys: 0, focusShare: 0, hitTest: 0, pageRoot: 0, loadingScreen: 0, a11y: 0, uiModeView: 0, mock: 1 },
     dev: true,
     runtimeUrl: '',
     ...opts.info,
@@ -103,6 +103,12 @@ export function installMock(opts: MockOptions = {}): PageCore {
     // No audio in a browser mock — just say what would have played.
     sound(name) {
       log(`\u266a sound(${name})`);
+    },
+    // No screen reader in a browser: say what it would have read.
+    a11y: {
+      announce(text, o) {
+        log(`\u{1F50A} announce(${o?.assertive ? 'assertive' : 'polite'}: ${String(text).slice(0, 120)})`);
+      },
     },
   };
 

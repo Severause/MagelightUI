@@ -29,6 +29,14 @@ export interface PageCore {
   hostTheme?(theme: HostTheme | null): void;
   /** 1.6.0: the gamepad helper (see `GamepadHelper`); idle unless the view opted in to the gamepad layer */
   gamepad?: GamepadHelper;
+  /** 1.10.0: the accessibility reader's page side (see `A11yHelper`); its calls do nothing while no screen reader listens */
+  a11y?: A11yHelper;
+}
+
+/** `window.magelight.a11y` (host 1.10.0, `capabilities.a11y`). */
+export interface A11yHelper {
+  /** Read a line that is nowhere on the page to the player's screen reader; `assertive` interrupts what it is saying. */
+  announce(text: string, opts?: { assertive?: boolean }): void;
 }
 
 /** Positional pad controls: `south` is A on an Xbox pad, Cross on a PlayStation one. */
