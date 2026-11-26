@@ -162,6 +162,8 @@ namespace {
         // 1.9.2 appendix
         &Magelight::Api4::SetViewHitTest,
         &Magelight::Api4::AddPageRoot,
+        // 1.10.0 appendix
+        &Magelight::Api4::SetViewLoadingScreen,
     };
 
 }  // namespace

@@ -209,7 +209,7 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
   (never `Compress-Archive`: it writes `\` into entry names).
 - Settings: `My Games\Skyrim Special Edition\SKSE\Magelight.json` (`toggleKey`, `demoViews`, `stallWatchdog`/`stallThresholdMs`, `exceptionTelemetry`, `blockPolledKeys`, `skipGameCursor`, `clipCursor`, `pinGameCursor`,
   `imageProbe`, `forceCpu`, `cursorFile/Height/HotspotX/Y`, `cursorForce`, `modCursors`, `freezeWorld`, `freezeWorldSkipCapture`,
-  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `videoMemoryGuard`, `rendererThreads`, `throttleHiddenTimers`, `ulFiberMB`, `pageThread`, `pageGpu` / `asyncBudgetMs` / `asyncBudgetMB`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
+  `consoleLog`, `loadStagger`/`loadBudgetMs`, `msaa`, `memoryLogMinutes`, `lowMemoryFloorMB`, `videoMemoryGuard`, `rendererThreads`, `throttleHiddenTimers`, `ulFiberMB`, `pageThread`, `loadingScreenPages`, `pageGpu` / `asyncBudgetMs` / `asyncBudgetMB`, `keyFallback`, `gamepad` (`enabled`, `glyphs`, `trace`, the stick and repeat tuning); `animationTimerDelay` is ignored on 2.0, whose
   Free edition caps every View at 60 frames a second). Log: `...\SKSE\Magelight.log`.
 - **Desktop first**: any rendering question goes to `tools/desktop-harness` before a game cycle
   (our driver vs AppCore's on the same page; `inject.js` for live CSS bisects).
@@ -491,7 +491,24 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     (`ChooseCompositeTarget`), or in the UI pass in engine mode. A view that is not one neither loads nor shows until the
     first in-game frame (`s_viewsReleased`, `ViewShows`) and is not drawn or hit-tested over a return to the main menu.
     With the mode Off `ViewShows` is always true: nothing here changes VR or `"pageThread": false`. No world freeze at
-    the main menu. With
+    the main menu.
+    **Loading-screen pages (1.10.0):** the engine presents loading screens from a thread of its own while the main thread
+    loads; FrameWork skips such a frame (it never touches Ultralight) unless `PageThread::LoadingScreenDraws` lets it into
+    `LoadingScreenFrame`: page thread on, `"loadingScreenPages"` not false, the Loading Menu open (`s_loadingMenuOpen`,
+    MenuSink), a view set with `SetViewLoadingScreen` or manifest `loadingScreen` (`s_anyLoadingPage`), not engine mode,
+    not an untrusted chain. That frame does the game thread's Direct3D part only: `TakeAll`, a `Go` (only while a
+    loading-screen view is shown, so the page thread otherwise idles through a load as before), `RunPageFrames` (the
+    replay, shared with ThreadModeFrame) and a draw at Present of the loading-screen views alone; no `GameBookkeeping`,
+    game task, input, cursor, carrier or UI pass. The replay, the held packet (`s_heldPacket`, `s_asyncWaiting`), the
+    async driver's drain and the immediate-context calls of both composites and of the UI pass (`UiPassCompositeImpl`)
+    are under `s_presentMutex`, an OwnedMutex each takes with `try_to_lock` (the loser skips its draw; the game thread
+    still lets the next page frame go), released by the SEH guards of `GuardedFrameWorkHere` and `UiPassComposite`
+    after a fault (`TickImageProbe`, a debug probe, stays outside it). A new use of the immediate context, the async driver's replay side or
+    the held packet at Present goes under it. The context is used there only inside the loading thread's own Present,
+    where the engine's Loading Menu just drew on it from the same thread. A loading-screen view loads ahead of the world
+    and starts Ultralight at the main menu as a main-menu page does, shows while the Loading Menu is open (`ViewShows`),
+    and never counts as interactive there (no carrier); with `"loadingScreenPages"` false the flag changes nothing
+    (`LoadingPage`). `tools/pagethread-test` checks the rules. With
     the setting off `FrameWork` is unchanged (the input queue's rule above applies in both modes). Today's single
     thread no longer serializes the page parts against the input sinks (`InputSink`, and `GamepadSink` on whichever
     thread the engine's input job runs), the window procedure, game tasks, Papyrus natives and API calls: state they

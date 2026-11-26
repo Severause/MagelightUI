@@ -1226,6 +1226,7 @@ namespace Magelight::Api4 {
         if (n == "focusshare") return 1;    // SetViewFocusSharing / KeyFocusGained / KeyFocusLost / manifest "shareFocus", "acceptFocus" (1.9.0)
         if (n == "hittest") return 1;       // SetViewHitTest / manifest "hitTest" / the page's '__hittest' (1.9.2)
         if (n == "pageroot") return 1;      // AddPageRoot (1.9.2)
+        if (n == "loadingscreen") return Magelight::LoadingScreenPagesAvailable() ? 1 : 0;   // SetViewLoadingScreen / manifest "loadingScreen" (1.10.0); flat, page thread
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1364,7 +1365,7 @@ namespace Magelight::Api4 {
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
                                         "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu",
-                                        "polledKeys", "focusShare", "hitTest", "pageRoot" };
+                                        "polledKeys", "focusShare", "hitTest", "pageRoot", "loadingScreen" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1841,6 +1842,15 @@ namespace Magelight::Api4 {
         if (const Result g = GateView(view, "SetViewMainMenu"); g != Result::Ok) return g;
         if (!Magelight::SetViewMainMenu(view, on))
             return Fail(OwnerOf(view), Result::InvalidView, "SetViewMainMenu: view is gone or is an inspector");
+        return Result::Ok;
+    }
+
+    // 1.10.0 (Magelight::SetViewLoadingScreen; the draw is LoadingScreenFrame's).
+    Result SetViewLoadingScreen(ViewId view, bool on)
+    {
+        if (const Result g = GateView(view, "SetViewLoadingScreen"); g != Result::Ok) return g;
+        if (!Magelight::SetViewLoadingScreen(view, on))
+            return Fail(OwnerOf(view), Result::InvalidView, "SetViewLoadingScreen: view is gone or is an inspector");
         return Result::Ok;
     }
 

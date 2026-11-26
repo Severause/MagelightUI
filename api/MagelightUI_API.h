@@ -653,7 +653,9 @@ namespace MAGELIGHT_API {
                                                             // never back; see the threading contract; 0 in VR),
                                                             // "mainMenu" (1.7.1: follows "pageThread"),
                                                             // "polledKeys" (1.8.0), "focusShare" (1.9.0),
-                                                            // "hitTest" (1.9.2), "pageRoot" (1.9.2). The
+                                                            // "hitTest" (1.9.2), "pageRoot" (1.9.2),
+                                                            // "loadingScreen" (1.10.0: follows "pageThread",
+                                                            // 0 with Magelight.json "loadingScreenPages" false). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
@@ -1025,6 +1027,27 @@ namespace MAGELIGHT_API {
         // UnregisterMod included. Any thread. InvalidArgument (GetLastErrorMessage says why) for a folder it
         // refuses.
         Result (*AddPageRoot)(ModId mod, const char* folder);
+
+        // ── appended in 1.10.0 — gate on hostVersionNumber >= 11000 and QueryCapability("loadingScreen") ──
+        // Lets this view draw while the game's loading screen is up, over the loading screen the game draws (its art and
+        // 3D model stay; hide the game's own text with your own means if you replace it). Off by default: before
+        // 1.10.0, and for every view that does not ask, loading screens show no page. With it on the view's page loads
+        // ahead of the world, as a main-menu page's does (and Ultralight starts at the main menu for it), and a shown
+        // view draws whenever the Loading Menu is open, the first load from the main menu included, as well as where it
+        // would draw anyway (in game). Show it when the Loading Menu opens, or before the load, and hide it when that
+        // menu closes (MenuOpenCloseEvent), or it stays up in game. While the game loads:
+        // - Its main thread is busy loading: game tasks (PostGameTask, SKSE tasks) and Papyrus wait for the load to end.
+        //   Read the game state you show (the player, the date, a quest) before the load starts and send it to the page
+        //   then (InvokeJS, InteropCall, EvalJS): the page thread delivers it and keeps the page painting through the
+        //   load, so scripts, requestAnimationFrame and CSS animations run.
+        // - The page takes no input: no UI mode, cursor, keys or gamepad. Make the view click-through.
+        // - A slow page shows its last finished frame: the loading screen never waits for a page.
+        // Flat with the page thread only: on VR, with Magelight.json "pageThread": false or "loadingScreenPages": false,
+        // or once the page thread is refused at render init, the call succeeds and nothing draws on loading screens
+        // (QueryCapability("loadingScreen") is 0 there). Not drawn in engine mode ("composite": "engine") or behind a
+        // swapchain that refused its device, where loading screens show no page.
+        // Kept until DestroyView or a call with false. Any thread. InvalidView for a view that is gone or an inspector.
+        Result (*SetViewLoadingScreen)(ViewId view, bool on);
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)

@@ -139,7 +139,8 @@ extern "C" {
     // frame that made it has run.
     MGGPU_API void* MgGpu_CreateAsync(ID3D11Device* device, ID3D11DeviceContext* immediate, int samples, MgGpuLogFn log);
 
-    // Game thread: run queued frames in order until none is left or the budget is spent (0 = no limit for that
+    // Game thread (the replay side: one thread at a time; the host also calls it from the loading screen's thread, never
+    // at once with the game thread's call): run queued frames in order until none is left or the budget is spent (0 = no limit for that
     // part). The budget is tested between operations, so one operation (a frame's whole command list, one upload) may
     // overrun it: the first of a call always runs, a frame's destroys always follow its commands, and a frame cut
     // short resumes at its next operation on the next call. Returns the id of the last frame run completely (ids count up from 1; 0 = none yet). Uploads and state

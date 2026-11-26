@@ -13,6 +13,7 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 
 | Added | Gate | Feature |
 |---|---|---|
+| 1.10.0 | 11000 | Loading-screen pages: `SetViewLoadingScreen(view, on)` lets a view draw while the game's loading screen is up (opt-in per view, off by default), manifest `"loadingScreen"`, `QueryCapability("loadingScreen")` (flat, page thread); `Magelight.json` `"loadingScreenPages": false` turns it off |
 | 1.9.3 | 10903 | Manifest `"hiddenTimers": "full"`: a view's repeating timers keep their rate while it is hidden (hidden pages' timers are throttled by default from 1.9.3) |
 | 1.9.2 | 10902 | `AddPageRoot(mod, folder)`: a folder inside the game's Data folder that the mod's pages read from, for pages kept outside `Data\Magelight` that share files above their own folder (a page set laid out for another UI host); `QueryCapability("pageRoot")` |
 | 1.9.2 | 10902 | Content hit testing: a view takes the pointer only where its page has an element, so the empty parts of a fullscreen view let it through to the view below: `SetViewHitTest` with `kHitTestRect` / `kHitTestContent`, manifest `"hitTest"`, the page's `'__hittest'` message, `QueryCapability("hitTest")` |
@@ -68,6 +69,42 @@ The **"added in"** column is the version to put in `minHost` (manifest) /
 | 0.12.0 | — | `BindHotkey` registry; manifest `hotkey` |
 | 0.11.0 | — | Sessions / manifest docs |
 | 0.10.0 | — | API v4 (`MagelightApi4`): per-mod registration, texture images, UI mode, events |
+
+## 1.10.0 - Unreleased
+
+### What players notice
+
+- **Nothing, unless a mod asks for it.** Loading screens look as they did: no page draws on them. A mod can now make
+  one of its views a loading-screen page, which then draws over the loading screen the game draws (its art and 3D
+  model stay), so the loading screen can show what the mod puts there (the character, the date, the quest objective).
+  Flat with the page thread only (the default). `Magelight.json` `"loadingScreenPages": false` keeps every page off
+  loading screens.
+
+### For mod authors
+
+- **`SetViewLoadingScreen(view, on)`** (API v4, gate `hostVersionNumber >= 11000` and `QueryCapability("loadingScreen")`),
+  manifest `"loadingScreen": true`. The view's page loads ahead of the world, as a main-menu page's does (Ultralight
+  starts at the main menu for it), and a shown view draws whenever the Loading Menu is open, the first load from the
+  main menu included. Show it when the Loading Menu opens (or before the load) and hide it when that menu closes. See
+  "Pages on loading screens" in `docs/CPP.md`.
+- **The game's main thread is loading meanwhile:** game tasks (`PostGameTask`, SKSE tasks) and Papyrus wait for the
+  load to end. Read what the page shows before the load and send it to the page then; the page thread delivers it and
+  keeps the page painting through the load (scripts, `requestAnimationFrame` and CSS animations run).
+- A loading-screen page takes no input (no UI mode, cursor, keys or gamepad): make the view click-through. It is not
+  drawn in engine mode (`"composite": "engine"`) or behind a swapchain that refused its device.
+- While a loading-screen view is shown during a load, the page thread runs every page, not only that one: other
+  mods' pages run their timers and scripts through the load too, and their render-thread callbacks may be called
+  then (none of them can reach the game's main thread until the load ends).
+
+### How it works
+
+- The engine presents its loading screens from a thread of its own while the main thread loads. Magelight skipped
+  every such frame: Ultralight lives on one thread, which before the page thread (1.7.0) was the main thread itself.
+  With the page thread, that thread now does what the game thread's Present does with Direct3D alone, and no
+  Ultralight call: it takes the finished page frames, lets the next one start, replays what they recorded and draws
+  the newest frame's loading-screen views at its own Present, after the engine drew the Loading Menu there from the
+  same thread. One lock (`s_presentMutex`, taken with try-lock by both) keeps that apart from the game thread's own
+  composite at the first and last frames of a load; neither thread ever waits on the other.
 
 ## 1.9.3 - Unreleased
 

@@ -148,6 +148,7 @@ namespace Magelight::Api4 {
     Result SetViewFocusSharing(ViewId view, std::uint32_t flags);                           // 1.9.0 the keyboard shared on a click
     Result SetViewHitTest(ViewId view, std::uint32_t mode);                                 // 1.9.2 the pointer only where the page has an element
     Result AddPageRoot(ModId mod, const char* folder);                                      // 1.9.2 a folder the mod's pages read from
+    Result SetViewLoadingScreen(ViewId view, bool on);                                      // 1.10.0 load ahead of the world, draw on loading screens
     // 0.31.0: a manifest's top-level "cursor", the default for every view of the mod without a cursor of its own
     // (existing views now, later ones at CreateViewEx).
     void SetModCursor(ModId mod, const Magelight::CursorSet& set);

@@ -109,6 +109,8 @@ namespace Magelight {
     //   "ulFiberMB": 8        // 1.3.0: the stack pages run on, in MB (8..64; less is raised to 8); 0 = the game's stack
     //   "pageThread": true    // 1.7.0: pages run on a thread of their own (flat only); false = in the game's frame
     //                         // (and no main-menu pages, 1.7.1)
+    //   "loadingScreenPages": true // 1.10.0: with pageThread, views a mod made loading-screen pages draw on loading
+    //                              // screens; false = loading screens show no page, as before
     //   "pageGpu": "async"    // 1.9.0: with pageThread, how the page thread's GPU work reaches the game's context:
     //                         // "async" = frames the page thread records and the game thread replays (no device or
     //                         // context call off it); "deferred" = a deferred context whose lists the game thread runs
@@ -220,6 +222,15 @@ namespace Magelight {
     static std::atomic<bool> s_anyMainMenuPage{ false };   // written under s_viewsMutex
     static std::atomic<bool> s_viewsReleased{ false };
     static std::atomic<bool> s_mainPresenting{ false };
+    // Loading-screen pages (1.10.0, page thread only). A view set with SetViewLoadingScreen (manifest "loadingScreen")
+    // loads ahead of the world as a main-menu page does (and so starts Ultralight at the main menu), shows while the
+    // Loading Menu is open, and is drawn by the thread the engine presents its loading screens from (LoadingScreenFrame),
+    // which never touches Ultralight. MenuSink keeps s_loadingMenuOpen; Magelight.json "loadingScreenPages": false turns
+    // the drawing off for the session.
+    static std::atomic<bool>     s_loadingMenuOpen{ false };
+    static std::atomic<bool>     s_anyLoadingPage{ false };   // written under s_viewsMutex
+    static std::atomic<bool>     s_loadingScreenPages{ true };
+    static std::atomic<unsigned> s_loadingOpens{ 0 };         // Loading Menu opens this session (one log line each)
     // Cursor art: the flat cursor is drawn in code (MagelightCursorArt.h) and follows the page's CSS cursor.
     // "cursorFile" (relative to the runtime dir, or absolute; default none) replaces it with a still image,
     // "cursorHeight" is the drawn height in px at 1080p (scaled with resolution) and "cursorHotspotX/Y"
@@ -651,6 +662,10 @@ namespace Magelight {
                     SKSE::log::info("Magelight: pageThread is ignored on Skyrim VR - pages run in the game's frame");
                 }
             }
+            if (auto it = j.find("loadingScreenPages"); it != j.end() && it->is_boolean() && !it->get<bool>()) {
+                s_loadingScreenPages.store(false);
+                SKSE::log::info("Magelight: loadingScreenPages false - loading screens show no page");
+            }
             if (auto it = j.find("pageGpu"); it != j.end()) {
                 const std::string how = it->is_string() ? HotkeyNames::Lower(it->get<std::string>()) : std::string();
                 if (how == "deferred") s_pageAsyncWanted = false;
@@ -852,7 +867,7 @@ namespace Magelight {
     static MgGpuStatsFn    s_gpuStats = nullptr;
     static MgGpuTakeListFn s_gpuTakeList = nullptr;   // contract 3: the parts a deferred recording split at flushes
     static MgGpuCreateAsyncFn s_gpuCreateAsync = nullptr;
-    static MgGpuAsyncDrainFn  s_gpuAsyncDrain = nullptr;   // game thread only
+    static MgGpuAsyncDrainFn  s_gpuAsyncDrain = nullptr;   // the presenting thread, under s_presentMutex (1.10.0: the loading screen's too)
     static MgGpuAsyncStateFn  s_gpuAsyncState = nullptr;   // any thread
     static MgGpuAsyncPurgeFn  s_gpuAsyncPurge = nullptr;   // Ultralight's thread (the recorder's)
     static void*          s_gpu = nullptr;       // backend handle (Ultralight's thread; pageGpu async: the game thread's)
@@ -996,6 +1011,7 @@ namespace Magelight {
         bool loadFailed = false;        // main frame failed to load since its last load (the load queue's settle test)
         bool loadOnShow = false;        // 0.31.0 SetViewLoadOnShow: no first load until the view is shown
         bool mainMenu = false;          // 1.7.1 loads and shows at the main menu: SetViewMainMenu, or UI mode asked there
+        bool loadingScreen = false;     // 1.10.0 loads ahead of the world and draws on loading screens: SetViewLoadingScreen
         // 0.31.11 SetViewPrepaint: paint the page while hidden, kPrepaintSettleMs after paintableAt, and once more
         // when it settles (settleRepaint), so its first show composites a finished texture instead of painting the
         // whole page that frame.
@@ -1256,17 +1272,28 @@ namespace Magelight {
         outY = (v.y >= 0) ? static_cast<float>(v.y) : bh + static_cast<float>(v.y);
     }
 
+    // A loading-screen page that counts: with "loadingScreenPages" false a view's flag changes nothing at all.
+    static bool LoadingPage(const MlView& v)
+    {
+        return v.loadingScreen && s_loadingScreenPages.load();
+    }
+
     static bool ViewShows(const MlView& v)
     {
         return PageThread::ViewShowsNow(s_pageThreadMode.load() == PageThread::Mode::Off, v.mainMenu,
-                                        s_mainMenuOpen.load(), s_viewsReleased.load());
+                                        s_mainMenuOpen.load(), s_viewsReleased.load(), LoadingPage(v),
+                                        s_loadingMenuOpen.load());
     }
 
     static void NoteMainMenuPagesLocked()
     {
-        bool any = false;
-        for (const auto& v : s_views) any = any || (v->mainMenu && !v->destroyPending);
+        bool any = false, loading = false;
+        for (const auto& v : s_views) {
+            any = any || (v->mainMenu && !v->destroyPending);
+            loading = loading || (LoadingPage(*v) && !v->destroyPending);
+        }
         s_anyMainMenuPage.store(any);
+        s_anyLoadingPage.store(loading);
     }
 
     // True when any view wants pixels this frame.
@@ -7311,7 +7338,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         for (auto& vp : s_views) {
             MlView& v = *vp;
             if (v.ul || v.w <= 0 || v.h <= 0 || v.destroyPending) continue;
-            if (!v.mainMenu && !s_viewsReleased.load()) continue;      // loads at the first in-game frame
+            if (!v.mainMenu && !LoadingPage(v) && !s_viewsReleased.load()) continue;   // loads at the first in-game frame
             if ((v.dormant || v.loadOnShow) && !v.visible) continue;   // wakes / first loads on ShowView(true)
             // Low memory: a view UI mode needs and a shown view a rebuild released this frame load whatever it says.
             // Any other load comes out of the guard's budget (JudgeLoad); the record stays and loads once it fits.
@@ -10086,6 +10113,13 @@ float4 ps_straight(VSOut i) : SV_Target {
     }
 
     static void ThreadModeFrame(IDXGISwapChain* sc, float bw, float bh);   // fwd (the page thread, below)
+    static void LoadingScreenFrame(IDXGISwapChain* sc);                    // fwd (1.10.0, below)
+    // With the page thread, held by whichever thread composites page frames: the game thread's Present
+    // (ThreadModeFrame) or, during a load, the loading screen's (LoadingScreenFrame). It keeps the replay, the held
+    // page frame and their use of the immediate context to one thread at a time. Both take it with try_to_lock and skip
+    // their composite when the other has it (the first and last frames of a load), so neither ever waits on the other.
+    // An OwnedMutex: a fault in a frame runs no destructor (/EHsc), so the frame's SEH guard gives it back.
+    static PageThread::OwnedMutex s_presentMutex;
 
     static void FrameWork(IDXGISwapChain* sc)
     {
@@ -10137,7 +10171,8 @@ float4 ps_straight(VSOut i) : SV_Target {
             if (!onMain) return;
             if (!s_worldReady.load() &&
                 !PageThread::StartsAtMainMenu(s_pageThreadMode.load() == PageThread::Mode::Wanted,
-                                              s_anyMainMenuPage.load(), s_mainMenuOpen.load())) {
+                                              s_anyMainMenuPage.load() || s_anyLoadingPage.load(),
+                                              s_mainMenuOpen.load())) {
                 // The page thread was refused after a main-menu page asked: no page runs until the world does, so the
                 // UI mode entered for it would hold the controls over nothing.
                 if (s_focused.load() && s_mainMenuOpen.load()) {
@@ -10156,6 +10191,14 @@ float4 ps_straight(VSOut i) : SV_Target {
         }
         if (s_renderDead.load()) return;
         if (!onMain) {
+            // 1.10.0: the engine's loading-screen thread draws the loading-screen views the page thread painted
+            // (opt-in per view; it makes no Ultralight call).
+            if (PageThread::LoadingScreenDraws(PageThreadOn(), s_loadingScreenPages.load(), s_loadingMenuOpen.load(),
+                                               s_anyLoadingPage.load(), s_engineComposite.load(),
+                                               s_untrustedChain.load())) {
+                LoadingScreenFrame(sc);
+                return;
+            }
             // A frame from a foreign thread (loading screens etc.): touching
             // Ultralight here is the fastfail. Skip the whole frame. (The main
             // thread is the one that composites, with or without the page thread.)
@@ -10331,6 +10374,10 @@ float4 ps_straight(VSOut i) : SV_Target {
         s_lastUiPassFrame.store(s_compositeFrames.load());
         s_uiPassSeen.store(true);
         if (!s_context || !s_device || s_renderDead.load()) return;
+        // The loading screen's thread is composing on the immediate context (the first or last frames of a load,
+        // 1.10.0): this pass draws nothing. Never held by this thread here: the UI pass is the engine's, not Present's.
+        std::unique_lock<PageThread::OwnedMutex> present(s_presentMutex, std::try_to_lock);
+        if (!present.owns_lock()) return;
         std::vector<QueuedQuad> quads;
         float backW = 0, backH = 0;
         {
@@ -10390,6 +10437,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         __try {
             UiPassCompositeImpl(endOfFrameFallback);
         } __except (LogSehAndDisable("UI pass", GetExceptionInformation())) {
+            s_presentMutex.ReleaseIfHeldByThisThread();
         }
     }
 
@@ -10399,6 +10447,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         __try {
             FrameWork(sc);
         } __except (LogSehAndDisable("frame work", GetExceptionInformation())) {
+            s_presentMutex.ReleaseIfHeldByThisThread();   // the other presenting thread's next try finds it free
         }
     }
 
@@ -10910,6 +10959,102 @@ float4 ps_straight(VSOut i) : SV_Target {
         return true;
     }
 
+    // The newest page frame's views, drawn until a newer frame comes. Never freed at exit: its references are
+    // Direct3D's, which may be gone by then. Under s_presentMutex.
+    static PagePacket* s_heldPacket = nullptr;
+    // pageGpu async: a packet waits here until the frame it names has run; its views are not current before. Under
+    // s_presentMutex.
+    static std::vector<std::unique_ptr<PagePacket>> s_asyncWaiting;
+
+    struct PageFramesRun {
+        std::size_t                           drawn = 0;   // views drawn this frame, not held
+        bool                                  async = false;
+        MgGpuAsyncState                       recorder{};  // pageGpu async: as read before this frame's replay
+        std::chrono::steady_clock::time_point executed{};  // when the recorded work had run
+    };
+
+    // Under s_presentMutex, on the thread that presents (the game thread's Present, or the loading screen's): run what
+    // the taken page frames recorded, in order (pageGpu async: replay the recorded frames within the budget), then draw
+    // the newest page frame's views that are in `wanted` through `emit`, and `over` (the cursor) above them. `drawAny`:
+    // some view is wanted now, so the newest frame is drawn even with nothing new to run. Keeps the newest packet as
+    // the one on screen.
+    static PageFramesRun RunPageFrames(std::vector<std::unique_ptr<PagePacket>>& packets, bool drawAny,
+                                       const std::vector<ViewId>& wanted, const EmitFn& emit,
+                                       const std::function<void()>& over)
+    {
+        using ClockT = std::chrono::steady_clock;
+        PageFramesRun run;
+        run.recorder.size = sizeof(run.recorder);
+        run.async = s_pageAsync.load() && s_gpu;
+        // The newest waiting packet whose frame has run (`ran`) is the one on screen from here; older ones are done with.
+        const auto adopt = [](std::uint64_t ran) {
+            std::size_t done = 0;
+            while (done < s_asyncWaiting.size() && s_asyncWaiting[done]->frameId <= ran) ++done;
+            if (!done) return;
+            delete s_heldPacket;
+            s_heldPacket = s_asyncWaiting[done - 1].release();
+            s_asyncWaiting.erase(s_asyncWaiting.begin(), s_asyncWaiting.begin() + static_cast<std::ptrdiff_t>(done));
+        };
+        if (run.async) {
+            for (auto& p : packets) s_asyncWaiting.push_back(std::move(p));
+            packets.clear();
+            s_gpuAsyncState(s_gpu, &run.recorder);
+            adopt(run.recorder.lastExecuted);   // a page frame that recorded nothing waits for no Direct3D work
+        }
+        // Recorded work to run: frames, or a mod's image waiting for the frames recorded before it.
+        const bool replay = run.async && (run.recorder.framesInFlight > 0 || run.recorder.externalPending > 0);
+        const PagePacket* newest = packets.empty() ? s_heldPacket : packets.back().get();
+        bool lists = false;
+        for (const auto& p : packets) lists = lists || !p->lists.empty();
+        run.executed = ClockT::now();
+        if (lists || drawAny || replay) {
+            StateBackup backup;
+            backup.Capture(s_context);
+            if (replay) {
+                // The recorded frames in order, within the budget: a frame cut short goes on at the next Present.
+                adopt(s_gpuAsyncDrain(s_gpu, s_asyncBudgetMs, s_asyncBudgetBytes));
+                newest = s_heldPacket;
+            }
+            // Each list with the game's whole state saved and put back around it (PageThread::RunRecordedList), and the
+            // immediate context flushed after each part a flush split off, where the in-frame driver flushes, and
+            // between two page frames, which in the frame always have a Present between them.
+            for (std::size_t k = 0; k < packets.size(); ++k) {
+                auto& p = packets[k];
+                for (std::size_t i = 0; i < p->lists.size(); ++i) {
+                    PageThread::RunRecordedList(s_context, p->lists[i]);
+                    if (i + 1 < p->lists.size() || k + 1 < packets.size()) s_context->Flush();
+                    p->lists[i]->Release();
+                }
+                p->lists.clear();
+            }
+            run.executed = ClockT::now();
+            StateBackup::Neutralize(s_context);
+            if (newest)
+                for (const auto& pv : newest->views)
+                    if (std::find(wanted.begin(), wanted.end(), pv.id) != wanted.end()) {
+                        if (run.async) {
+                            // Looked up every frame, never kept: the call resolves an MSAA target, and a texture a
+                            // later frame destroyed is simply not found.
+                            PresentedView shown = pv;
+                            shown.srv = static_cast<ID3D11ShaderResourceView*>(s_gpuSrv(s_gpu, pv.textureId));
+                            if (!shown.srv) continue;
+                            EmitView(shown, emit);
+                        } else {
+                            EmitView(pv, emit);
+                        }
+                        ++run.drawn;
+                    }
+            over();
+            backup.Restore(s_context);
+        }
+        // Quads queued for the UI pass hold references of their own, so the packet they came from can go.
+        if (!packets.empty()) {
+            delete s_heldPacket;
+            s_heldPacket = packets.back().release();
+        }
+        return run;
+    }
+
     // The frame at Present with the page thread: the game thread's bookkeeping, every page frame finished since the
     // last Present taken and the next one let go at once (it records while this frame runs the taken frames' lists in
     // order and draws the newest one's views). Never waits on the page thread: until it has finished a frame there is
@@ -10921,6 +11066,13 @@ float4 ps_straight(VSOut i) : SV_Target {
         const auto t0 = ClockT::now();
         GameBookkeeping();
         TickImageProbe();
+        // The loading screen's thread is composing (the first or last frames of a load): this frame lets the next page
+        // frame start and leaves the finished ones, and the UI pass its last quads (it drops them after 250 ms).
+        std::unique_lock<PageThread::OwnedMutex> present(s_presentMutex, std::try_to_lock);
+        if (!present.owns_lock()) {
+            s_pageHandoff->Go();
+            return;
+        }
         std::vector<std::unique_ptr<PagePacket>> packets = s_pageHandoff->TakeAll();
         const bool gotNew = !packets.empty();   // read here: pageGpu async moves the packets on before the cost line
         // The views wanted now, read here rather than from the page frame: one hidden since (Escape, a mod's hide) is
@@ -10936,91 +11088,25 @@ float4 ps_straight(VSOut i) : SV_Target {
             for (const auto& v : s_views) {
                 if (!v->visible || !ViewShows(*v)) continue;
                 s_anyVisible = true;
-                s_interactiveVisible = s_interactiveVisible || !v->clickThrough;
+                // A loading-screen page over the Loading Menu takes no input, so it never opens the carrier there.
+                s_interactiveVisible = s_interactiveVisible ||
+                                       (!v->clickThrough && !(LoadingPage(*v) && s_loadingMenuOpen.load()));
                 s_wanted.push_back(v->id);
             }
         }
         s_pageHandoff->Go();   // the next page frame overlaps this frame's execute and draws
-        // The newest page frame's views, drawn until a newer frame comes. Never freed at exit: its references are
-        // Direct3D's, which may be gone by then.
-        static PagePacket* s_held = nullptr;
-        // pageGpu async: a packet waits here until the frame it names has run; its views are not current before.
-        static std::vector<std::unique_ptr<PagePacket>> s_asyncWaiting;
-        const bool async = s_pageAsync.load() && s_gpu;
-        MgGpuAsyncState recorder{};
-        recorder.size = sizeof(recorder);
-        // The newest waiting packet whose frame has run (`ran`) is the one on screen from here; older ones are done with.
-        const auto adopt = [](std::uint64_t ran) {
-            std::size_t done = 0;
-            while (done < s_asyncWaiting.size() && s_asyncWaiting[done]->frameId <= ran) ++done;
-            if (!done) return;
-            delete s_held;
-            s_held = s_asyncWaiting[done - 1].release();
-            s_asyncWaiting.erase(s_asyncWaiting.begin(), s_asyncWaiting.begin() + static_cast<std::ptrdiff_t>(done));
-        };
-        if (async) {
-            for (auto& p : packets) s_asyncWaiting.push_back(std::move(p));
-            packets.clear();
-            s_gpuAsyncState(s_gpu, &recorder);
-            adopt(recorder.lastExecuted);   // a page frame that recorded nothing waits for no Direct3D work
-        }
-        // Recorded work to run: frames, or a mod's image waiting for the frames recorded before it.
-        const bool replay = async && (recorder.framesInFlight > 0 || recorder.externalPending > 0);
-        const PagePacket* newest = packets.empty() ? s_held : packets.back().get();
         const bool anyVisible = s_anyVisible, interactiveVisible = s_interactiveVisible;
         const CompositeTarget target = ChooseCompositeTarget(interactiveVisible);
         std::vector<QueuedQuad> queued;
         const EmitFn emit = MakeEmit(sc, target, queued);
-        bool lists = false;
-        for (const auto& p : packets) lists = lists || !p->lists.empty();
         const auto tPrelude = ClockT::now();
-        auto tExecuted = tPrelude;
-        std::size_t drawn = 0;   // the cost line's views, as the in-frame line's: drawn this frame, not held
-        if (lists || anyVisible || replay) {
-            StateBackup backup;
-            backup.Capture(s_context);
-            if (replay) {
-                // The recorded frames in order, within the budget: a frame cut short goes on at the next Present.
-                adopt(s_gpuAsyncDrain(s_gpu, s_asyncBudgetMs, s_asyncBudgetBytes));
-                newest = s_held;
-            }
-            // Each list with the game's whole state saved and put back around it (PageThread::RunRecordedList), and the
-            // immediate context flushed after each part a flush split off, where the in-frame driver flushes, and
-            // between two page frames, which in the frame always have a Present between them.
-            for (std::size_t k = 0; k < packets.size(); ++k) {
-                auto& p = packets[k];
-                for (std::size_t i = 0; i < p->lists.size(); ++i) {
-                    PageThread::RunRecordedList(s_context, p->lists[i]);
-                    if (i + 1 < p->lists.size() || k + 1 < packets.size()) s_context->Flush();
-                    p->lists[i]->Release();
-                }
-                p->lists.clear();
-            }
-            tExecuted = ClockT::now();
-            StateBackup::Neutralize(s_context);
-            if (newest)
-                for (const auto& pv : newest->views)
-                    if (std::find(s_wanted.begin(), s_wanted.end(), pv.id) != s_wanted.end()) {
-                        if (async) {
-                            // Looked up every frame, never kept: the call resolves an MSAA target, and a texture a
-                            // later frame destroyed is simply not found.
-                            PresentedView shown = pv;
-                            shown.srv = static_cast<ID3D11ShaderResourceView*>(s_gpuSrv(s_gpu, pv.textureId));
-                            if (!shown.srv) continue;
-                            EmitView(shown, emit);
-                        } else {
-                            EmitView(pv, emit);
-                        }
-                        ++drawn;
-                    }
-            EmitCursor(anyVisible, bw, bh, emit);
-            backup.Restore(s_context);
-        }
+        const PageFramesRun run =
+            RunPageFrames(packets, anyVisible, s_wanted, emit, [&] { EmitCursor(anyVisible, bw, bh, emit); });
+        const auto tExecuted = run.executed;
+        const std::size_t drawn = run.drawn;   // the cost line's views, as the in-frame line's: drawn this frame, not held
+        const bool async = run.async;
+        const MgGpuAsyncState& recorder = run.recorder;
         PublishUiPass(target.defer, queued, bw, bh);
-        if (!packets.empty()) {
-            delete s_held;
-            s_held = packets.back().release();
-        }
         const auto tEnd = ClockT::now();
 
         struct Acc {
@@ -11055,6 +11141,46 @@ float4 ps_straight(VSOut i) : SV_Target {
             acc = Acc{};
             acc.last = tEnd;
             acc.pageFramesAtLast = pageFrames;
+        }
+    }
+
+    // Loading-screen pages (1.10.0): a Present from the thread the engine draws its loading screens on, while the main
+    // thread loads (FrameWork lets it in only per PageThread::LoadingScreenDraws). Before 1.10.0 such frames were skipped
+    // whole: Ultralight lives on one thread (invariant 1), and before the page thread that thread was the main one,
+    // which loads instead of presenting. With the page thread the pages keep running on their own thread; this frame
+    // makes no Ultralight call either. It does only what ThreadModeFrame does with Direct3D: it takes the page frames
+    // finished since the last Present and lets the next one start, so the loading-screen pages keep painting through
+    // the load, replays what they recorded and draws the newest frame's loading-screen views over the loading screen the
+    // engine just drew. Nothing of the game thread's: no game bookkeeping or game tasks (the main thread is loading),
+    // no input or cursor (the Loading Menu takes none), no carrier menu or UI pass (engine work), only a draw at
+    // Present. It uses the immediate context only here, inside this thread's own Present, where the engine's Loading
+    // Menu has just drawn on it from the same thread; s_presentMutex keeps it apart from the game thread's composite. It
+    // never waits: with the game thread composing (the first and last frames of a load) it skips its draw, and with the
+    // page side holding the registry it keeps its last reading.
+    static void LoadingScreenFrame(IDXGISwapChain* sc)
+    {
+        std::unique_lock<PageThread::OwnedMutex> present(s_presentMutex, std::try_to_lock);
+        if (!present.owns_lock()) return;
+        std::vector<std::unique_ptr<PagePacket>> packets = s_pageHandoff->TakeAll();
+        static std::vector<ViewId> s_loadingWanted;   // this thread's reading, as ThreadModeFrame's s_wanted
+        if (std::unique_lock<PageThread::OwnedMutex> lk(s_viewsMutex, std::try_to_lock); lk.owns_lock()) {
+            s_loadingWanted.clear();
+            for (const auto& v : s_views)
+                if (LoadingPage(*v) && v->visible && !v->destroyPending && ViewShows(*v)) s_loadingWanted.push_back(v->id);
+        }
+        // The next page frame paints while this one replays and draws. Only while a loading-screen view is shown: the
+        // page thread then runs every page through the load, and with none shown it waits, as before 1.10.0.
+        if (!s_loadingWanted.empty()) s_pageHandoff->Go();
+        std::vector<QueuedQuad> none;   // never filled: a draw at Present, no UI pass
+        const EmitFn emit = MakeEmit(sc, CompositeTarget{}, none);
+        const PageFramesRun run = RunPageFrames(packets, !s_loadingWanted.empty(), s_loadingWanted, emit, [] {});
+        // One line per load in which it drew, so a log says whether a loading screen showed the pages.
+        static unsigned s_loggedLoad = 0;
+        const unsigned load = s_loadingOpens.load();
+        if (run.drawn && load != s_loggedLoad) {
+            s_loggedLoad = load;
+            SKSE::log::info("Magelight: the loading screen (thread {}) draws {} loading-screen view(s)", GetCurrentThreadId(),
+                            run.drawn);
         }
     }
 
@@ -12396,6 +12522,10 @@ float4 ps_straight(VSOut i) : SV_Target {
             }
             if (e) NoteMenuForGamepad(e->menuName, e->opening);
             if (e && e->menuName == RE::MainMenu::MENU_NAME) s_mainMenuOpen.store(e->opening);
+            if (e && e->menuName == RE::LoadingMenu::MENU_NAME) {
+                if (e->opening) s_loadingOpens.fetch_add(1);
+                s_loadingMenuOpen.store(e->opening);
+            }
             if (e && !s_focused.load() && e->menuName.c_str() &&
                 GetTickCount64() - s_uiModeExitedMs.load() < 3000) {
                 const std::string_view name(e->menuName.c_str());
@@ -13305,6 +13435,23 @@ float4 ps_straight(VSOut i) : SV_Target {
                         MainMenuPagesAvailable() ? "" : " (needs the page thread: it stays off this session)");
         return true;
     }
+
+    bool SetViewLoadingScreen(ViewId view, bool on)
+    {
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(view);
+            if (!v || v->destroyPending || v->isInspector) return false;
+            v->loadingScreen = on;
+            NoteMainMenuPagesLocked();
+        }
+        SKSE::log::info("Magelight: view {} loading-screen page {}{}", view, on ? "on" : "off",
+                        LoadingScreenPagesAvailable() ? ""
+                                                      : " (needs the page thread and loadingScreenPages: it stays off this session)");
+        return true;
+    }
+
+    bool LoadingScreenPagesAvailable() { return PageThreadActive() && s_loadingScreenPages.load(); }
 
     bool SetViewFocusSharing(ViewId view, std::uint32_t flags)
     {
