@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "red4ext-sdk",
+  "version-date": "2026-10-24",
+  "port-version": 0,
+  "description": "RED4ext.SDK, header-only, pinned to WopsS/RED4ext.SDK 5246e659 (types for Cyberpunk 2077 patch 2.5). Used by cyberpunk/ only.",
+  "homepage": "https://github.com/WopsS/RED4ext.SDK",
+  "license": "MIT",
+  "supports": "windows & x64",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

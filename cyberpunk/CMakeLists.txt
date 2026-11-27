@@ -1,6 +1,10 @@
 # MagelightCP — Magelight on Cyberpunk 2077: manifest mods drawn over the game (README.md).
 # Its own project: the Skyrim host's build is untouched.
 cmake_minimum_required(VERSION 3.24)
+# Libraries come from vcpkg (vcpkg.json; RED4ext.SDK is the overlay port ../ports/red4ext-sdk), as the root's do.
+if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+    set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
+endif()
 project(MagelightCP VERSION 0.1.0 LANGUAGES CXX)
 # The one source of the version: the log, RED4ext's plugin info and the page's window.__MAGELIGHT__ read these.
 add_compile_definitions(MLCP_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} MLCP_VERSION_MINOR=${PROJECT_VERSION_MINOR}
@@ -15,17 +19,8 @@ if(NOT EXISTS "${ULTRALIGHT_DIR}/include/Ultralight/Ultralight.h")
     message(FATAL_ERROR "Ultralight SDK not found at ${ULTRALIGHT_DIR} (extern/README.md).")
 endif()
 
-# The game patch's RED4ext SDK. No default: it is a checkout on this machine (README.md).
-set(RED4EXT_SDK_DIR "" CACHE PATH "RED4ext.SDK checkout for game 2.5")
-if(NOT EXISTS "${RED4EXT_SDK_DIR}/include/RED4ext/RED4ext.hpp")
-    message(FATAL_ERROR "Set RED4EXT_SDK_DIR to a RED4ext.SDK checkout for game 2.5.")
-endif()
-
-# nlohmann/json, one header, fetched by build.ps1 into extern/ (gitignored).
-set(JSON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/nlohmann/include")
-if(NOT EXISTS "${JSON_DIR}/nlohmann/json.hpp")
-    message(FATAL_ERROR "nlohmann/json.hpp not found under ${JSON_DIR} (build.ps1 fetches it).")
-endif()
+find_package(RED4ext CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 # The host without the game: everything but the hooks and the D3D12 drawing.
 set(HOST_SOURCES
@@ -50,12 +45,10 @@ target_compile_definitions(MagelightCP PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNIC
 target_compile_options(MagelightCP PRIVATE /W3 /utf-8 /EHsc /MP)
 target_include_directories(MagelightCP SYSTEM PRIVATE
     ${ULTRALIGHT_DIR}/include
-    ${ULTRALIGHT_DIR}/platform/include
-    ${JSON_DIR}
-    ${RED4EXT_SDK_DIR}/include
-    ${RED4EXT_SDK_DIR}/vendor/D3D12MemAlloc)
+    ${ULTRALIGHT_DIR}/platform/include)
 target_link_directories(MagelightCP PRIVATE ${ULTRALIGHT_DIR}/lib)
-target_link_libraries(MagelightCP PRIVATE Ultralight UltralightCore WebCore dwrite d3d12 dxgi d3dcompiler delayimp Normaliz)
+target_link_libraries(MagelightCP PRIVATE RED4ext::SDK nlohmann_json::nlohmann_json
+    Ultralight UltralightCore WebCore dwrite d3d12 dxgi d3dcompiler delayimp Normaliz)
 # Delay-loaded: Plugin.cpp loads them from the plugin's own folder before the first call.
 target_link_options(MagelightCP PRIVATE
     /DELAYLOAD:Ultralight.dll /DELAYLOAD:UltralightCore.dll /DELAYLOAD:WebCore.dll)
@@ -65,9 +58,10 @@ add_executable(mlcp_view_test tools/view_test.cpp ${HOST_SOURCES})
 target_compile_definitions(mlcp_view_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(mlcp_view_test PRIVATE /W3 /utf-8 /EHsc)
 target_include_directories(mlcp_view_test SYSTEM PRIVATE
-    ${ULTRALIGHT_DIR}/include ${ULTRALIGHT_DIR}/platform/include ${JSON_DIR})
+    ${ULTRALIGHT_DIR}/include ${ULTRALIGHT_DIR}/platform/include)
 target_link_directories(mlcp_view_test PRIVATE ${ULTRALIGHT_DIR}/lib)
-target_link_libraries(mlcp_view_test PRIVATE Ultralight UltralightCore WebCore dwrite user32 delayimp Normaliz)
+target_link_libraries(mlcp_view_test PRIVATE nlohmann_json::nlohmann_json
+    Ultralight UltralightCore WebCore dwrite user32 delayimp Normaliz)
 target_link_options(mlcp_view_test PRIVATE
     /DELAYLOAD:Ultralight.dll /DELAYLOAD:UltralightCore.dll /DELAYLOAD:WebCore.dll)
 # It loads the stage's renamed DLLs, so it gets their names too.

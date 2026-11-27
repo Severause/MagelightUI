@@ -60,12 +60,17 @@ and writes the pages on a 1920x1080 screen to a BMP.
 
 ## Build
 
-Needs the Ultralight SDK in `../extern/ultralight` (`extern/README.md`) and a RED4ext.SDK checkout for game 2.5.
-`build.ps1` fetches nlohmann/json into `extern/` (gitignored).
+Needs what the Skyrim build needs: the Ultralight SDK in `../extern/ultralight` (`extern/README.md`) and standalone
+vcpkg (`CONTRIBUTING.md` step 2). The libraries come from vcpkg, listed in `vcpkg.json`: nlohmann-json, and
+RED4ext.SDK through the overlay port `../ports/red4ext-sdk`, pinned to the commit with game 2.5's types
+(`WopsS/RED4ext.SDK` `5246e659`). A new game patch is a new pin there.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File cyberpunk\build.ps1 -Red4extSdk <path to RED4ext.SDK>
+powershell -ExecutionPolicy Bypass -File cyberpunk\build.ps1
 ```
+
+To run in game: RED4ext and redscript; Codeware for redscript to hear pages (without it CET and C++ still do); Cyber
+Engine Tweaks for the CET door only.
 
 Output in `C:\b\mlcp` (or `-Out` / `MLCP_BUILD_DIR`); `stage\` is laid out as the game root:
 `red4ext\plugins\MagelightCP\` holds the DLL, Ultralight's three DLLs under Magelight's names (`Magelight1.dll`,
