@@ -15,7 +15,7 @@ namespace Magelight::A11y {
     inline constexpr const char* kPageScript = R"JS((function(start){'use strict';
 var ml=window.magelight;
 if(!ml||ml.a11y)return;
-var send=ml.send,on=false,docs=[],lastEl=null,lastAt=0,regions=new Map(),dialogs=new WeakSet(),said=new WeakMap();
+var send=ml.send,on=false,docs=[],lastEl=null,lastAt=0,regions=new Map(),dialogs=new WeakSet(),said=new WeakMap(),edited=new WeakMap();
 var TEXT_MAX=600,VALUE_MAX=1000,ANNOUNCE_MAX=2000,NODES_MAX=2000,MSG_BYTES=8000;
 // Whitespace collapsed, at most n UTF-16 units, never ending on half of a surrogate pair (JSON would carry it alone).
 function cut(s,n){if(s.length<=n)return s;var k=n-1,c=s.charCodeAt(k-1);if(c>=0xD800&&c<=0xDBFF)k--;return s.slice(0,k)+'…';}
@@ -30,10 +30,14 @@ function hiddenSelf(e){if(e.hidden||attr(e,'aria-hidden')==='true'||e.id==='__ml
   var s=styleOf(e);return !!s&&(s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse');}
 function hidden(e){for(var i=0;e&&e.nodeType===1&&i<256;i++){if(hiddenSelf(e))return true;e=e.parentNode;}return false;}
 // Text a subtree gives an accessible name: its text nodes, an image's alt, a control's value, an element's own label,
-// skipping what is hidden. ref: the root is an aria-labelledby / -describedby target, read even when hidden.
-function text(n,ref){var budget=0,out='';
+// skipping what is hidden. ref: the root is an aria-labelledby / -describedby target, read even when hidden. field: the
+// subtree is a <label> naming that field, so the field's own value and the label's own buttons, links and popups
+// (a Clear button, a suggestion list) are not part of the name.
+var OWN_WIDGET={button:1,link:1,listbox:1,menu:1,menubar:1,tree:1,grid:1,dialog:1,tooltip:1,option:1,menuitem:1};
+function text(n,ref,field){var budget=0,out='';
   (function walk(x,root){if(!x||budget++>NODES_MAX||out.length>TEXT_MAX)return;
     if(x.nodeType===3){out+=x.data;return;}if(x.nodeType!==1)return;if(!(root&&ref)&&hiddenSelf(x))return;
+    if(field&&!root&&(x===field||OWN_WIDGET[role(x)]))return;
     var l=attr(x,'aria-label');if(l&&l.trim()){out+=' '+l+' ';return;}
     var t=tag(x);if(t==='IMG'||t==='AREA'){out+=' '+(attr(x,'alt')||'')+' ';return;}
     if(t==='INPUT'){var ty=(x.type||'').toLowerCase();if(ty==='password')return;out+=' '+(ty==='checkbox'||ty==='radio'?'':(x.value||''))+' ';return;}
@@ -65,7 +69,7 @@ var FROM_CONTENT={button:1,link:1,heading:1,option:1,tab:1,menuitem:1,menuitemch
 function isField(e){var t=tag(e);return t==='INPUT'||t==='SELECT'||t==='TEXTAREA'||t==='METER'||t==='PROGRESS';}
 function name(e,r){var n=byIds(e,'aria-labelledby');if(n)return n;n=attr(e,'aria-label');if(n&&n.trim())return clip(n,TEXT_MAX);
   var t=tag(e);
-  if(isField(e)&&e.labels&&e.labels.length){var ls=[];for(var i=0;i<e.labels.length;i++)ls.push(text(e.labels[i]));n=clip(ls.join(' '),TEXT_MAX);if(n)return n;}
+  if(isField(e)&&e.labels&&e.labels.length){var ls=[];for(var i=0;i<e.labels.length;i++)ls.push(text(e.labels[i],false,e));n=clip(ls.join(' '),TEXT_MAX);if(n)return n;}
   if(t==='IMG'||(t==='INPUT'&&(e.type||'').toLowerCase()==='image'))return clip(attr(e,'alt')||attr(e,'title')||'',TEXT_MAX);
   if(t==='INPUT'){var ty=(e.type||'').toLowerCase();if(ty==='submit'||ty==='reset'||ty==='button')return clip(e.value||(ty==='reset'?'Reset':ty==='submit'?'Submit':''),TEXT_MAX);}
   if(FROM_CONTENT[r]&&!isField(e)){n=text(e);if(n)return n;}
@@ -141,8 +145,10 @@ function onFocus(ev){var e=ev.target;if(!e||e.nodeType!==1)return;
   emit('focus',o,e);}
 function isText(e){var t=tag(e);if(t==='TEXTAREA')return true;if(e.isContentEditable)return true;
   return t==='INPUT'&&['button','checkbox','radio','submit','reset','file','image','hidden','range','color'].indexOf((e.type||'text').toLowerCase())<0;}
-function onInput(ev){var e=ev.target;if(!e||e.nodeType!==1)return;if(isText(e)){var r=role(e),o={name:name(e,r),role:r};
-    if(isSecret(e)){o.secret=true;o.length=(e.value||'').length;}else o.value=value(e,r)||'';emit('edit',o,e);return;}
+// A text field's edit is said once per new text: its change event (Enter, leaving the field) repeats the last input.
+function onInput(ev){var e=ev.target;if(!e||e.nodeType!==1)return;if(isText(e)){var r=role(e),o={name:name(e,r),role:r},k;
+    if(isSecret(e)){o.secret=true;o.length=(e.value||'').length;k='#'+o.length;}else{o.value=value(e,r)||'';k='='+o.value;}
+    if(edited.get(e)===k)return;edited.set(e,k);emit('edit',o,e);return;}
   if(ev.type==='change'||(e.type||'').toLowerCase()==='range')emit('state',describe(e),e);}
 // A composite's active item: aria-activedescendant on the focused element, or an item that became selected or current
 // in the focused composite (or with nothing focused, a page that moves a highlight without focus).
@@ -249,7 +255,7 @@ function hook(d){if(!d)return;
 function hookFrame(f){var d=null;try{d=f.contentDocument;}catch(x){}if(d&&d.documentElement)hook(d);}
 function onLoad(ev){if(tag(ev.target)==='IFRAME')hookFrame(ev.target);}
 function unhook(){docs.forEach(release);docs=[];regions.forEach(function(q){clearTimeout(q.timer);});regions.clear();
-  dialogs=new WeakSet();said=new WeakMap();lastEl=null;}
+  dialogs=new WeakSet();said=new WeakMap();edited=new WeakMap();lastEl=null;}
 function page(){var o={title:clip(document.title,TEXT_MAX)};
   if(!o.title){var h=document.querySelector('h1');if(h)o.title=text(h);}
   var e=deepActive();if(e&&!isRoot(e)&&!optedOut(e))o.focus=describe(e);

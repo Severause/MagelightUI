@@ -77,6 +77,35 @@
       function () { $('q').value = 'iron'; $('q').dispatchEvent(new Event('input', { bubbles: true })); return 'next'; },
       function () { var m = last('edit'); return result(m && m.name === 'Search' && m.value === 'iron', show(m)); }
     ] },
+    { name: 'label_wraps_field_and_buttons', steps: [
+      function () {
+        begin('<label><svg width="8" height="8"></svg><input id="q" placeholder="Search items"><button type="button" aria-label="Clear">x</button>' +
+              '<div role="listbox" aria-label="Recent searches"><button type="button" role="option">iron</button></div></label>' +
+              '<label>Name <input id="n" value="Lydia"><button type="button">Clear</button></label>');
+        $('q').focus(); clear(); return 'next';
+      },
+      function () { $('q').value = 'd'; $('q').dispatchEvent(new Event('input', { bubbles: true })); return 'next'; },
+      function () { $('n').focus(); return 'next'; },
+      function () {
+        var e = last('edit'), f = last('focus');
+        return result(e && e.name === 'Search items' && e.value === 'd' && f && f.name === 'Name' && f.value === 'Lydia',
+                      show(e) + ' ' + show(f));
+      }
+    ] },
+    { name: 'edit_said_once', steps: [
+      function () { begin('<input id="q" aria-label="Search">'); $('q').focus(); clear(); return 'next'; },
+      function () {
+        var q = $('q');
+        q.value = 'daedric'; q.dispatchEvent(new Event('input', { bubbles: true }));
+        q.dispatchEvent(new Event('change', { bubbles: true }));
+        q.value = 'daedric bow'; q.dispatchEvent(new Event('input', { bubbles: true }));
+        return 'next';
+      },
+      function () {
+        var l = msgs('edit');
+        return result(l.length === 2 && l[0].value === 'daedric' && l[1].value === 'daedric bow', show(l));
+      }
+    ] },
     { name: 'checkbox_change', steps: [
       function () { begin('<label><input id="c" type="checkbox"> Auto save</label>'); $('c').focus(); return 'next'; },
       function () {
