@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: transparent; font-family: "Segoe UI", sans-serif; overflow: hidden; }
+  .hud { margin: 6px; padding: 8px 12px; background: rgba(10, 14, 22, 0.75); color: #39e6ff;
+         border-left: 3px solid #fcee0a; font-size: 14px; }
+  b { color: #fcee0a; }
+</style>
+</head>
+<body>
+  <div class="hud"><b id="who">MAGELIGHT HUD</b><br><span id="clock">-</span> &middot; F10 hides me</div>
+<script>
+  const m = window.__MAGELIGHT__;
+  if (m) document.getElementById('who').textContent = m.modId + '/' + m.viewName;
+  setInterval(() => { document.getElementById('clock').textContent = new Date().toLocaleTimeString(); }, 250);
+</script>
+</body>
+</html>

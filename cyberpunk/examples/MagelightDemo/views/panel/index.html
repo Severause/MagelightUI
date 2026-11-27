@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: transparent; font-family: "Segoe UI", sans-serif; overflow: hidden; }
+  .card {
+    width: 460px; margin: 10px; padding: 14px 18px; box-sizing: border-box;
+    background: rgba(10, 14, 22, 0.82); color: #e8f6ff;
+    border: 1px solid #39e6ff; border-radius: 0;
+  }
+  .card.focused { border-color: #fcee0a; }
+  h1 { margin: 0 0 6px; font-size: 20px; color: #fcee0a; letter-spacing: 1px; }
+  .row { font-size: 14px; opacity: 0.9; margin-top: 4px; }
+  .bar { height: 6px; margin-top: 10px; background: #1a2a33; overflow: hidden; }
+  .bar > div { height: 100%; width: 30%; background: #39e6ff; animation: slide 1.6s linear infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  input { width: 250px; background: #05080d; color: #e8f6ff; border: 1px solid #39e6ff; padding: 4px 6px;
+          font-size: 14px; border-radius: 0; }
+  button { background: #39e6ff; color: #05080d; border: 0; padding: 5px 14px; font-size: 14px; border-radius: 0; }
+  button:active { background: #fcee0a; }
+</style>
+</head>
+<body>
+  <div class="card" id="card">
+    <h1>MAGELIGHT ON CYBERPUNK</h1>
+    <div class="row">Script clock: <span id="clock">-</span> &middot; frames: <span id="frames">0</span></div>
+    <div class="row">Input: <b id="focus">OFF</b> (F11) &middot; clicks: <b id="clicks">0</b></div>
+    <div class="row"><input id="text" placeholder="type here"> <button id="btn">CLICK</button></div>
+    <div class="row">Typed: <span id="typed"></span></div>
+    <div class="row">Host: <span id="host">-</span></div>
+    <div class="bar"><div></div></div>
+  </div>
+<script>
+  let frames = 0, clicks = 0;
+  const $ = id => document.getElementById(id);
+  setInterval(() => { $('clock').textContent = new Date().toLocaleTimeString(); }, 250);
+  function tick() { frames++; $('frames').textContent = frames; requestAnimationFrame(tick); }
+  requestAnimationFrame(tick);
+  $('btn').addEventListener('click', () => {
+    clicks++;
+    $('clicks').textContent = clicks;
+    magelight.send('demo.click', { clicks, text: $('text').value });
+  });
+  $('text').addEventListener('input', () => { $('typed').textContent = $('text').value; });
+  magelight.on('__uimode', on => {
+    $('focus').textContent = on === '1' ? 'ON' : 'OFF';
+    $('card').classList.toggle('focused', on === '1');
+  });
+  magelight.on('demo.echo', text => { $('host').textContent = text; });
+  const m = window.__MAGELIGHT__;
+  $('host').textContent = m ? 'view ' + m.viewId + ' of ' + m.modId : 'no host';
+</script>
+</body>
+</html>
