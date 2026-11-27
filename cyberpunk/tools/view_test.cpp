@@ -432,6 +432,11 @@ int wmain(int argc, wchar_t** argv) {
     Check(g_heard.size() == 1 && g_heard[0].channel == "__ready" && g_heard[0].view == "hud", "the reload told '__ready'");
     Check(api::Exported()->version == 1 && api::Exported()->HasView("MagelightDemo", "panel"), "the C++ export works");
 
+    // Last: the host giving up (a fault, a compositor that could not start) is not ready, and refuses UI mode.
+    Check(api::IsReady(), "a working host is ready");
+    input::Disable();
+    Check(!api::IsReady() && !api::OpenUIMode("MagelightDemo", "panel"), "a host that gave up is not ready");
+
     std::printf("%s\n", g_failed ? "FAILED" : "ALL PASSED");
     std::fflush(stdout);
     TerminateProcess(GetCurrentProcess(), g_failed ? 1 : 0);   // never run Ultralight's teardown

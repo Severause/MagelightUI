@@ -1,7 +1,7 @@
 // Magelight's natives (MagelightCP.dll). A view is named by its mod id (its folder under r6/magelight) and its name
 // in the manifest. Every call returns at once; what it changes shows within a frame.
 
-public native func Magelight_IsReady() -> Bool;                                    // the host made its views
+public native func Magelight_IsReady() -> Bool;                                    // drawing works: views made, host not given up
 public native func Magelight_HasView(mod: String, view: String) -> Bool;
 public native func Magelight_Show(mod: String, view: String, show: Bool) -> Bool;  // hiding the UI-mode view closes it
 public native func Magelight_IsVisible(mod: String, view: String) -> Bool;

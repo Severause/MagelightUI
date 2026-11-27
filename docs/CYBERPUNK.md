@@ -219,7 +219,7 @@ A view is named by mod id (any letter case) and view name. Nothing is kept in th
 
 | Native | What |
 |---|---|
-| `Magelight_IsReady() -> Bool` | the page thread made the views (after the game's first frame) |
+| `Magelight_IsReady() -> Bool` | drawing works: the page thread made the views (after the game's first frame) and the host has not given up (a fault, a compositor that could not start) |
 | `Magelight_HasView(mod, view) -> Bool` | the manifest made it |
 | `Magelight_Show(mod, view, show: Bool) -> Bool` | shows or hides; hiding the view that holds UI mode closes UI mode |
 | `Magelight_IsVisible(mod, view) -> Bool` | |
@@ -283,14 +283,14 @@ Open before release: does Ultralight's Free licence cover a Cyberpunk mod the wa
 
 ## 8. How it was checked
 
-- **Offline**, `cyberpunk/tools/view_test.cpp`, 64 checks: the real manifest loader, page thread, page API, input
+- **Offline**, `cyberpunk/tools/view_test.cpp`, 66 checks: the real manifest loader, page thread, page API, input
   routing and script API, driven by raw key and mouse calls, against the renamed DLLs. Among them: delivery held
   through a load, then every listener kind; every native including its refusals; an up going where its down went; a
   quick double press of a HUD key; a slow mouse at 720p; Ctrl+A and Shift+Left in a field; a right click on selected text; another
   panel's hotkey while one is open; a page's thrown error in the log and its `console.log` not (each of these four
   failed, or crashed, before its fix); typing after focus was lost with Ctrl held; a Spanish dead acute then "a";
   a page's press whose release comes after UI mode closed; a key held through the close; a load closing UI mode and
-  refusing it.
+  refusing it; a host that gave up reading as not ready.
 - **Redscript** compiles offline with redscript's `scc.exe` over the game's base scripts and Codeware's, and in the
   game's own compile.
 - **In game, 2026-11-27** (2.5, 3840x2160, backbuffer format 28):
@@ -303,6 +303,10 @@ Open before release: does Ultralight's Free licence cover a Cyberpunk mod the wa
   - the session-end hook fired at the boot load and at a load from in game, and the pages and listeners still worked
     after it;
   - by hand: F11 and Escape (no pause menu), clicks, typing with `@`, F10, a held W released, a slow mouse;
-  - the game quits cleanly.
-- **Not run:** a character outside the BMP typed; the C++ export from another plugin; leaving for the main menu while
-  messages wait; a GPU stall long enough to skip a frame.
+  - the game quits cleanly;
+  - the C++ export from another plugin (a chat box drawn as a page): it found the DLL, read its file version and API
+    level, opened and closed UI mode, sent lines to the page and heard its answers.
+- **Installed half way, the game does not start:** with `r6\scripts\Magelight\` present and `MagelightCP.dll` not,
+  RED4ext's script check refuses `Magelight.reds`' natives and closes the game. The two ship together, in one mod.
+- **Not run:** a character outside the BMP typed; leaving for the main menu while messages wait; a GPU stall long
+  enough to skip a frame.

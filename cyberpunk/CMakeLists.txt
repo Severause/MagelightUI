@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.24)
 if(NOT DEFINED VCPKG_TARGET_TRIPLET)
     set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
 endif()
-project(MagelightCP VERSION 0.1.0 LANGUAGES CXX)
+project(MagelightCP VERSION 0.1.0 LANGUAGES CXX RC)
 # The one source of the version: the log, RED4ext's plugin info and the page's window.__MAGELIGHT__ read these.
 add_compile_definitions(MLCP_VERSION_MAJOR=${PROJECT_VERSION_MAJOR} MLCP_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     MLCP_VERSION_PATCH=${PROJECT_VERSION_PATCH} MLCP_VERSION="${PROJECT_VERSION}")
@@ -38,7 +38,10 @@ set_source_files_properties(
     ${ULTRALIGHT_DIR}/platform/src/fonts/TextAnalysisSource.cpp
     PROPERTIES COMPILE_OPTIONS "/wd5043")
 
-add_library(MagelightCP SHARED src/Plugin.cpp src/Compositor.cpp src/Session.cpp src/Natives.cpp ${HOST_SOURCES})
+# The file version other plugins read off the loaded DLL (VS_FIXEDFILEINFO), the same three numbers.
+configure_file(src/Version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/Version.rc @ONLY)
+add_library(MagelightCP SHARED src/Plugin.cpp src/Compositor.cpp src/Session.cpp src/Natives.cpp ${HOST_SOURCES}
+    ${CMAKE_CURRENT_BINARY_DIR}/Version.rc)
 
 target_compile_definitions(MagelightCP PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
     RED4EXT_HEADER_ONLY)

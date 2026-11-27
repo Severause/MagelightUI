@@ -516,6 +516,7 @@ void CloseUIMode() { Close(); }
 void OnFocusLost() { LoseFocus(); }
 
 void Disable() { g_disabled = true; }
+bool Disabled() { return g_disabled; }
 void SetLoading(bool loading) { g_blocked = loading; }
 void AskClose() { g_closeAsked = true; }
 

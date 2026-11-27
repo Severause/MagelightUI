@@ -36,6 +36,7 @@ bool OpenUIMode(int id);         // false for a HUD or click-through view, or no
 void CloseUIMode();
 // Atomics only, so the hooks that call them take no lock (a fault handler, the engine's state machine); Tick acts.
 void Disable();                  // drawing is off for the session: UI mode closes and never opens again
+bool Disabled();
 void SetLoading(bool loading);   // while a load runs UI mode is closed and refused
 void AskClose();                 // UI mode closes at the next Tick (a session ended)
 void Tick();                     // game thread, every frame

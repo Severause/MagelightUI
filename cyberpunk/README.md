@@ -4,7 +4,8 @@ A RED4ext plugin that loads Magelight manifest mods and draws their Ultralight p
 separate from the Skyrim host: its own CMake project. Design, engine points and what was checked:
 [`../docs/CYBERPUNK.md`](../docs/CYBERPUNK.md). From `../src` it reuses, unchanged, `HotkeyNames.h`,
 `JsBridgeCore.h`, `MagelightCursorArt.h` and `InputCore.h`. The version is `project(... VERSION)` in
-`CMakeLists.txt` alone; changes are in [`CHANGELOG.md`](CHANGELOG.md).
+`CMakeLists.txt` alone; it is also the DLL's file version (`src/Version.rc.in`), which other plugins can read off the
+loaded module. Changes are in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Mods
 

@@ -24,3 +24,6 @@ The first version: Magelight manifest mods on Cyberpunk 2077 2.5 (`../docs/CYBER
 - Scripts: redscript natives `Magelight_*`, Codeware events `Magelight/<ModId>/<channel>`, a CET door, and a C++
   export `MagelightCP_GetApi(1)`; messages wait through a game load.
 - Ultralight's DLLs ship under Magelight's names, as in the Skyrim build.
+- The DLL carries a Windows file version, the same three numbers, for other plugins to read off the loaded module.
+- `IsReady` / `Magelight_IsReady` mean drawing works: false before the views are made and after the host gave up.
+- Libraries from vcpkg, as the root's: RED4ext.SDK is the overlay port `ports/red4ext-sdk`, pinned to game 2.5's types.

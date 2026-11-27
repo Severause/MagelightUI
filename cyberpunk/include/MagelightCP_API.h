@@ -15,7 +15,7 @@ using ListenerFn = void (*)(const char* mod, const char* view, const char* chann
 
 struct Api1 {
     std::uint32_t version;   // 1
-    bool (*IsReady)();
+    bool (*IsReady)();   // drawing works: the views are made and the host has not given up
     bool (*HasView)(const char* mod, const char* view);
     bool (*Show)(const char* mod, const char* view, bool show);
     bool (*IsVisible)(const char* mod, const char* view);

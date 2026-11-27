@@ -66,7 +66,8 @@ void Deliver(const views::Message& m) {
 std::string S(const char* s) { return s ? s : ""; }
 }
 
-bool IsReady() { return views::Started(); }
+// Drawing works: the views are made and the host has not given up (a fault, a compositor that could not start).
+bool IsReady() { return views::Started() && !input::Disabled(); }
 bool HasView(const std::string& mod, const std::string& view) { return views::IdOf(mod, view) != 0; }
 
 bool Show(const std::string& mod, const std::string& view, bool show) {
