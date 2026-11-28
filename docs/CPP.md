@@ -664,6 +664,36 @@ if (v4()->hostVersionNumber >= 10701 && v4()->QueryCapability("mainMenu") == 1)
 - With the page thread, any view that is not a main-menu page waits for the first in-game frame and is not drawn over
   the main menu, a return to it included.
 
+## Pages on loading screens (1.10.0)
+
+Loading screens show no page unless a view asks: make it a loading-screen page and, while it is shown, it draws over
+the loading screen the game draws (its art and 3D model stay). Flat with the page thread (the default) only.
+
+```cpp
+if (v4()->hostVersionNumber >= 11000 && v4()->QueryCapability("loadingScreen") == 1)
+    v4()->SetViewLoadingScreen(loadingView, true);   // a click-through view; manifest: "loadingScreen": true
+```
+
+- **Push the data before the load.** While the loading screen is up the game's main thread is loading: game tasks
+  (`PostGameTask`, SKSE tasks) and Papyrus wait until the load ends, so nothing there can read the player, the date or
+  a quest for you. Keep the page's data current as it changes, or read it when the Loading Menu opens (a
+  `MenuOpenCloseEvent` sink) and send it then with `InvokeJS`, `InteropCall` or `EvalJS`. The page thread delivers
+  those calls and keeps the page painting through the load: scripts, `requestAnimationFrame` and CSS animations run.
+- **Show it and hide it yourself.** A shown loading-screen view draws whenever the Loading Menu is open, and in the
+  game as any other view does. Show it when the Loading Menu opens (or before you start a load) and hide it when that
+  menu closes. It is not drawn over the main menu.
+- **No input.** The page gets no UI mode, cursor, keys or gamepad on a loading screen. Make the view click-through.
+- **Its page loads ahead of the world**, as a main-menu page's does, and Ultralight starts at the main menu for it,
+  so the first load from the main menu shows it too (unless the player starts that load in the first seconds of the
+  main menu, before the game's main thread presents it: Ultralight has not started yet then).
+- **A slow page shows its last finished frame**; the loading screen never waits for a page, and a frame or two at the
+  start and end of a load may show the game's loading screen without the page.
+- While your view is shown during a load the page thread runs every page, other mods' included.
+- **Where it does nothing:** on VR, with `Magelight.json` `"pageThread": false` or `"loadingScreenPages": false`, once
+  the page thread is refused at render init (the capability is 0 in all of these, and the call still succeeds), in
+  engine mode (`"composite": "engine"`) and behind a swapchain that refused its device. Loading screens there show no
+  page, as before 1.10.0.
+
 ## Hidden pages (1.5.0)
 
 From 1.5.0 (Ultralight 2.0) a hidden view's page is paused the way a browser

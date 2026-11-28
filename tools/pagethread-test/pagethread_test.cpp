@@ -229,6 +229,29 @@ int main()
     Check(!ViewShowsNow(false, false, true, true), "view: and is not drawn over a return to the main menu");
     Check(ViewShowsNow(true, false, true, true), "view: without the page thread every view shows, as before");
 
+    // ---- Loading-screen pages (1.10.0) -------------------------------------------------------------------------------
+    // ViewShowsNow(pageThreadOff, menuPage, mainMenuOpen, viewsReleased, loadingPage, loadingMenuOpen)
+    Check(ViewShowsNow(false, false, true, false, true, true), "loading view: shows on the first load's loading screen");
+    Check(ViewShowsNow(false, false, false, false, true, true), "loading view: and once the main menu has closed");
+    Check(ViewShowsNow(false, false, false, true, true, true), "loading view: and on a load in the game");
+    Check(!ViewShowsNow(false, false, true, false, true, false), "loading view: not at the main menu itself");
+    Check(!ViewShowsNow(false, false, true, true, true, false), "loading view: nor over a return to it");
+    Check(ViewShowsNow(false, false, false, true, true, false), "loading view: in the game, as any view (the mod hides it)");
+    Check(!ViewShowsNow(false, false, true, false, false, true), "loading view: another view does not show on a loading screen at the first load");
+    Check(ViewShowsNow(false, false, false, true, false, false) == ViewShowsNow(false, false, false, true),
+          "loading view: the default arguments leave every other view as it was");
+    Check(!ViewShowsNow(false, false, true, false, false, false) && ViewShowsNow(false, true, true, false, false, false),
+          "loading view: main-menu pages are unchanged");
+    // LoadingScreenDraws(pageThreadOn, settingOn, loadingMenuOpen, anyLoadingPage, engineComposite, untrustedChain)
+    Check(LoadingScreenDraws(true, true, true, true, false, false), "loading draw: the loading screen draws an opted-in view");
+    Check(!LoadingScreenDraws(false, true, true, true, false, false), "loading draw: never without the page thread (Ultralight would be on the main thread)");
+    Check(!LoadingScreenDraws(true, false, true, true, false, false), "loading draw: not with loadingScreenPages false");
+    Check(!LoadingScreenDraws(true, true, false, true, false, false), "loading draw: not on another foreign-thread frame (the first main-menu frames)");
+    Check(!LoadingScreenDraws(true, true, true, false, false, false), "loading draw: not when no view opted in (loading screens as before)");
+    Check(!LoadingScreenDraws(true, true, true, true, true, false), "loading draw: not in engine mode");
+    Check(!LoadingScreenDraws(true, true, true, true, false, true), "loading draw: not behind a swapchain that refused its device");
+    Check(StartsAtMainMenu(true, true, true), "start: a loading-screen page starts the page thread at the main menu as a main-menu page does");
+
     // ---- Handoff: a page of uneven weight ---------------------------------------------------------------------------
     {
         Handoff<Packet> handoff;

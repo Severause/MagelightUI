@@ -45,11 +45,25 @@ namespace Magelight::PageThread {
     }
 
     // Whether a view counts as shown now. Without the page thread every view does, as before main-menu pages. With it a
-    // main-menu page always does; any other waits for the first in-game frame (viewsReleased) and is not drawn over the
-    // main menu, a return to it included.
-    inline bool ViewShowsNow(bool pageThreadOff, bool menuPage, bool mainMenuOpen, bool viewsReleased)
+    // main-menu page always does; a loading-screen page (1.10.0) does while the Loading Menu is open; any other waits
+    // for the first in-game frame (viewsReleased) and is not drawn over the main menu, a return to it included.
+    inline bool ViewShowsNow(bool pageThreadOff, bool menuPage, bool mainMenuOpen, bool viewsReleased,
+                             bool loadingPage = false, bool loadingMenuOpen = false)
     {
-        return pageThreadOff || menuPage || (!mainMenuOpen && viewsReleased);
+        return pageThreadOff || menuPage || (loadingPage && loadingMenuOpen) || (!mainMenuOpen && viewsReleased);
+    }
+
+    // Loading-screen pages (1.10.0). Whether a Present on a thread other than the game's main thread draws the
+    // loading-screen views: the engine presents its loading screens from a thread of its own, which never touches
+    // Ultralight, so only with the page thread running (it owns Ultralight and keeps painting through the load), the
+    // player's switch on (Magelight.json "loadingScreenPages"), the Loading Menu open and some view made a
+    // loading-screen page.
+    // Never in engine mode (Present is not ours to draw into there) or behind a swapchain that refused its device (the
+    // draw would go through the engine's framebuffer, read from that thread). Flat only: VR never has the page thread.
+    inline bool LoadingScreenDraws(bool pageThreadOn, bool settingOn, bool loadingMenuOpen, bool anyLoadingPage,
+                                   bool engineComposite, bool untrustedChain)
+    {
+        return pageThreadOn && settingOn && loadingMenuOpen && anyLoadingPage && !engineComposite && !untrustedChain;
     }
 
     inline bool SameIgnoringCase(std::wstring_view a, std::wstring_view b)

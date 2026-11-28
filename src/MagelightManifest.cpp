@@ -279,7 +279,7 @@ namespace Magelight::Manifest {
                     WarnUnknownKeys(v, { "path", "anchor", "x", "y", "w", "h", "fullscreen", "clickThrough",
                                          "startVisible", "layer", "hibernateMs", "vr", "vrHotkey", "hotkey",
                                          "hotkeyPause", "sounds", "loadOnShow", "prepaint", "cursor", "gamepad", "mainMenu",
-                                         "polledKeys", "shareFocus", "acceptFocus", "hitTest", "hiddenTimers" }, vctx);
+                                         "polledKeys", "shareFocus", "acceptFocus", "hitTest", "hiddenTimers", "loadingScreen" }, vctx);
                     const std::string path = MJStr(v, "path", "", vctx);
                     if (!SafeRelative(path)) {
                         SKSE::log::error("Magelight[manifest]: {} — view '{}': 'path' must be a relative path inside the mod folder", Magelight::SysInfo::ForLog(file), vname);
@@ -326,6 +326,7 @@ namespace Magelight::Manifest {
                                         vctx, timers);
                     }
                     if (MJBool(v, "mainMenu", false, vctx)) Api4::SetViewMainMenu(id, true);   // 1.7.1
+                    if (MJBool(v, "loadingScreen", false, vctx)) Api4::SetViewLoadingScreen(id, true);   // 1.10.0
                     // 1.9.0: the keyboard shared on a click (SetViewFocusSharing).
                     const std::uint32_t share = (MJBool(v, "shareFocus", false, vctx) ? MAGELIGHT_API::kFocusShareGive : 0u) |
                                                 (MJBool(v, "acceptFocus", false, vctx) ? MAGELIGHT_API::kFocusShareTake : 0u);

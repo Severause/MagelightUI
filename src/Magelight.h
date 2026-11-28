@@ -376,6 +376,12 @@ namespace Magelight {
     bool SetViewHitTest(ViewId view, std::uint32_t mode);
     bool ViewOpensAtMainMenu(ViewId view);        // 1.7.1 the main menu is open and this view may show over it
     bool MainMenuPagesAvailable();                // 1.7.1 the "mainMenu" capability: the page thread is on or wanted
+    // 1.10.0: the view loads ahead of the world and draws on loading screens (LoadingScreenFrame). false: the view is
+    // gone or an inspector. Any thread.
+    bool SetViewLoadingScreen(ViewId view, bool on);
+    // 1.10.0 the "loadingScreen" capability: the page thread is on or wanted and Magelight.json "loadingScreenPages" is
+    // not false.
+    bool LoadingScreenPagesAvailable();
     bool SetViewPrepaint(ViewId view, bool on);   // 0.31.11 paint while hidden, again at settle from 1.5.0 (false: no such view)
     // 1.9.3 manifest "hiddenTimers": "full": the view's repeating timers keep their rate while hidden (read when its
     // View is created). False: no such view.
