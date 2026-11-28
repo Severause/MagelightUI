@@ -164,6 +164,8 @@ namespace {
         &Magelight::Api4::AddPageRoot,
         // 1.10.0 appendix
         &Magelight::Api4::SetViewLoadingScreen,
+        &Magelight::Api4::SetAccessibilityListener,
+        &Magelight::Api4::GetUIModeView,
     };
 
 }  // namespace

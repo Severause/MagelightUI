@@ -17,5 +17,6 @@ export type {
   GamepadEvent,
   GamepadScope,
   GamepadHelper,
+  A11yHelper,
 } from './types.js';
 export type { MockOptions } from './mock.js';

@@ -20,6 +20,8 @@
 #include "HitTestCore.h"
 #include "PageRootCore.h"
 #include "PageStackCore.h"
+#include "A11yCore.h"
+#include "A11yScript.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
@@ -1059,6 +1061,8 @@ namespace Magelight {
         std::uint32_t hitTest = HitTest::kRect;   // 1.9.2: HitTest::kRect / kContent (SetViewHitTest, invariant 31)
         // Content mode: the page's last answer to the mouse was "nothing here" (the cursor's pick reads it).
         bool hitEmpty = false;
+        A11y::RateGate a11yGate;          // 1.10.0: the reader messages this view may still send (A11yCore.h)
+        std::uint32_t a11yDropped = 0;    // counted past the gate, logged at a power of two
         bool freezeWorld = false;     // 0.31.0: freeze the world behind this view while it holds UI mode paused
         NetLevel netLevel = NetLevel::File;   // the owning mod's NetworkPolicy; File when no mod owns the view
         int  scrollStep = 40;         // 0.28.0: px per wheel notch
@@ -1484,6 +1488,78 @@ namespace Magelight {
     static void ImeOnTextFocus(bool focused);
 
     static void PlayPageSound(ViewId id, const std::string& arg);   // fwd (defined after the dispatcher)
+
+    // 1.10.0: whether the pages' readers are on (SyncAccessibility); a page core reads it once at install.
+    static std::atomic<bool> s_a11yOn{ false };
+    static std::mutex s_a11ySyncMutex;   // one SyncAccessibility at a time, so the last one reads the last state
+
+    // The host's keyboard page and inspectors are the host's own: their readers never run.
+    static bool A11yHostPageLocked(const MlView& v)
+    {
+        return v.isInspector || v.id == static_cast<ViewId>(s_kbViewId.load());
+    }
+
+    // The reader's state for a view, kept out of the outbound cap and replacing a state still queued (as the keyboard
+    // theme is): a page whose queue is full while it loads must still end in the state the sync chose.
+    static void QueueA11yStateLocked(MlView& v, bool on)
+    {
+        std::erase_if(v.outbound, [](const OutboundCall& c) {
+            return !c.raw && c.fn == "__a11y" && (c.arg == A11y::kOn || c.arg == A11y::kOff);
+        });
+        v.outbound.push_back({ "__a11y", on ? A11y::kOn : A11y::kOff, false });
+    }
+
+    void SyncAccessibility(bool askPage)
+    {
+        std::lock_guard<std::mutex> sync(s_a11ySyncMutex);
+        const bool want = Api4::AccessibilityWanted();
+        const bool turns = want != s_a11yOn.load();
+        if (!turns && !(askPage && want)) return;
+        s_a11yOn.store(want);
+        std::size_t n = 0;
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            // Read under the lock: a view UI mode enters after this queues its own "page", behind this "on".
+            const ViewId ui = IsUIModeActive() ? GetUIModeView() : 0;
+            for (auto& vp : s_views) {
+                if (A11yHostPageLocked(*vp)) continue;
+                if (turns) QueueA11yStateLocked(*vp, want);
+                if (want && vp->id == ui) QueueOutboundLocked(*vp, { "__a11y", A11y::kPage, false });
+                ++n;
+            }
+        }
+        if (turns) SKSE::log::info("Magelight: page accessibility readers {} ({} views)", want ? "on" : "off", n);
+    }
+
+    // 1.10.0, render thread (inside the page's script): one message of the page core's reader. Checked here
+    // (A11yCore.h) and handed to the listeners outside every lock.
+    static void OnPageA11y(ViewId id, const std::string& arg)
+    {
+        if (!s_a11yOn.load()) return;
+        const std::string_view type = A11y::TypeOf(arg);
+        if (type.empty() || !nlohmann::json::accept(arg)) {
+            static std::atomic<int> s_badLogged{ 0 };
+            if (s_badLogged.fetch_add(1) < 8)
+                SKSE::log::warn("Magelight: view {} sent '__a11y' text that is {} - dropped ({} bytes)", id,
+                                arg.size() > A11y::kMaxMessageBytes ? "over the size cap" : "no reader message",
+                                arg.size());
+            return;
+        }
+        std::uint32_t dropped = 0;
+        {
+            std::lock_guard<PageThread::OwnedMutex> lk(s_viewsMutex);
+            MlView* v = FindViewLocked(id);
+            if (!v || !A11y::Delivers(v->visible, v->dormant, A11yHostPageLocked(*v))) return;
+            if (!v->a11yGate.Allow(GetTickCount64())) dropped = ++v->a11yDropped;
+        }
+        if (dropped) {
+            if ((dropped & (dropped - 1)) == 0)
+                SKSE::log::info("Magelight: view {} sends reader messages faster than {} a second - {} dropped so far",
+                                id, static_cast<int>(A11y::kPerSecond), dropped);
+            return;
+        }
+        Api4::DeliverAccessibility(id, arg);
+    }
     static void OnPageHostTheme(ViewId id, const std::string& arg); // fwd (defined after the dispatcher)
 
     // 1.6.0: the gamepad helper's requests ({op, page[, mode]}). 'ready' names the document's helper, which the
@@ -1561,6 +1637,10 @@ namespace Magelight {
         }
         if (name == "__gamepad") {   // 1.6.0: the page core's gamepad helper (GamepadScript.h)
             OnPageGamepad(id, arg);
+            return JSValueMakeUndefined(ctx);
+        }
+        if (name == "__a11y") {   // 1.10.0: the page core's accessibility reader (A11yScript.h)
+            OnPageA11y(id, arg);
             return JSValueMakeUndefined(ctx);
         }
         // Retired: text focus comes from the EditorListener now. Pages may still send them (a mod's editor shim
@@ -1803,6 +1883,7 @@ namespace Magelight {
         // lost. InteropCall to a channel with no window shim routes into
         // _dispatch (see DrainBridgeQueues) — plain HTML and the SDK share it.
         const std::string idStr0 = std::to_string(v.id);
+        const bool a11yHost = v.isInspector || v.id == static_cast<ViewId>(s_kbViewId.load());
         std::string shims;
         if (full) shims =
             "if(!window.__mlCore){Object.defineProperty(window,'__mlCore',{value:true});"
@@ -2021,6 +2102,8 @@ namespace Magelight {
             "})();" +
             // Gamepad (1.6.0): window.magelight.gamepad, idle until the host sends '__gamepad' (GamepadScript.h).
             std::string(Gamepad::kPageScript) +
+            // Accessibility (1.10.0): the reader, started when a listener exists now, else idle until '__a11y' "on".
+            std::string(A11y::kPageScript) + (s_a11yOn.load() && !a11yHost ? "(1);" : "(0);") +
             "}";
         std::size_t count = 0;
         {
@@ -4383,6 +4466,7 @@ namespace Magelight {
         if (!on) s_tooltipLeaveAll.store(true);   // the pointer goes with UI mode
         Emit(on ? HostEvent::UIModeEntered : HostEvent::UIModeExited, uiView);
         InteropCall(uiView, "__uimode", on ? "1" : "0");
+        if (on && s_a11yOn.load()) InteropCall(uiView, "__a11y", A11y::kPage);
     }
 
     // SEH wrapper — no locals with destructors allowed in here.
@@ -13082,6 +13166,7 @@ float4 ps_straight(VSOut i) : SV_Target {
             s_tooltipLeaveAll.store(true);
             InteropCall(old, "__uimode", "0");
             InteropCall(view, "__uimode", "1");
+            if (s_a11yOn.load()) InteropCall(view, "__a11y", A11y::kPage);
             strncpy_s(s_uiModeLabel, Api4::ViewLabel(view).c_str(), _TRUNCATE);
             SKSE::log::info("Magelight: UI mode switched from view {} to {}", old, s_uiModeLabel);
             Emit(HostEvent::UIModeSwitched, view);

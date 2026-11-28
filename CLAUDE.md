@@ -31,6 +31,8 @@ src/LowMemoryCore.h         the low-memory guard's rules (1.8.0): what a page ne
 src/FocusShareCore.h        focus sharing's rules (1.9.0): which view a press moves the keyboard to, when it goes back
 src/HitTestCore.h           content hit testing's rules (1.9.2): which view under the pointer takes it, which pages are asked, the cursor's rule, the page function
 src/PageRootCore.h          page roots (1.9.2): the file system's containment test, the folders AddPageRoot takes, which root a page reads from
+src/A11yCore.h              the accessibility channel's rules (1.10.0): which reader messages pass, the per-view rate gate, which views deliver
+src/A11yScript.h            the page core's accessibility reader, window.magelight.a11y (names, roles, states, live regions, dialogs)
 papyrus/Magelight.psc       the script consumers compile against (staged as Scripts/Magelight.pex)
 views/gate/                 the version-gate notice page
 examples/                   manifest example mods (build.ps1 -Examples stages them)
@@ -62,6 +64,7 @@ tools/lowmemory-test/       src/LowMemoryCore.h's needs, floor, hysteresis, grow
 tools/focusshare-test/      src/FocusShareCore.h's press and settle rules (build.bat)
 tools/hittest-test/         src/HitTestCore.h's walk, cursor, mode and answer rules (build.bat)
 tools/pageroot-test/        src/PageRootCore.h's containment, folder rules and deepest root (build.bat); ingame/ = MgPageRootTest, AddPageRoot in game (-DMG_TEST_PLUGINS=ON, README)
+tools/a11y-test/            src/A11yCore.h's rules, then the page core's reader in Ultralight's WebKit (build.bat); ingame/ = MgA11yTest, a listener that logs every message (-DMG_TEST_PLUGINS=ON, README)
 tools/pagethread-test/      src/PageThreadCore.h: Decide, a replaced d3d11/dxgi, the handoff (no page frame dropped, the game thread never waits, a stuck page included), OwnedMutex released after a fault; src/CxxThrowCore.h: a thrown exception named and stopped at a mod's call, a fault not (build.bat)
 tools/load-test/            MgLoadTest, the in-game load kit for pageThread off and on (package.ps1 zips it; README has the protocol)
 docs/                       MANIFEST.md, CPP.md, SDK.md, PAPYRUS.md, VR_PRESENTER.md
@@ -622,3 +625,16 @@ a PR that touches `src/`, `api/`, `gpu/`, `build.ps1` or the SDK.
     `hitEmpty`, never its own rectangle walk; a new way to ask a page goes through `PageHasElementAt`, outside the
     lock and only for a page that reached DOM ready. `tools/hittest-test` checks the rules, and
     `tools/input-test`'s `hittest` section the page function in Ultralight's WebKit.
+32. **Pages read themselves aloud only while an assistive plugin listens** (1.10.0, `SetAccessibilityListener`,
+    `src/A11yCore.h`, `src/A11yScript.h`). The page core's reader is installed in every page but adds no listener
+    or observer until `'__a11y'` `"on"`: `SyncAccessibility` sends `"on"` / `"off"` to every view (the host's
+    keyboard page and inspectors aside) when `Api4::AccessibilityWanted` changes, under its own mutex so the last
+    call sends the last state, and a page core installed meanwhile starts in the state `s_a11yOn` held at install.
+    The reader never subscribes to `'__uimode'`: a page that subscribes later relies on its replay. UI mode entering
+    a view, and the sync turning on while a view holds it, send that view `"page"`. Its messages arrive on the
+    reserved `'__a11y'` channel from inside page script (render thread): `OnPageA11y` checks the prefix, the size,
+    that the text parses, that the view is shown and the rate gate, under `s_viewsMutex`, and
+    `Api4::DeliverAccessibility` calls the listeners outside every lock, on each mod's callback thread, through
+    `CallMod` and an SEH guard that removes a faulting listener. A password field's value never leaves the page.
+    `tools/a11y-test` checks the rules and the reader, on the page fiber and the page thread too; re-run it at
+    every SDK bump.

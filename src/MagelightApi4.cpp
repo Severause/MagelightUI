@@ -86,6 +86,8 @@ namespace Magelight::Api4 {
             Magelight::CursorSet cursor;   // 0.31.0: the manifest's default cursor, pushed to every view of the mod
             std::vector<std::filesystem::path> pageRoots;   // 1.9.2 AddPageRoot, Normalize'd; served at `net`
             std::map<ViewId, ViewRec> views;
+            MAGELIGHT_API::AccessibilityFn a11yFn = nullptr;   // 1.10.0 SetAccessibilityListener
+            void* a11yUser = nullptr;
             // Generation token: queued game-thread deliveries check it, so an
             // event queued just before UnregisterMod never reaches a freed user.
             std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
@@ -834,6 +836,7 @@ namespace Magelight::Api4 {
             // s_viewOwner rows stay until ViewDestroyed erases them (a row
             // pointing at a gone mod routes nowhere, which is the intent).
         }
+        Magelight::SyncAccessibility();   // its listener went with it
         // Exit is a game-thread task; the destroys must run AFTER it or the
         // host refuses to destroy the active UI-mode view. Tasks are FIFO.
         if (ownsUi) Magelight::ExitUIMode();
@@ -1227,6 +1230,8 @@ namespace Magelight::Api4 {
         if (n == "hittest") return 1;       // SetViewHitTest / manifest "hitTest" / the page's '__hittest' (1.9.2)
         if (n == "pageroot") return 1;      // AddPageRoot (1.9.2)
         if (n == "loadingscreen") return Magelight::LoadingScreenPagesAvailable() ? 1 : 0;   // SetViewLoadingScreen / manifest "loadingScreen" (1.10.0); flat, page thread
+        if (n == "a11y") return 1;          // SetAccessibilityListener, the page core's reader, magelight.a11y (1.10.0)
+        if (n == "uimodeview") return 1;    // GetUIModeView (1.10.0)
         if (n == "inspector") return (Magelight::DevModeEnabled() && Magelight::InspectorAvailable()) ? 1 : 0;
         return 0;
     }
@@ -1365,7 +1370,7 @@ namespace Magelight::Api4 {
                                         "cursorTint", "rebuildScale", "keyboardTheme", "prepaint", "uiModeCancel",
                                         "hostThemeReply", "tooltips", "scriptErrors", "pageVisibility",
                                         "keyboardCode", "auxButtons", "imeCandidates", "gamepad", "pageThread", "vrGaze", "mainMenu",
-                                        "polledKeys", "focusShare", "hitTest", "pageRoot", "loadingScreen" };
+                                        "polledKeys", "focusShare", "hitTest", "pageRoot", "loadingScreen", "a11y", "uiModeView" };
         std::string out = "{";
         bool first = true;
         for (const char* n : kNames) {
@@ -1949,6 +1954,96 @@ namespace Magelight::Api4 {
         PushRootLevels(mod);
         SKSE::log::info("Magelight[v4]: mod {} ('{}') pages may read {}", mod, name, Magelight::SysInfo::ForLog(root));
         return Result::Ok;
+    }
+
+    // 1.10.0 (A11yCore.h; CLAUDE.md invariant 32). The pages read while any mod has a listener: Magelight.cpp's
+    // SyncAccessibility asks AccessibilityWanted after every change here.
+    Result SetAccessibilityListener(ModId mod, MAGELIGHT_API::AccessibilityFn fn, void* user)
+    {
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            Mod* m = FindLocked(mod);
+            if (!m) return Result::InvalidMod;
+            m->a11yFn = fn;
+            m->a11yUser = fn ? user : nullptr;
+            name = m->modId;
+        }
+        SKSE::log::info("Magelight[v4]: mod {} ('{}') {} an accessibility listener", mod, name,
+                        fn ? "registered" : "removed");
+        Magelight::SyncAccessibility(/*askPage=*/fn != nullptr);
+        return Result::Ok;
+    }
+
+    bool AccessibilityWanted()
+    {
+        std::lock_guard<std::mutex> lk(s_mutex);
+        for (const auto& [id, m] : s_mods)
+            if (m.a11yFn) return true;
+        return false;
+    }
+
+    ViewId GetUIModeView()
+    {
+        return Magelight::IsUIModeActive() ? Magelight::GetUIModeView() : 0;
+    }
+
+    namespace {
+        struct A11ySink {
+            ModId id = 0;
+            CallbackThread thread = CallbackThread::GameThread;
+            MAGELIGHT_API::AccessibilityFn fn = nullptr;
+            void* user = nullptr;
+            std::shared_ptr<std::atomic<bool>> alive;
+        };
+
+        // SEH boundary: POD-only frame. A fault removes the mod's listener; a C++ exception ends that call (CallMod).
+        bool CallA11yGuarded(MAGELIGHT_API::AccessibilityFn fn, ViewId view, const char* msg, void* user, ModId id)
+        {
+            __try {
+                Magelight::CallMod("an accessibility listener", view, [&] { fn(view, msg, user); });
+                return true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                SKSE::log::error("Magelight[v4]: mod {} accessibility listener raised an SEH exception - it is removed", id);
+                return false;
+            }
+        }
+
+        void DropA11yListener(ModId id, MAGELIGHT_API::AccessibilityFn fn)
+        {
+            {
+                std::lock_guard<std::mutex> lk(s_mutex);
+                if (Mod* m = FindLocked(id); m && m->a11yFn == fn) { m->a11yFn = nullptr; m->a11yUser = nullptr; }
+            }
+            Magelight::SyncAccessibility();
+        }
+    }
+
+    void DeliverAccessibility(ViewId view, const std::string& message)
+    {
+        std::vector<A11ySink> sinks;
+        {
+            std::lock_guard<std::mutex> lk(s_mutex);
+            for (const auto& [id, m] : s_mods)
+                if (m.a11yFn) sinks.push_back({ id, m.thread, m.a11yFn, m.a11yUser, m.alive });
+        }
+        for (const A11ySink& s : sinks) {
+            if (!s.alive->load()) continue;
+            if (s.thread == CallbackThread::RenderThread) {
+                if (!CallA11yGuarded(s.fn, view, message.c_str(), s.user, s.id)) DropA11yListener(s.id, s.fn);
+                continue;
+            }
+            Magelight::GameTask::Post([s, view, message]() {
+                if (!s.alive->load()) return;
+                // Removed or replaced since: this message was for the listener that was there.
+                {
+                    std::lock_guard<std::mutex> lk(s_mutex);
+                    Mod* m = FindLocked(s.id);
+                    if (!m || m->a11yFn != s.fn || m->a11yUser != s.user) return;
+                }
+                if (!CallA11yGuarded(s.fn, view, message.c_str(), s.user, s.id)) DropA11yListener(s.id, s.fn);
+            });
+        }
     }
 
     std::shared_ptr<const PolledKeys::Rule> GetUIModePolledRule()

@@ -132,6 +132,26 @@ namespace MAGELIGHT_API {
             return m_v4->AddPageRoot(m_mod, absFolder) == Result::Ok;
         }
 
+        /// For an assistive plugin: fn hears the page core's accessibility
+        /// messages from every mod's shown pages (SetAccessibilityListener; one
+        /// JSON object per call, the page's own text: parse it as untrusted),
+        /// on this mod's callback thread. nullptr removes it. False when the
+        /// host is older than 1.10.0.
+        bool setAccessibilityListener(AccessibilityFn fn, void* user)
+        {
+            if (!m_v4 || !m_mod || m_v4->hostVersionNumber < 11000 || m_v4->QueryCapability("a11y") != 1)
+                return false;
+            return m_v4->SetAccessibilityListener(m_mod, fn, user) == Result::Ok;
+        }
+
+        /// The view that holds UI mode, any mod's; 0 when none or when the host
+        /// is older than 1.10.0.
+        ViewId uiModeView() const
+        {
+            if (!m_v4 || m_v4->hostVersionNumber < 11000 || m_v4->QueryCapability("uiModeView") != 1) return 0;
+            return m_v4->GetUIModeView();
+        }
+
         /// Called when UI mode LEAVES this view (Escape, its hotkey, a lost
         /// race, a load boundary) — the "the user closed it" signal. Also
         /// fires if the view never got UI mode (UIModeRefused).

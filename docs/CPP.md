@@ -1004,6 +1004,53 @@ if (api->hostVersionNumber >= 10902 && api->QueryCapability("pageRoot") == 1)
 - A URL that starts with `/` (`/MyMod/Scripts/Global.js`) does not resolve against the folder. Keep shared files on
   relative paths.
 
+## Screen readers (1.10.0)
+
+Magelight pages are drawn into the game's frame, so a screen reader sees nothing of them. An assistive plugin (a
+bridge to NVDA or another screen reader) can hear what a screen reader would say instead, for every mod's pages
+at once, with nothing for the page's own mod to do:
+
+```cpp
+// RenderThread: the messages arrive as the page changes; queue them for your speech thread, never block here.
+g_mod.acquire("MyReader", "My screen reader bridge", 1, 10, 0, CallbackThread::RenderThread);
+g_mod.setAccessibilityListener([](ViewId view, const char* json, void*) { SpeechQueue::Push(view, json); }, nullptr);
+```
+
+While any mod has a listener, the page core in every page reads its own page and sends one message per change.
+Each is a JSON object `{"v":1,"type":...}`:
+
+| `type` | When | Fields |
+|---|---|---|
+| `focus` | an element takes focus (in the page or a same-origin iframe) | `name`, `role`, `states`, `value`, `description`, `level`, `position`, `setSize`, `shortcut`; `active` for its `aria-activedescendant` |
+| `active` | a composite's active item changes: `aria-activedescendant` on the focused element, or an item that becomes `aria-selected` or `aria-current` in the focused composite (or, with nothing focused, anywhere: pages that move a highlight without focus) | as `focus` |
+| `state` | a state or value of the focused element (or its active item) changes; a checkbox, select or range changes | as `focus` |
+| `edit` | a text field's value changes | `name`, `role`, `value` |
+| `announce` | text added to a live region, once the region has been quiet for 250 ms (1.5 s at most, so streamed text reads in phrases); the page's own `magelight.a11y.announce` | `text`, `politeness` (`polite` or `assertive`), `role`, `name`; `source: "page"` for the page's own |
+| `dialog` | a dialog opens (`role="dialog"` or `"alertdialog"`, `<dialog open>`, `aria-modal="true"`) | `name`, `role`, `description` |
+| `page` | UI mode enters the view, or you register while a view holds it | `title`, `focus`, `dialog` |
+
+- `states` is a list of the words a screen reader says (`checked`, `not checked`, `mixed`, `selected`, `expanded`,
+  `collapsed`, `pressed`, `not pressed`, `disabled`, `required`, `read only`, `invalid`, `current`, `has popup`).
+  Any field may be absent; ignore keys you do not know, as later hosts may add some. `v` changes only if a field
+  changes meaning.
+- A password field's value never leaves the page: its messages carry `secret: true` and `length` instead.
+- The text is the page's own: parse it as untrusted input. The host checks only that it is a reader message (the
+  prefix, at most 8 KB, valid JSON).
+- Only a shown view's messages are delivered, at most 20 a second per view after a burst of 40; past that they are
+  dropped, never queued (`Magelight.log` counts them).
+- A page keeps an element and what it holds out with `data-ml-a11y="off"` (`<html>` for the whole page), for a page
+  that speaks through a route of its own.
+- `fn` runs on the mod's `callbackThread`. On `RenderThread` it runs inline, inside the page's script, on
+  Magelight's render thread (the page thread with `pageThread`): no game state, and never block, since every page
+  waits for it. `GameThread` gets each message as an SKSE task. A listener that faults is removed.
+- One listener per mod; `nullptr` removes it, as `UnregisterMod` does. The pages stop reading once the last
+  listener goes, so a game with no assistive plugin pays nothing.
+- `GetUIModeView()` (`MagelightMod::uiModeView()`) names the view that holds UI mode, any mod's, so the plugin can
+  say which page has the keyboard; `GetViewInfo` gives a view's name.
+
+How well a page reads is the page's own doing: real buttons and fields, labels on icon-only controls, live regions
+for chat and notifications. [SDK.md](SDK.md#screen-readers-1100) has the page author's side.
+
 ## When the game runs low on memory (1.8.0)
 
 Free commit is the room left under Windows' commit limit, which the game shares with every other program, plus (from
