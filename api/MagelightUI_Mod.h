@@ -47,6 +47,8 @@ namespace MAGELIGHT_API {
             float         uiScale      = 0.0f;    // 0 = host default
             DomReadyFn    onDomReady   = nullptr; // fires when the page's DOM is ready
             std::uint32_t hibernateMs  = 0;       // >0: release the View+texture after this long hidden
+                                                  // (host 1.10.0+: or this long loaded and never shown,
+                                                  // unless the view prepaints)
         };
 
         MagelightMod() = default;

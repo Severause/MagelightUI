@@ -370,4 +370,19 @@ namespace Magelight::LowMemory {
         if (!commitRaised && !videoRaised) return false;
         return (!commitRaised || commit.ReloadDue(nowMs)) && (!videoRaised || video.ReloadDue(nowMs));
     }
+
+    // ── Hibernation's budget (SetViewHibernate), for a hidden view ──
+    // The clock a view's budget runs from, 0 = none: its last hide, or for a view never shown the time its page
+    // became ready (0 while it loads), so a page nobody opens does not keep its View for the session.
+    // countNeverShown false (Magelight.json "hibernateNeverShown": false) gives a view never shown no clock.
+    inline std::uint64_t HibernateClockMs(std::uint64_t hiddenSinceMs, std::uint64_t readySinceMs, bool countNeverShown)
+    {
+        if (hiddenSinceMs) return hiddenSinceMs;
+        return countNeverShown ? readySinceMs : 0;
+    }
+
+    inline bool HibernateDue(std::uint32_t budgetMs, std::uint64_t clockMs, std::uint64_t nowMs)
+    {
+        return budgetMs != 0 && clockMs != 0 && nowMs > clockMs && nowMs - clockMs >= budgetMs;
+    }
 }

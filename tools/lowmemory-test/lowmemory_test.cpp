@@ -1,5 +1,6 @@
 // The low-memory guard (src/LowMemoryCore.h): what a page needs to open, the guard's floor, the lift's hysteresis and
-// minimum time, when released views load again and its backoff, the page files' growth room, the setting's clamp.
+// minimum time, when released views load again and its backoff, the page files' growth room, the setting's clamp,
+// and the clock a hibernation budget runs from.
 // Exit 0 when every check passes.
 #include "LowMemoryCore.h"
 
@@ -274,6 +275,20 @@ int main()
         c.Update(MB(10), 1000 + LM::kMinUpMs + LM::kReloadAfterLiftMs, MB(320));
         Check(!LM::ReleasedMayReload(c, w, 1000 + LM::kMinUpMs + LM::kReloadAfterLiftMs + 1),
               "reload: the commit guard up holds them though the video guard is due");
+    }
+
+    // Hibernation's budget.
+    {
+        Check(LM::HibernateClockMs(5000, 1000, true) == 5000 && LM::HibernateClockMs(5000, 0, false) == 5000,
+              "hibernate: a view hidden after a show counts from its hide");
+        Check(LM::HibernateClockMs(0, 1000, true) == 1000, "hibernate: a view never shown counts from its page's ready");
+        Check(LM::HibernateClockMs(0, 0, true) == 0, "hibernate: a view never shown has no clock while it loads");
+        Check(LM::HibernateClockMs(0, 1000, false) == 0, "hibernate: the setting off gives a view never shown no clock");
+        Check(!LM::HibernateDue(30000, 1000, 30999) && LM::HibernateDue(30000, 1000, 31000),
+              "hibernate: due once the budget has passed");
+        Check(!LM::HibernateDue(0, 1000, 1000000), "hibernate: no budget, never due");
+        Check(!LM::HibernateDue(30000, 0, 1000000), "hibernate: no clock, never due");
+        Check(!LM::HibernateDue(1, 2000, 1000), "hibernate: a clock stamped after the reading is not due");
     }
 
     std::printf("%s (%d failed)\n", g_fails ? "FAILED" : "ALL PASSED", g_fails);

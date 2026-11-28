@@ -541,6 +541,20 @@ right after `CreateViewEx`, before the world loads (manifest views take the
 page stays loaded. Such a view's DOM ready comes after its first show, so
 never wait for it before showing the view.
 
+A view you set to hibernate (`SetViewHibernate`, manifest `hibernateMs`) still
+loads with the others, so its first `ViewDomReady` arrives as before. From
+1.10.0 its budget also runs while it has never been shown, counted from its
+page's DOM ready (again after a `Navigate` or `ReloadView`, and after a
+resize or a scale change): past it the View and its texture are released, one such view per
+frame, and the first show loads the page again, as any show after
+hibernation does. A prepaint view (`SetViewPrepaint`) is the exception: it
+keeps its page and its painted texture until it has been shown and hidden, so
+its first open is still painted. Before 1.10.0 every view never shown kept its
+page and its full-screen texture for the whole session. What you sent the first page is
+gone with it: send a hibernating view its state on every `ViewDomReady`, or
+when you show it. The player can turn this off for every view with
+`"hibernateNeverShown": false` in `Magelight.json`.
+
 `ReloadView` and `Navigate` load the page again: calls made from then on wait
 for the new page's DOM ready, and `ViewReloaded` follows it. From 1.5.0 a
 `Navigate` to the page's own URL with only its fragment added or changed
