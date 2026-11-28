@@ -146,7 +146,10 @@ build.ps1                   build → C:\b\mgl (or MG_BUILD_DIR), stage → <tha
    every page. `resources/` must resolve.
 6. **Mouse rides the SKSE input sink + MenuCursor**; the window never gets WM mouse messages.
    `ToggleControls(..., storeState=false)`, turning off only the controls that are on and giving back only
-   those (`s_suspendedControls`), so a control another mod turned off stays off; `ForceExitUIMode` on every
+   those (`s_suspendedControls`), so a control another mod turned off stays off. The give-back is
+   storeState=true only when the game's shared saved copy was made or changed during the hold, and
+   `WatchFreeCameraCopy` turns back on what a free camera's copy made during a hold had off once that
+   copy is written back; `ForceExitUIMode` on every
    load boundary. The Windows cursor is
    not what a page follows, so while a page holds the mouse it is clipped to the game window (`ConfineCursor`,
    flat only) and let go on exit and on focus loss, or a freed one clicks on another monitor too.

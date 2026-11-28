@@ -4165,28 +4165,100 @@ namespace Magelight {
         return s.empty() ? "empty" : s;
     }
 
-    // The control set UI mode suspends (true) or gives back (false). storeState=false: a transient toggle
-    // that can never bake into a save; Console stays reachable as an escape hatch. Fighting is suspended only
+    // The control set UI mode suspends (true) or gives back (false). The suspend is storeState=false, a transient
+    // toggle that can never bake into a save; Console stays reachable as an escape hatch. Fighting is suspended only
     // without the focus menu: the engine sheathes drawn weapons and puts readied spells away the moment
     // fighting goes off, and the focus menu's menu context already keeps attack and block from the game. The
     // suspend takes only the controls that are on, and the give-back turns on only what it took
     // (s_suspendedControls), so a control another mod switched off before UI mode stays off after it. An entry
     // while a controls hold still has them adds to the set rather than replacing it: they are off by then.
-    static std::atomic<std::underlying_type_t<RE::ControlMap::UEFlag>> s_suspendedControls{ 0 };
+    // The game also keeps copies of the controls that it writes back later, and a copy made while UI mode holds them
+    // has them off. The shared one (sitting, crafting menus, the player's life state): the give-back turns them on in
+    // it too (storeState=true) when it was made or changed during the hold, never in one from before it, which may
+    // have them off for a reason of its own. The free camera's own copy: WatchFreeCameraCopy. All of it game thread.
+    using ControlBits = std::underlying_type_t<RE::ControlMap::UEFlag>;
+    static std::atomic<ControlBits> s_suspendedControls{ 0 };
+    static std::atomic<ControlBits> s_freeCamCopyTaken{ 0 };   // the controls a free camera's copy has off because of a hold
+    static bool        s_freeCamOnAtHold = false;              // a free camera is on, and the hold has seen it
+    static ControlBits s_storedAtHold = 0;                     // the shared copy as the hold found it
+
+    // Flat only: VR has no free camera state.
+    static bool FreeCameraOn()
+    {
+        if (VR::IsVRRuntime()) return false;
+        const auto* cam = RE::PlayerCamera::GetSingleton();
+        return cam && cam->IsInFreeCameraMode();
+    }
+
     static void SetGameControlsSuspended(RE::ControlMap* cm, bool suspend)
     {
         using UEFlag = RE::ControlMap::UEFlag;
+        auto& rt = cm->GetRuntimeData();
         if (suspend) {
             // Scoped enum without a free operator| — combine the bits directly.
             auto bits = std::to_underlying(UEFlag::kMovement) | std::to_underlying(UEFlag::kLooking) |
                         std::to_underlying(UEFlag::kActivate) | std::to_underlying(UEFlag::kMenu) |
                         std::to_underlying(UEFlag::kPOVSwitch) | std::to_underlying(UEFlag::kWheelZoom);
             if (!s_focusMenuRegistered) bits |= std::to_underlying(UEFlag::kFighting);
-            const auto take = bits & cm->GetRuntimeData().enabledControls.underlying();
-            s_suspendedControls.fetch_or(take);
+            const auto enabled = rt.enabledControls.underlying();
+            const auto take = bits & enabled;
+            ControlBits owed = 0;
+            if (!s_suspendedControls.load()) {
+                s_freeCamOnAtHold = FreeCameraOn();
+                s_storedAtHold = rt.storedControls.underlying();
+                // A free camera that has already written back a copy from an earlier hold left these off: this hold
+                // owes them, so its give-back turns them on.
+                if (!s_freeCamOnAtHold) owed = s_freeCamCopyTaken.exchange(0) & bits & ~enabled;
+            }
+            s_suspendedControls.fetch_or(take | owed);
             if (take) cm->ToggleControls(static_cast<UEFlag>(take), false, false);
         } else if (const auto taken = s_suspendedControls.exchange(0)) {
-            cm->ToggleControls(static_cast<UEFlag>(taken), true, false);
+            // A free camera started during the hold copied them off: WatchFreeCameraCopy gives them back at its exit.
+            if (FreeCameraOn()) {
+                if (!s_freeCamOnAtHold) s_freeCamCopyTaken.fetch_or(taken);
+            } else {
+                s_freeCamCopyTaken.fetch_and(~taken);   // given back here
+            }
+            const auto stored = rt.storedControls.underlying();
+            const bool intoCopy = stored != std::to_underlying(UEFlag::kInvalid) && stored != s_storedAtHold;
+            cm->ToggleControls(static_cast<UEFlag>(taken), true, intoCopy);
+        }
+    }
+
+    // The free camera copies the controls on entry and writes the copy back on exit (OStim turns it on for its
+    // scenes), so one that starts while UI mode holds them would turn them off again after UI mode gave them back.
+    // Notes such an entry while the hold lasts; once the camera has left, the hold gives those controls back, or
+    // with UI mode gone this turns on the ones still off. A camera that leaves during the hold also wrote back the
+    // controls from before it: the page holds again the ones that came back on, and drops the ones its copy had off
+    // for another reason. Game thread; GameBookkeeping posts it a few times a second while there is work.
+    static void WatchFreeCameraCopy()
+    {
+        auto* cm = RE::ControlMap::GetSingleton();
+        if (!cm) return;
+        const bool freeCam = FreeCameraOn();
+        if (const auto held = s_suspendedControls.load()) {
+            if (freeCam && !s_freeCamOnAtHold) {
+                s_freeCamCopyTaken.fetch_or(held);
+                s_freeCamOnAtHold = true;
+            } else if (!freeCam && s_freeCamOnAtHold) {
+                s_freeCamOnAtHold = false;
+                const auto enabled = cm->GetRuntimeData().enabledControls.underlying();
+                const auto owed = s_freeCamCopyTaken.exchange(0);
+                const auto keep = (held & (enabled | owed)) | (owed & ~enabled);
+                s_suspendedControls.store(keep);
+                if (const auto relive = keep & enabled)
+                    cm->ToggleControls(static_cast<RE::ControlMap::UEFlag>(relive), false, false);
+            }
+            return;
+        }
+        if (freeCam) return;
+        if (const auto taken = s_freeCamCopyTaken.exchange(0)) {
+            const auto off = taken & ~cm->GetRuntimeData().enabledControls.underlying();
+            if (off) {
+                cm->ToggleControls(static_cast<RE::ControlMap::UEFlag>(off), true, true);
+                SKSE::log::info("Magelight: controls 0x{:X} given back after the free camera's exit (its copy was "
+                                "made while a page held them)", off);
+            }
         }
     }
 
@@ -9875,6 +9947,12 @@ float4 ps_straight(VSOut i) : SV_Target {
         static int uiFrames = 0;
         static int offFrames = -1;   // frames since the last exit; -1 = no exit sample pending
         ConfineCursor(s_focused.load());
+        // A few times a second while controls are held or a free camera's copy waits (WatchFreeCameraCopy).
+        static int freeCamFrames = 0;
+        if ((s_suspendedControls.load() || s_freeCamCopyTaken.load()) && !VR::IsVRRuntime() && ++freeCamFrames >= 10) {
+            freeCamFrames = 0;
+            GameTask::Post([]() { WatchFreeCameraCopy(); });
+        }
         if (s_focused.load()) {
             if (s_focusMenuHideSeen.load()) CheckFocusMenuClosed();
             s_memAfterUiMs.store(0);   // back in UI mode: the after-UI memory line waits for this exit
@@ -12915,6 +12993,7 @@ float4 ps_straight(VSOut i) : SV_Target {
         SetUIMode(false);
         s_exitWithoutHold = false;
         EndControlsHold("load boundary", s_heldGen.load());
+        s_freeCamCopyTaken.store(0);   // the load sets the controls; a copy from before it is no longer written back
     }
 
     void EnterUIMode(ViewId view) { EnterUIModeEx(view, false); }
