@@ -1,0 +1,22 @@
+{
+  "modId": "MagelightDemo",
+  "name": "Magelight demo",
+  "version": "0.0.2",
+  "views": {
+    "hud": {
+      "path": "views/hud/index.html",
+      "layer": "hud",
+      "anchor": "top-right",
+      "x": 24, "y": 24, "w": 260, "h": 70,
+      "clickThrough": true,
+      "startVisible": true,
+      "hotkey": "F10"
+    },
+    "panel": {
+      "path": "views/panel/index.html",
+      "layer": "panel",
+      "x": 40, "y": 40, "w": 480, "h": 240,
+      "hotkey": "F11"
+    }
+  }
+}

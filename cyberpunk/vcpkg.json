@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "magelight-cyberpunk",
+  "version-string": "0.1.0",
+  "description": "MagelightCP - Magelight manifest mods on Cyberpunk 2077 (RED4ext + Ultralight)",
+  "dependencies": [
+    "nlohmann-json",
+    "red4ext-sdk"
+  ]
+}
